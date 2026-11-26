@@ -363,9 +363,7 @@ class TestFDMT:
 
     @pytest.mark.parametrize("cls", [FDMT, FDMTFFT])
     def test_stepper_packed(self, cls: type, cuda: str, xp: Lib) -> None:
-        packed = pack_lsb_first(
-            np.random.default_rng(18).integers(0, 4, (64, 256)), 2
-        )
+        packed = pack_lsb_first(np.random.default_rng(18).integers(0, 4, (64, 256)), 2)
         want = cls(*FDMT_ARGS, backend=cuda).execute(packed, nbits=2)
         eng = cls(*FDMT_ARGS, backend=cuda)
         with pytest.raises(TypeError):
@@ -380,7 +378,7 @@ class TestFDMT:
     def test_stepper_dmt_buffer(self, cuda: str, xp: Lib) -> None:
         fdmt = FDMT(*FDMT_ARGS, int_tree=False, backend=cuda)
         dmt = xp.empty(fdmt.plan.dmt_size, np.float32)
-        fdmt.reset(xp.asarray(np.zeros((64, 256), dtype=np.float32)), dmt)
+        fdmt.reset(xp.asarray(np.zeros((64, 256), dtype=np.float32)), dmt=dmt)
         fdmt.advance_until_remaining(0)
         assert xp.ptr(fdmt.finalize()) == xp.ptr(dmt)
 
@@ -581,6 +579,19 @@ class TestCohFDMT:
 # with no cycle-count sleeps.
 
 
+def _load_library(names: tuple[str, ...]) -> Any:  # noqa: ANN401
+    """The first of `names` that loads, or skip the test."""
+    import ctypes  # noqa: PLC0415
+
+    for name in names:
+        try:
+            return ctypes.CDLL(name)
+        except OSError:
+            continue
+    pytest.skip(f"none of {', '.join(names)} could be loaded")
+    return None
+
+
 class _StreamGate:
     """Host-controlled GPU stream barrier backed by mapped pinned memory."""
 
@@ -588,17 +599,26 @@ class _StreamGate:
         import ctypes
 
         self._ctypes = ctypes
-        self._cuda = ctypes.CDLL("libcuda.so.1")
-        self._cudart = ctypes.CDLL("libcudart.so")
+        self._cuda = _load_library(("libcuda.so.1", "libcuda.so"))
+        # Runtime installs often ship only the versioned library.
+        self._cudart = _load_library(
+            ("libcudart.so", "libcudart.so.13", "libcudart.so.12", "libcudart.so.11.0")
+        )
         self._wait_fn = getattr(
             self._cuda, "cuStreamWaitValue32_v2", self._cuda.cuStreamWaitValue32
         )
         host_ptr = ctypes.c_void_p()
         dev_ptr = ctypes.c_void_p()
         # cudaHostAllocMapped = 2
-        if self._cudart.cudaHostAlloc(ctypes.byref(host_ptr), ctypes.c_size_t(4), 2) != 0:
+        if (
+            self._cudart.cudaHostAlloc(ctypes.byref(host_ptr), ctypes.c_size_t(4), 2)
+            != 0
+        ):
             pytest.skip("cudaHostAllocMapped unavailable")
-        if self._cudart.cudaHostGetDevicePointer(ctypes.byref(dev_ptr), host_ptr, 0) != 0:
+        if (
+            self._cudart.cudaHostGetDevicePointer(ctypes.byref(dev_ptr), host_ptr, 0)
+            != 0
+        ):
             self._cudart.cudaFreeHost(host_ptr)
             pytest.skip("cudaHostGetDevicePointer unavailable")
         self._host_ptr = host_ptr
@@ -641,7 +661,9 @@ def torch(cuda: str) -> Any:  # noqa: ANN401, ARG001
 
 
 @contextlib.contextmanager
-def slow_producer(torch: Any, stream: Any, src: Any) -> Iterator[tuple[Any, _StreamGate]]:  # noqa: ANN401
+def slow_producer(
+    torch: Any, stream: Any, src: Any
+) -> Iterator[tuple[Any, _StreamGate]]:  # noqa: ANN401
     """On ``stream``: wait on a host gate, then copy ``src`` into a new tensor."""
     with _StreamGate() as gate, torch.cuda.stream(stream):
         x = torch.zeros_like(src)
@@ -800,7 +822,8 @@ def cp(cuda: str) -> Any:  # noqa: ANN401, ARG001
 
 @contextlib.contextmanager
 def busy_producer(
-    cp: Any, wf: np.ndarray  # noqa: ANN401
+    cp: Any,
+    wf: np.ndarray,  # noqa: ANN401
 ) -> Iterator[tuple[Any, Any, _StreamGate]]:
     """A waterfall written on a new stream after the host opens the gate."""
     src = cp.asarray(wf)

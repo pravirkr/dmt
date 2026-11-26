@@ -440,7 +440,8 @@ private:
         constexpr SizeType kMaxGeometries = 4;
         auto it                           = m_geos.find(n);
         if (it != m_geos.end()) {
-            if (const auto lru = std::find(m_geo_lru.begin(), m_geo_lru.end(), n);
+            if (const auto lru =
+                    std::find(m_geo_lru.begin(), m_geo_lru.end(), n);
                 lru != m_geo_lru.end()) {
                 std::rotate(lru, lru + 1, m_geo_lru.end());
             }
@@ -449,12 +450,11 @@ private:
                 m_geos.erase(m_geo_lru.front());
                 m_geo_lru.erase(m_geo_lru.begin());
             }
-            auto built =
-                std::make_unique<Geometry>(n, !m_deferred.deferring());
-            it = m_geos.emplace(n, std::move(built)).first;
+            auto built = std::make_unique<Geometry>(n, !m_deferred.deferring());
+            it         = m_geos.emplace(n, std::move(built)).first;
             m_geo_lru.push_back(n);
         }
-        auto& g = it->second;
+        auto& g                = it->second;
         const auto spec_floats = g->n_tiles * m_nact * kBinsFl;
         if (m_deferred.size(m_spectra) < spec_floats) {
             m_deferred.assign(m_spectra, spec_floats, 0.0F);

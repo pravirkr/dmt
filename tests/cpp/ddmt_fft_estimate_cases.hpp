@@ -39,12 +39,12 @@ struct Case {
 // segment directly through DDMTFFTEngineConfig::max_segment.
 inline std::unique_ptr<algorithms::detail::DDMTFFTEngine>
 make_capped_engine(const Case& c, const Exec& exec, bool defer) {
-    const algorithms::detail::DDMTFFTEngineConfig cfg{
-        .nbeams           = c.nbeams,
-        .exec             = exec,
-        .options          = c.options,
-        .max_segment      = c.cap,
-        .defer_allocation = defer};
+    const algorithms::detail::DDMTFFTEngineConfig cfg{.nbeams      = c.nbeams,
+                                                      .exec        = exec,
+                                                      .options     = c.options,
+                                                      .max_segment = c.cap,
+                                                      .defer_allocation =
+                                                          defer};
     if (exec.backend == Backend::kCPU) {
         return algorithms::detail::make_ddmt_fft_cpu(c.plan, cfg);
     }
@@ -59,7 +59,8 @@ make_capped_engine(const Case& c, const Exec& exec, bool defer) {
 inline DDMTFFTMemoryUsage usage_of(const DDMTFFT& eng) {
     return eng.get_memory_usage();
 }
-inline DDMTFFTMemoryUsage usage_of(const algorithms::detail::DDMTFFTEngine& eng) {
+inline DDMTFFTMemoryUsage
+usage_of(const algorithms::detail::DDMTFFTEngine& eng) {
     return eng.memory_usage();
 }
 
@@ -152,8 +153,7 @@ void host_call(Engine& eng,
         eng.execute(wf, nsamps, dmt);
     } else {
         const std::vector<uint8_t> wf(
-            nbeams * nsamps *
-                bit_pack_utils::packed_row_bytes(nchans, nbits),
+            nbeams * nsamps * bit_pack_utils::packed_row_bytes(nchans, nbits),
             0);
         eng.execute_time_major(wf, nsamps, dmt);
     }

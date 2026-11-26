@@ -1007,7 +1007,6 @@ private:
     mutable DevBuf<float> m_view_time;
     mutable DevBuf<float> m_view_d;
     mutable std::unique_ptr<utils::CUFFTManager> m_view_c2r;
-    mutable SizeType m_view_batch{0};
     mutable std::vector<float> m_view_h;
     mutable bool m_view_h_valid{false};
 
@@ -1546,30 +1545,35 @@ private:
     }
 
     // Beam 0 of the current level in the time domain, in batches of
-    // kViewBatch rows through a small C2R plan.
+    // kViewBatch rows through one small C2R plan. The plan is sized once,
+    // for the widest level (at most kViewBatch rows), and a partial last
+    // batch runs it whole: the rows past the tail hold stale or zeroed
+    // spectra and are never trimmed into the view. Re-planning per level or
+    // per partial batch cost ~3 ms per level view on an L40S.
     void materialize_view() const {
         if (m_view_valid) {
             return;
         }
         gpu_utils::set_device(m_device_id);
-        const auto& g   = *m_step_geo;
-        const auto s    = m_step_stream;
+        const auto& g    = *m_step_geo;
+        const auto s     = m_step_stream;
         const auto rows  = m_plan->get_container().state_shape[m_level].ncoords;
         const auto nsv   = view_nsamps();
-        const auto batch = std::min(kViewBatch, rows);
-        if (!m_view_c2r || m_view_batch != batch) {
+        const auto batch = std::min(kViewBatch, m_max_coords);
+        if (!m_view_c2r) {
             m_view_c2r = std::make_unique<utils::CUFFTManager>(
                 utils::FFTKind::kC2R, g.n_fft, batch, m_device_id, g.n_fft,
                 g.nb);
-            m_view_batch = batch;
             m_view_spec.reserve(batch * g.nb);
             m_view_time.reserve(batch * g.n_fft);
+            // Defined values in the rows a partial batch leaves untouched.
+            gpu_utils::check_gpu_call(
+                cudaMemsetAsync(m_view_spec.data(), 0, m_view_spec.bytes(), s),
+                "FDMTFFT (cuda): view");
         }
         m_view_d.reserve(m_max_coords * std::max(nsv, m_nsamps_out));
         const auto skip = m_geom.skip;
         const auto cnt  = nsv;
-        // Declared outside the loop so a partial-tail plan outlives stream work.
-        std::unique_ptr<utils::CUFFTManager> tail_c2r;
         for (SizeType r0 = 0; r0 < rows; r0 += batch) {
             const auto n = std::min(batch, rows - r0);
             const dim3 grid(blocks_for(static_cast<int64_t>(g.nb)),
@@ -1579,18 +1583,11 @@ private:
                 static_cast<int64_t>(n), static_cast<int64_t>(g.nb));
             fourier_gpu::hermitian_edges(m_view_spec.data(), n, g.nb, g.n_bins,
                                          g.n_fft, s);
-            utils::CUFFTManager* c2r = m_view_c2r.get();
-            if (n < batch) {
-                tail_c2r = std::make_unique<utils::CUFFTManager>(
-                    utils::FFTKind::kC2R, g.n_fft, n, m_device_id, g.n_fft,
-                    g.nb);
-                c2r = tail_c2r.get();
-            }
-            c2r->execute(
-                cuda::std::span<float>(m_view_time.data(), n * g.n_fft),
+            m_view_c2r->execute(
+                cuda::std::span<float>(m_view_time.data(), batch * g.n_fft),
                 cuda::std::span<ComplexTypeGPU>(
                     reinterpret_cast<ComplexTypeGPU*>(m_view_spec.data()),
-                    n * g.nb),
+                    batch * g.nb),
                 s);
             const dim3 tgrid(blocks_for(static_cast<int64_t>(cnt)),
                              grid_y(static_cast<int64_t>(n)));

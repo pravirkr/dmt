@@ -394,8 +394,8 @@ TEST_CASE("FDMTFFT GPU forced segments match the CPU",
                 .exec              = Exec::cpu(),
                 .fractional_delays = frac,
                 .max_segment       = 1024};
-            auto gpu_cfg = base;
-            gpu_cfg.exec = test::gpu_exec();
+            auto gpu_cfg   = base;
+            gpu_cfg.exec   = test::gpu_exec();
             const auto cpu = algorithms::detail::make_fdmt_fft_cpu(plan, base);
             const auto gpu =
                 algorithms::detail::make_fdmt_fft_gpu(plan, gpu_cfg);
@@ -528,12 +528,12 @@ TEST_CASE("DDMTFFT GPU large uniform run and forced segments",
         .exec        = Exec::cpu(),
         .options     = {.method = DDMTFFTMethod::kNUFFT},
         .max_segment = 1024};
-    auto seg_gpu = seg_cpu;
-    seg_gpu.exec = test::gpu_exec();
+    auto seg_gpu     = seg_cpu;
+    seg_gpu.exec     = test::gpu_exec();
     const auto cpu_s = algorithms::detail::make_ddmt_fft_cpu(plan_s, seg_cpu);
     const auto gpu_s = algorithms::detail::make_ddmt_fft_gpu(plan_s, seg_gpu);
     const auto ns2   = SizeType{6000};
-    const auto n2    = plan_s.get_dm_arr().size() * cpu_s->get_output_nsamps(ns2);
+    const auto n2 = plan_s.get_dm_arr().size() * cpu_s->get_output_nsamps(ns2);
     std::vector<float> c(n2);
     std::vector<float> d(n2);
     const auto wf2 = noise(32 * ns2, 401);

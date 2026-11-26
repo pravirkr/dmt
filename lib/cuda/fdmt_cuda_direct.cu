@@ -122,8 +122,7 @@ void FDMTCudaEngine::run_top_impl(const T* level_state,
     constexpr int kWarps = 8;
     constexpr int kSamps = 32 * detail::kTopSampsPerLane;
     const int active     = static_cast<int>(m_active);
-    auto* rings =
-        reinterpret_cast<T*>(thrust::raw_pointer_cast(t.ring.data()));
+    auto* rings = reinterpret_cast<T*>(thrust::raw_pointer_cast(t.ring.data()));
     if (t.target_ring) {
         const dim3 grid(t.ntrials, 1, m_nbeams);
         gpu_utils::check_kernel_launch_params(grid, dim3(kWarps * 32));
@@ -136,7 +135,8 @@ void FDMTCudaEngine::run_top_impl(const T* level_state,
             thrust::raw_pointer_cast(t.out_row.data()), t.ntrials, out,
             out_beam_stride, out_row_stride, m_chunk_pos, active, 0,
             m_skew_nbatches > 1 ? 0 : -1, true);
-        gpu_utils::check_last_gpu_error("FDMT (cuda): direct top target failed");
+        gpu_utils::check_last_gpu_error(
+            "FDMT (cuda): direct top target failed");
         if (update_meta) {
             m_top_stale     = false;
             m_current_level = t.target;
@@ -158,8 +158,8 @@ void FDMTCudaEngine::run_top_impl(const T* level_state,
     launch_top_ring_update<T>(level_state, level_stride, stream);
     gpu_utils::check_last_gpu_error("FDMT (cuda): direct top rings failed");
     if (update_meta) {
-        m_top_filled = std::min<SizeType>(static_cast<SizeType>(t.max_ring),
-                                          m_top_filled + m_active);
+        m_top_filled    = std::min<SizeType>(static_cast<SizeType>(t.max_ring),
+                                             m_top_filled + m_active);
         m_top_stale     = !t.skewed;
         m_current_level = t.target;
     }

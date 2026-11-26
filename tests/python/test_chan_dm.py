@@ -304,7 +304,9 @@ def test_skewed_path_matches_the_tree(smear: bool) -> None:
     rng = np.random.default_rng(17)
     codes = [rng.integers(0, 256, (nchans, nsamps), dtype=np.uint8) for _ in range(3)]
     tree = FDMT(plan, use_box_smearing=smear, nthreads=1)
-    budget = FDMT.estimate_memory(plan, use_box_smearing=smear, nthreads=1).usage.total // 2
+    budget = (
+        FDMT.estimate_memory(plan, use_box_smearing=smear, nthreads=1).usage.total // 2
+    )
     skew = FDMT(plan, use_box_smearing=smear, nthreads=1, max_memory_bytes=budget)
     assert tree.history_state_size() != skew.history_state_size()  # skewed path
     a = np.concatenate(

@@ -840,7 +840,8 @@ TEST_CASE("FDMTFFT estimate_memory equals the constructed instance (cpu)",
         std::vector<float> dmt(plan.get_dmt_size(), 0.0F);
         f.execute_time_major(packed, 8, dmt);
         const auto after_tm = f.get_memory_usage();
-        CHECK(after_tm.workspace >= base.workspace + (32 * 256 * sizeof(float)));
+        CHECK(after_tm.workspace >=
+              base.workspace + (32 * 256 * sizeof(float)));
 
         // Stepper allocates m_step_geo, m_step_spectra, m_state_a/b.
         std::vector<float> wf(32 * 256, 0.0F);

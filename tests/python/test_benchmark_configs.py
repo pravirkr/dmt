@@ -13,7 +13,7 @@ import pytest
 @pytest.fixture
 def plot_suite() -> Iterator[ModuleType]:
     pytest.importorskip("matplotlib")
-    path = Path(__file__).resolve().with_name("plot_suite.py")
+    path = Path(__file__).resolve().parents[2] / "bench" / "scripts" / "plot_suite.py"
     spec = importlib.util.spec_from_file_location("dmt_test_plot_suite", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module

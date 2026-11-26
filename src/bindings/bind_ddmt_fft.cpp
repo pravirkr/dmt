@@ -409,24 +409,23 @@ void bind_ddmt_fft(py::module_& mod) {
              [](const DDMTFFT& e) {
                  py::array_t<float, py::array::c_style> hist(
                      static_cast<py::ssize_t>(e.history_state_size()));
-                 e.save_history(
-                     std::span<float>(hist.mutable_data(), hist.size()));
+                 const std::span<float> out(hist.mutable_data(), hist.size());
+                 {
+                     const py::gil_scoped_release release;
+                     e.save_history(out);
+                 }
                  return hist;
              })
         .def(
             "load_history",
             [](DDMTFFT& e, const py::array& obj) {
-                if (obj.dtype().kind() != 'f' || obj.itemsize() != 4) {
-                    throw std::invalid_argument(fmt::format(
-                        "DDMTFFT.load_history: expects a float32 array, got "
-                        "dtype '{}'",
-                        std::string(py::str(obj.dtype()))));
-                }
-                auto hist = py::array_t<float, py::array::c_style>(obj);
-                e.load_history(
-                    std::span<const float>(hist.data(), hist.size()));
+                const auto hist = require_contiguous_array<float>(
+                    obj, "DDMTFFT.load_history", "float32");
+                const std::span<const float> in(hist.data(), hist.size());
+                const py::gil_scoped_release release;
+                e.load_history(in);
             },
-            "history"_a)
+            py::arg("history").noconvert())
         .def(
             "save_history",
             [](const DDMTFFT& e, const DeviceArray& out,

@@ -51,9 +51,10 @@ struct DDMTFFTOptions {
 /**
  * @brief Memory a DDMTFFT instance holds, in bytes: host memory on the CPU
  * backend, device memory on a GPU backend (`pinned` apart). Buffers are
- * created by the calls that need them and kept (see DDMTFFT::estimate_memory()).
- * Not counted: the caller's input and output, the FFT libraries' plan objects
- * (cuFFT work areas are counted), and per-call temporaries.
+ * created by the calls that need them and kept (see
+ * DDMTFFT::estimate_memory()). Not counted: the caller's input and output, the
+ * FFT libraries' plan objects (cuFFT work areas are counted), and per-call
+ * temporaries.
  */
 struct DDMTFFTMemoryUsage {
     SizeType plan{0};      ///< Delay and method tables (NUFFT plans)

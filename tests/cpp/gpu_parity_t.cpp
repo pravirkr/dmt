@@ -120,8 +120,7 @@ TEST_CASE("parity: FDMT on every GPU backend matches the CPU bitwise",
                                     const auto max_val =
                                         nbits == 0
                                             ? 7U
-                                            : test::max_sample_value(
-                                                  nbits);
+                                            : test::max_sample_value(nbits);
                                     // Three consecutive blocks: valid mode
                                     // streams history across them.
                                     for (unsigned blk = 0; blk < 3; ++blk) {
@@ -331,9 +330,7 @@ TEST_CASE("parity: DDMT on every GPU backend matches the CPU bitwise",
                                  2.0F, 0.0F, exec_of(backend), nbits, kill,
                                  nbeams);
                         const auto max_val =
-                            nbits == 32
-                                ? 9U
-                                : test::max_sample_value(nbits);
+                            nbits == 32 ? 9U : test::max_sample_value(nbits);
                         const auto dm_count =
                             cpu.get_plan().get_dm_arr().size();
                         // Warm-up blocks shorter than the delay, then normal
@@ -413,10 +410,9 @@ TEST_CASE("parity: DDMT GPU time-major and multi-gulp inputs match the CPU",
                          exec_of(backend), nbits);
                 constexpr SizeType nsamps = 900;
                 // (nsamps, nchans): channels of one sample packed together.
-                const auto ints =
-                    random_ints(nsamps * nchans,
-                                test::max_sample_value(nbits), 5);
-                const auto fb       = test::pack_rows(ints, nsamps, nchans, nbits);
+                const auto ints = random_ints(nsamps * nchans,
+                                              test::max_sample_value(nbits), 5);
+                const auto fb   = test::pack_rows(ints, nsamps, nchans, nbits);
                 const auto dm_count = cpu.get_plan().get_dm_arr().size();
                 // Stateless: nsamps - max_delay, as for a fresh stream.
                 const auto nout = cpu.get_output_nsamps(nsamps);

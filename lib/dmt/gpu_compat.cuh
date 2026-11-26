@@ -67,7 +67,6 @@ namespace cuda = ::thrust::hip;
     hipDeviceAttributeMaxSharedMemoryPerMultiprocessor
 #define cudaFuncAttributeMaxDynamicSharedMemorySize                            \
     hipFuncAttributeMaxDynamicSharedMemorySize
-#define cudaDevAttrL2CacheSize hipDeviceAttributeL2CacheSize
 #define cudaDevAttrMultiProcessorCount hipDeviceAttributeMultiprocessorCount
 
 // Runtime: functions

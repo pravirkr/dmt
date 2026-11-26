@@ -66,8 +66,7 @@ inline constexpr int kHostStagingMaxWorkers      = 4;
 [[nodiscard]] constexpr SizeType
 host_staging_pinned_bytes(SizeType output_bytes, int nthreads) noexcept {
     const SizeType need =
-        SizeType{2} *
-        static_cast<SizeType>(host_staging_workers(nthreads)) *
+        SizeType{2} * static_cast<SizeType>(host_staging_workers(nthreads)) *
         kHostStagingChunkBytes;
     return output_bytes >= need ? need : 0;
 }
@@ -82,7 +81,8 @@ enum class FDMTPath : uint8_t {
     kAuto,     ///< choose the fastest path that fits max_memory_bytes
     kTree,     ///< plain tree (CPU: no skewed window; GPU: no direct/skewed)
     kDirect,   ///< GPU unskewed direct levels / top (CPU: alias of kTree)
-    kSkewed,   ///< skewed-window path (CPU: FDMTSkewCpu; GPU: skewed direct / windowed top)
+    kSkewed,   ///< skewed-window path (CPU: FDMTSkewCpu; GPU: skewed direct /
+               ///< windowed top)
     kWindowed, ///< reported by GPU subband search with windowed top
 };
 
@@ -270,8 +270,9 @@ std::unique_ptr<FDMTEngine> make_fdmt_cpu(const plans::FDMTPlan& plan,
                                           const FDMTEngineConfig& cfg);
 std::unique_ptr<FDMTEngine> make_fdmt_gpu(const plans::FDMTPlan& plan,
                                           const FDMTEngineConfig& cfg);
-/// GPU: the automatic chunk whose two state halves fit the device's L2
-/// (fdmt_cache_chunk()) for this plan and config; 0 when none fits.
+/// GPU: the automatic chunk whose two state halves fit a fixed 96 MiB cache
+/// target, the L40S's L2 (fdmt_cache_chunk()) for this plan and config; 0 when
+/// none fits.
 SizeType fdmt_gpu_cache_chunk(const plans::FDMTPlan& plan,
                               const FDMTEngineConfig& cfg);
 

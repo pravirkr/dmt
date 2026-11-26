@@ -252,9 +252,9 @@ py::array_t<float, py::array::c_style>
 fdmt_output_buffer(const Engine& fdmt,
                    std::string_view name,
                    const std::optional<py::array>& out) {
-    return float_output_buffer(
-        fdmt.get_nbeams() * fdmt.get_plan().get_dmt_size(), name,
-        "nbeams * plan.dmt_size", out);
+    return float_output_buffer(fdmt.get_nbeams() *
+                                   fdmt.get_plan().get_dmt_size(),
+                               name, "nbeams * plan.dmt_size", out);
 }
 
 // FDMT execute(): runs `run(dmt_span)` into the output buffer

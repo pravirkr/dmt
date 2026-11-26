@@ -314,7 +314,7 @@ TEST_CASE("DDMTFFT geometry cache evicts one LRU entry (gpu)",
         std::vector<float> out(ndm * eng.get_output_nsamps(n));
         eng.execute(wf, out);
     }
-    const auto after_one  = eng.get_memory_usage();
+    const auto after_one = eng.get_memory_usage();
     for (const SizeType n : lens) {
         const std::vector<float> wf(nchans * n, 1.0F);
         std::vector<float> out(ndm * eng.get_output_nsamps(n));
@@ -332,8 +332,8 @@ TEST_CASE("DDMTFFT geometry cache evicts one LRU entry (gpu)",
         CHECK(eng.get_memory_usage().transform == after_five.transform);
         float max_err = 0.0F;
         for (const float v : out) {
-            max_err = std::max(max_err,
-                               std::abs(v - static_cast<float>(nchans)));
+            max_err =
+                std::max(max_err, std::abs(v - static_cast<float>(nchans)));
         }
         CHECK(max_err < 5e-3F);
     }

@@ -25,12 +25,12 @@ namespace {
 class SizingBoxcarDriver final : public detail::BoxcarDriver {
 public:
     SizingBoxcarDriver(SizeType chunk, uint64_t latency)
-        : m_chunk(chunk), m_latency(latency) {}
+        : m_chunk(chunk),
+          m_latency(latency) {}
 
     void search(std::span<const float>, detail::FDMTSearchSink&) override {}
-    void search(DeviceSpan<const float>,
-                detail::FDMTSearchSink&,
-                Stream) override {}
+    void
+    search(DeviceSpan<const float>, detail::FDMTSearchSink&, Stream) override {}
     void reset(Stream) override {}
     void allocate() override {}
     [[nodiscard]] bool stages_host_input() const noexcept override {
@@ -142,9 +142,9 @@ public:
             .chunk_nsamps     = chunk,
             // The searched levels are materialised; the engines also keep
             // fusion below the plan's staggered subbands.
-            .max_fuse_levels     = std::min(plan.get_niters() - 1,
-                                            plan.get_niters() -
-                                                plan.get_subband_depth()),
+            .max_fuse_levels =
+                std::min(plan.get_niters() - 1,
+                         plan.get_niters() - plan.get_subband_depth()),
             .search_upper_levels = plan.get_subband_depth() > 0,
             .search_nbits        = config.input_nbits,
             .max_memory_bytes    = budget - fixed,
@@ -179,10 +179,11 @@ public:
             if (per_call_model) {
                 engine->enable_block_noise(per_call_model->support());
             }
-            used_out = engine->memory_usage().budgeted() +
-                       (per_call_model && exec.backend == Backend::kCPU
-                            ? model_bytes(*per_call_model, ring(*per_call_model))
-                            : SizeType{0});
+            used_out =
+                engine->memory_usage().budgeted() +
+                (per_call_model && exec.backend == Backend::kCPU
+                     ? model_bytes(*per_call_model, ring(*per_call_model))
+                     : SizeType{0});
             return {.ok = true, .needed = used_out, .error = {}};
         };
         // The fixed part is an estimate: with an automatic chunk, step it
@@ -455,13 +456,13 @@ public:
         auto driver = std::make_unique<SizingBoxcarDriver>(sizing_chunk, 0);
         std::unique_ptr<detail::FDMTBoxcarEngine> sizing;
         if (exec.backend == Backend::kCPU) {
-            sizing = detail::make_fdmt_boxcar_cpu(
-                plan, config, planes, cfg, std::move(driver), kill_runs);
+            sizing = detail::make_fdmt_boxcar_cpu(plan, config, planes, cfg,
+                                                  std::move(driver), kill_runs);
         }
 #ifdef DMT_ENABLE_GPU
         else if (exec.backend == detail::kGPUBackend) {
-            sizing = detail::make_fdmt_boxcar_gpu(
-                plan, config, planes, cfg, std::move(driver), kill_runs);
+            sizing = detail::make_fdmt_boxcar_gpu(plan, config, planes, cfg,
+                                                  std::move(driver), kill_runs);
         }
 #endif
         else {

@@ -39,16 +39,76 @@ def test_simulate_python_helpers() -> None:
     np.testing.assert_array_equal(delays, np.round(expected).astype(np.int32))
     assert delays[0] > 0  # the half-channel delay of channel 0
 
-    for dt in (0, 12.375):
-        arr, n_disp = simulate.generate_pure_frb(8, 32, 1000.0, 1500.0, dt, 20.0, 1.0)
-        assert arr.shape == (8, 32)
-        assert n_disp > 0
-        assert float(np.sum(arr)) > 0.0
-        cpp_flat, cpp_disp = libdmt.generate_pure_frb(
-            8, 32, 1000.0, 1500.0, dt, 20.0, 1.0
+    cases = [
+        (8, 32, 0.0, 20.0, 1.0),
+        (8, 32, 12.375, 20.0, 1.0),
+        (64, 128, 40.5, 90.25, 2.0),
+        (16, 64, 30.0, 10.5, 1.0),  # the top channels start before sample 0
+        (16, 64, 50.3, 70.1, 1.0),  # the bottom channels end after the block
+    ]
+    for nchans, nsamps, dt, toa, amp in cases:
+        arr, n_disp = simulate.generate_pure_frb(
+            nchans, nsamps, 1000.0, 1500.0, dt, toa, amp
         )
-        np.testing.assert_array_equal(arr, np.asarray(cpp_flat).reshape((8, 32)))
-        assert n_disp == float(cpp_disp)
+        assert arr.shape == (nchans, nsamps)
+        assert arr.dtype == np.float32
+        expected, expected_disp = _pure_frb_reference(
+            nchans, nsamps, 1000.0, 1500.0, dt, toa, amp
+        )
+        assert n_disp == expected_disp
+        # float32 sweep times: the edge fractions agree to ~1e-5 of a sample.
+        np.testing.assert_allclose(arr, expected, rtol=0, atol=1e-4 * amp)
+
+
+def _pure_frb_reference(
+    nchans: int,
+    nsamps: int,
+    f_min: float,
+    f_max: float,
+    dt: float,
+    toa: float,
+    amp: float,
+) -> tuple[np.ndarray, float]:
+    """Channel-edge integration of a dispersed pulse in float64.
+
+    Channel c spans [f_lo, f_hi]; its sweep starts at toa - dt * k(f_min, f_lo)
+    and lasts dt * k(f_lo, f_hi) samples (k: the ratio of dispersion delays to
+    the full band's), spread evenly over the samples it covers, with the first
+    and last sample weighted by the fraction covered. Sample indices truncate
+    toward zero.
+    """
+
+    def k(a: float, b: float) -> float:
+        return (a**-2 - b**-2) / (f_min**-2 - f_max**-2)
+
+    arr = np.zeros((nchans, nsamps))
+    foff = (f_max - f_min) / nchans
+    ndisp = 0
+    for c in range(nchans):
+        lo, hi = f_min + c * foff, f_min + (c + 1) * foff
+        tstart = toa - dt * k(f_min, lo)
+        sweep = dt * k(lo, hi)
+        tend = tstart - sweep
+        s, e = int(tstart), int(tend)
+        s_frac, e_frac = tstart - s, 1.0 - (tend - e)
+        if 0 <= e <= s < nsamps:
+            if e == s:
+                arr[c, s] = amp
+                ndisp += 1
+                continue
+            arr[c, e : s + 1] = amp / sweep
+            arr[c, e] *= e_frac
+            arr[c, s] *= s_frac
+            ndisp += s - e + 1
+        elif e < 0 <= s < nsamps:
+            arr[c, : s + 1] = amp / sweep
+            arr[c, s] *= s_frac
+            ndisp += s + 1
+        elif 0 <= e < nsamps <= s:
+            arr[c, e:] = amp / sweep
+            arr[c, e] *= e_frac
+            ndisp += nsamps - e
+    return arr, float(ndisp)
 
 
 class TestBackends:
@@ -124,9 +184,9 @@ class TestStrictWaterfallInput:
 
             out = np.zeros(engine.plan.buffer_size, dtype=np.float32)
             with pytest.raises(ValueError, match="dtype float32"):
-                engine.reset(wf_f64, out)
+                engine.reset(wf_f64, dmt=out)
             with pytest.raises(ValueError, match="C-contiguous"):
-                engine.reset(wf_noncontig, out)
+                engine.reset(wf_noncontig, dmt=out)
 
         fdmt_packed = dmtlib.FDMT(1000.0, 1500.0, nchans, nsamps, 0.001, 8, nthreads=1)
         packed_u16 = np.zeros((nchans, nsamps), dtype=np.uint16)
@@ -165,6 +225,38 @@ class TestStrictWaterfallInput:
         with pytest.raises(ValueError, match="C-contiguous"):
             fft_eng.load_history(hist_noncontig)
 
+    def test_host_load_history_rejects_wrong_dtype_and_non_contiguous(self) -> None:
+        """Host load_history takes exact dtype, C order (FDMT, DDMT, DDMTFFT)."""
+        nchans, nsamps = 16, 64
+        dms = np.linspace(0.0, 50.0, 8, dtype=np.float32)
+        engines = [
+            (dmtlib.FDMT(1000.0, 1500.0, nchans, nsamps, 0.001, 8), np.float32),
+            (dmtlib.DDMT(1000.0, 1500.0, nchans, 0.001, dms), np.float32),
+            (dmtlib.DDMT(1000.0, 1500.0, nchans, 0.001, dms, nbits=8), np.uint8),
+            (dmtlib.DDMTFFT(1000.0, 1500.0, nchans, 0.001, dms), np.float32),
+        ]
+        for engine, dtype in engines:
+            size = engine.history_state_size()
+            assert size > 0
+            wrong = np.float64 if dtype == np.float32 else np.float32
+            name = "float32" if dtype == np.float32 else "uint8"
+            noncontig = np.zeros(2 * size, dtype=dtype)[::2]
+            with pytest.raises(ValueError, match=f"dtype {name}"):
+                engine.load_history(np.zeros(size, dtype=wrong))
+            with pytest.raises(ValueError, match="C-contiguous"):
+                engine.load_history(noncontig)
+            # save_history needs a warmed-up stream (DDMT, DDMTFFT).
+            if isinstance(engine, dmtlib.FDMT):
+                engine.execute(np.zeros((nchans, nsamps), dtype=dtype))
+            elif dtype == np.uint8:
+                engine.execute(np.zeros((nchans, 256), dtype=dtype), nsamps=256)
+            else:
+                engine.execute(np.zeros((nchans, 256), dtype=dtype))
+            saved = engine.save_history()
+            assert saved.dtype == dtype
+            assert saved.size == size
+            engine.load_history(saved)
+
     def test_stepper_dmt_buffer_rejects_bad_dtype_layout_and_readonly(self) -> None:
         nchans, nsamps = 16, 64
         wf = np.zeros((nchans, nsamps), dtype=np.float32)
@@ -179,7 +271,7 @@ class TestStrictWaterfallInput:
             readonly.setflags(write=False)
 
             for call in (
-                lambda buf, e=engine: e.reset(wf, buf),
+                lambda buf, e=engine: e.reset(wf, dmt=buf),
                 lambda buf, e=engine: e.reset(packed, nbits=8, dmt=buf),
             ):
                 with pytest.raises(ValueError, match="dtype float32"):
@@ -258,6 +350,12 @@ class TestStrictWaterfallInput:
             fdmt_fft.execute_time_major(tm, 8)
         with pytest.raises(TypeError):
             fdmt_fft.reset(packed, 8)
+
+        # dmt= is keyword-only on the float overloads too.
+        wf = np.zeros((nchans, nsamps), dtype=np.float32)
+        for eng in (fdmt, fdmt_fft):
+            with pytest.raises(TypeError):
+                eng.reset(wf, np.zeros((nchans, nsamps), dtype=np.float32))
 
         for cls in (dmtlib.DDMT, dmtlib.SDMT, dmtlib.DDMTFFT):
             eng = cls(1000.0, 1500.0, nchans, 0.001, dms, nbits=8, nthreads=1)

@@ -158,9 +158,8 @@ inline FDMTBoxTables make_fdmt_box_tables(std::span<const uint32_t> weights,
     FDMTBoxTables out;
     const SizeType box_max = weights.size();
     const float w_unit     = std::ldexp(1.0F, -static_cast<int>(frac_bits));
-    out.int_unit           = exact_int
-                                 ? 1.0F
-                                 : std::ldexp(1.0F, -static_cast<int>(mean_bits));
+    out.int_unit =
+        exact_int ? 1.0F : std::ldexp(1.0F, -static_cast<int>(mean_bits));
     out.w_f32.resize(box_max);
     out.round.resize(box_max);
     for (SizeType s = 0; s < box_max; ++s) {

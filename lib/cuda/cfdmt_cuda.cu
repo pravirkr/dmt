@@ -67,8 +67,10 @@ unsigned grid_for(uint64_t n) {
 
 // Fixed front-end chunk target: memory and chunking depend only on the
 // arguments, never on device properties, while keeping chunk uploads
-// overlapped with the front end.
-constexpr SizeType kFrontEndChunkBytes = SizeType{16} << 20;
+// overlapped with the front end. 24 MiB matches the former 0.25 x L2 on
+// the L40S (96 MiB L2); 16 MiB doubled the chunk count and cost 13-18% on
+// small blocks there.
+constexpr SizeType kFrontEndChunkBytes = SizeType{24} << 20;
 // Default cuFFT-path work buffer (a fixed size: memory depends on the
 // arguments only, never on the device's free memory).
 constexpr SizeType kWorkBytes = SizeType{1} << 30;
@@ -451,15 +453,15 @@ public:
         }
 
         const SizeType output_bytes = m_plan.get_dmt_size() * sizeof(float);
-        return {.spectrum  = m_spec.capacity() * sizeof(ComplexTypeGPU),
-                .waterfall = m_waterfall.capacity() * sizeof(float),
-                .fdmt =
-                    fdmt_mem.total() + (m_fdmt_out.capacity() * sizeof(float)),
-                .workspace   = workspace + input,
-                .output      = output_bytes,
-                .pinned      = m_host.pinned_bytes(),
-                .host_pinned = detail::host_staging_pinned_bytes(output_bytes,
-                                                                 m_nthreads)};
+        return {
+            .spectrum  = m_spec.capacity() * sizeof(ComplexTypeGPU),
+            .waterfall = m_waterfall.capacity() * sizeof(float),
+            .fdmt = fdmt_mem.total() + (m_fdmt_out.capacity() * sizeof(float)),
+            .workspace = workspace + input,
+            .output    = output_bytes,
+            .pinned    = m_host.pinned_bytes(),
+            .host_pinned =
+                detail::host_staging_pinned_bytes(output_bytes, m_nthreads)};
     }
 
 protected:
@@ -634,15 +636,25 @@ private:
         const int log2n  = exact_log2(mbin);
         const bool shape = log2n >= cfdmt_gpu::kFusedMinLog2 &&
                            log2n <= cfdmt_gpu::kFusedMaxLog2;
+        // Feasibility, not tuning: the kernel's shared memory must fit the
+        // device's opt-in limit (4096 bins need ~66 KiB).
+        int optin = 0;
+        gpu_utils::check_gpu_call(
+            cudaDeviceGetAttribute(
+                &optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, m_device_id),
+            "CohFDMT: device attribute query failed");
+        const bool fits = shape && cfdmt_gpu::fused_smem_bytes(log2n) <=
+                                       static_cast<uint64_t>(optin);
         if (path == CohFDMTCoherentPath::kCuFFT ||
-            (path == CohFDMTCoherentPath::kAuto && !shape)) {
+            (path == CohFDMTCoherentPath::kAuto && !fits)) {
             return false;
         }
-        if (!shape) {
+        if (!fits) {
             throw std::invalid_argument(fmt::format(
                 "CohFDMT (gpu): the fused coherent kernel needs a "
-                "power-of-two channel FFT of 16-4096 bins; mbin={}",
-                mbin));
+                "power-of-two channel FFT of 16-4096 bins fitting in the "
+                "device's shared memory ({} bytes opt-in); mbin={}",
+                optin, mbin));
         }
         m_fused      = fused_kernel_for<cfdmt_gpu::kFusedMinLog2>(log2n);
         m_fused_smem = cfdmt_gpu::fused_smem_bytes(log2n);

@@ -47,12 +47,11 @@ void FDMTCudaEngine::zero_history(cudaStream_t stream, bool throw_on_error) {
         (void)cudaSetDevice(m_device_id);
     }
     const auto zero_vec = [&](auto& v) {
-        using ElemT =
-            typename std::remove_reference_t<decltype(v)>::value_type;
+        using ElemT = typename std::remove_reference_t<decltype(v)>::value_type;
         if (!v.empty()) {
-            const cudaError_t err = cudaMemsetAsync(
-                thrust::raw_pointer_cast(v.data()), 0,
-                v.size() * sizeof(ElemT), stream);
+            const cudaError_t err =
+                cudaMemsetAsync(thrust::raw_pointer_cast(v.data()), 0,
+                                v.size() * sizeof(ElemT), stream);
             if (throw_on_error) {
                 gpu_utils::check_gpu_call(err);
             }
@@ -239,8 +238,19 @@ void FDMTCudaEngine::finalize(Stream stream_in) {
     m_is_initialized   = false;
 }
 
-// NOLINTNEXTLINE(bugprone-exception-escape)
-void FDMTCudaEngine::reset_history() noexcept { zero_history(nullptr, false); }
+// Synchronous, as before zero_history() was shared: device work of earlier
+// calls (on any stream) ends before the zeroing, and the zeroing (on the
+// default stream) ends before this returns, so a following call on a
+// non-blocking stream reads zeros. noexcept: an error stays sticky in the
+// context and surfaces at the next call.
+void FDMTCudaEngine::reset_history() noexcept {
+    try {
+        m_device_work.wait();
+    } catch (...) { // NOLINT(bugprone-empty-catch)
+    }
+    zero_history(nullptr, false);
+    (void)cudaStreamSynchronize(nullptr);
+}
 
 SizeType FDMTCudaEngine::history_state_size() const noexcept {
     if (skew_history()) {
@@ -308,10 +318,10 @@ void FDMTCudaEngine::save_history(std::span<float> out) const {
         std::ranges::copy(hdr, out.begin());
         SizeType off = kSkewHistHeader;
         for (const auto& b : skew_hist_buffers()) {
-            gpu_utils::check_gpu_call(
-                cudaMemcpy(out.data() + off, b.data, b.size * sizeof(float),
-                           cudaMemcpyDeviceToHost),
-                "FDMT::save_history");
+            gpu_utils::check_gpu_call(cudaMemcpy(out.data() + off, b.data,
+                                                 b.size * sizeof(float),
+                                                 cudaMemcpyDeviceToHost),
+                                      "FDMT::save_history");
             off += b.size;
         }
         return;
@@ -390,10 +400,10 @@ void FDMTCudaEngine::load_history(std::span<const float> in) {
         m_device_work.wait();
         SizeType off = kSkewHistHeader;
         for (const auto& b : skew_hist_buffers()) {
-            gpu_utils::check_gpu_call(
-                cudaMemcpy(b.data, in.data() + off, b.size * sizeof(float),
-                           cudaMemcpyHostToDevice),
-                "FDMT::load_history");
+            gpu_utils::check_gpu_call(cudaMemcpy(b.data, in.data() + off,
+                                                 b.size * sizeof(float),
+                                                 cudaMemcpyHostToDevice),
+                                      "FDMT::load_history");
             off += b.size;
         }
         m_chunk_pos      = pos;

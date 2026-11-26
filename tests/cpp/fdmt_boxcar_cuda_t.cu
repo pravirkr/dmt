@@ -103,8 +103,8 @@ TEST_CASE("FDMTBoxcar GPU supports width 4096 and bounded overflow",
     cfg.detect_thresh    = 4;
     cfg.max_cands_per_dm = 0;
     const auto expected  = reference(plan, cfg, true, 1, input);
-    FDMTBoxcar search(plan, cfg, true, test::gpu_exec(),
-                      1, algorithms::kFDMTAutoFuse, 128);
+    FDMTBoxcar search(plan, cfg, true, test::gpu_exec(), 1,
+                      algorithms::kFDMTAutoFuse, 128);
     std::vector<RawCandidate> actual;
     for (const auto& block : input) {
         append(actual, search.execute(block));
@@ -119,8 +119,7 @@ TEST_CASE("FDMTBoxcar GPU supports width 4096 and bounded overflow",
     cfg.max_cands_per_dm = 3;
     cfg.skip_cold_prefix = false;
     cfg.peak_mode        = PeakFindingMode::kAllAboveThreshold;
-    FDMTBoxcar limited(plan, cfg, true,
-                       test::gpu_exec());
+    FDMTBoxcar limited(plan, cfg, true, test::gpu_exec());
     std::vector<float> loud(3 * plan.get_nsamps(), 20);
     const auto result = limited.execute(loud);
     CHECK(result.emitted_count == 2);
@@ -144,8 +143,7 @@ TEST_CASE("FDMTBoxcar GPU searches plans whose root plane exceeds 32 bits",
     static_assert(SizeType{kDtMax + 1} * kNsamps >
                   SizeType{std::numeric_limits<int32_t>::max()});
     CHECK_THROWS_AS(FDMT(1200.0F, 1500.0F, 4, kNsamps, 0.001F, kDtMax, 0, 1,
-                         true, "valid",
-                         test::gpu_exec()),
+                         true, "valid", test::gpu_exec()),
                     std::invalid_argument);
 
     const plans::FDMTPlan plan(1200.0F, 1500.0F, 4, kNsamps, 0.001F, kDtMax);
@@ -709,7 +707,7 @@ TEST_CASE("GPU host-memory calls stage inside the budget",
     const SizeType block =
         beams * plan.get_nchans() * plan.get_nsamps() * sizeof(float);
     const auto input = waterfalls(plan, beams, 2);
-    const Exec exec = test::gpu_exec();
+    const Exec exec  = test::gpu_exec();
     BoxcarConfig cfg;
     cfg.max_boxcar = 16;
 
@@ -765,7 +763,7 @@ TEST_CASE("FDMTBoxcar GPU host input staged per chunk equals device input",
     // transform's reserved buffer. Every search path reads them as it reads
     // a device block: identical candidates, bit for bit, over several
     // blocks and drain(), and no memory beyond the estimate.
-    const Exec exec = test::gpu_exec();
+    const Exec exec   = test::gpu_exec();
     const float tsamp = 455.6e-6F;
     struct Case {
         std::string name;
@@ -907,7 +905,7 @@ TEST_CASE("FDMTBoxcar GPU host input staged per chunk equals device input",
 
 TEST_CASE("FDMTBoxcar estimate_memory equals the constructed instance (gpu)",
           "[boxcar][gpu][budget]") {
-    const Exec gpu = test::gpu_exec();
+    const Exec gpu     = test::gpu_exec();
     const SizeType big = algorithms::kFDMTDefaultMaxMemory;
     for (const auto& c : estimate_cases(gpu)) {
         INFO(c.name << " beams " << c.beams);
@@ -1006,7 +1004,7 @@ TEST_CASE("FDMTBoxcar GPU drain() after device input allocates nothing",
         0.0F, 2000.0F, tsamp, tsamp, 856.0F, 1712.0F, 4096, 1.1F);
     const plans::FDMTPlan plan(856.0F, 1712.0F, 4096, 4096, tsamp, grid,
                                "valid", 2);
-    const Exec exec = test::gpu_exec();
+    const Exec exec            = test::gpu_exec();
     constexpr SizeType kBlocks = 3;
     const SizeType n           = plan.get_nchans() * plan.get_nsamps();
     std::vector<std::vector<uint8_t>> bytes(kBlocks);
@@ -1244,7 +1242,8 @@ TEST_CASE("GPU subband searches skip paths beyond the 32-bit index range",
         const auto est = FDMTBoxcar::estimate_memory(plan, cfg, true, exec, 1,
                                                      algorithms::kFDMTAutoFuse,
                                                      0, SizeType{gib} << 30);
-        CHECK_FALSE(est.search_path.empty());
+        INFO(est.search_path);
+        CHECK(est.search_path.find("windowed top") != std::string::npos);
         CHECK(est.search_latency > 0);
     }
 }

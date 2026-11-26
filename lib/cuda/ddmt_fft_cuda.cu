@@ -996,8 +996,8 @@ private:
                             utils::FFTKind::kC2CBackward, nf, g.n_bins,
                             m_device_id);
                     }
-                    // x = k ddm r / N and the centring + dm0 phase k shift r / N
-                    // (turns per bin), as the CPU's prepare_points().
+                    // x = k ddm r / N and the centring + dm0 phase k shift r /
+                    // N (turns per bin), as the CPU's prepare_points().
                     const double shift =
                         run->run.dm0 +
                         (static_cast<double>(run->plan->half()) * run->run.ddm);
@@ -1015,10 +1015,10 @@ private:
                     std::vector<unsigned long long> s(nb * m_nact);
                     for (SizeType i = 0; i < nb; ++i) {
                         for (SizeType a = 0; a < m_nact; ++a) {
-                            s[(i * m_nact) + a] = phase_fixed(
-                                -m_model.tau(m_brute_rows[i],
-                                             m_model.active[a]),
-                                n);
+                            s[(i * m_nact) + a] =
+                                phase_fixed(-m_model.tau(m_brute_rows[i],
+                                                         m_model.active[a]),
+                                            n);
                         }
                     }
                     g.brute.upload(s);

@@ -782,8 +782,7 @@ TEST_CASE("Boxcar noise model bounds the exact transition variance",
                     }
                 }
             }
-            REQUIRE_THAT(exact_a,
-                         Catch::Matchers::WithinRel(var(ta, i), 1e-5));
+            REQUIRE_THAT(exact_a, Catch::Matchers::WithinRel(var(ta, i), 1e-5));
             // Endpoint at offset u from the start of block b (mask mb),
             // previous block mask ma.
             const SizeType window = support[r] + w - 1;

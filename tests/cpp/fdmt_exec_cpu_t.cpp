@@ -125,7 +125,7 @@ TEST_CASE("FDMT automatic fusion depth: more threads never fuse deeper",
                static_cast<SizeType>(nthreads);
     };
     const auto check_monotone = [&](const plans::FDMTPlan& plan) {
-        SizeType prev_ws = SIZE_MAX;
+        SizeType prev_ws  = SIZE_MAX;
         SizeType first_ws = 0;
         SizeType last_ws  = 0;
         for (const int n : {1, 2, 4, 8, 16}) {
@@ -292,7 +292,8 @@ TEST_CASE("FDMT fused levels: dt_grid, streaming, packed int tree",
     SECTION("packed input with int tree") {
         for (const SizeType nbits : {1, 4, 8}) {
             for (const std::string mode : {"full", "roll", "valid"}) {
-                const auto wf = test::random_packed(256, 128, nbits, 30 + nbits);
+                const auto wf =
+                    test::random_packed(256, 128, nbits, 30 + nbits);
                 // Packed reference: the unfused float tree (same rounded box
                 // means), bit-exact; float input within the rounding bound.
                 FDMT ref(kFMin, kFMax, 256, 128, kTsamp, 64, 0, 1, true, mode,
@@ -344,8 +345,8 @@ TEST_CASE("FDMT packed input matches float input", "[fdmt_cpu][cpu]") {
                     DYNAMIC_SECTION("nchans=" << c.nchans << " nbits=" << nbits
                                               << " mode=" << mode
                                               << " smearing=" << smearing) {
-                        const auto wf = test::random_packed(c.nchans, c.nsamps, nbits,
-                                                      17 + nbits);
+                        const auto wf = test::random_packed(c.nchans, c.nsamps,
+                                                            nbits, 17 + nbits);
                         FDMT ref(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
                                  c.dt_max, c.dt_min, 1, smearing, mode,
                                  Exec::cpu(1), 1, kUnfused, kFloatTree);
@@ -359,9 +360,9 @@ TEST_CASE("FDMT packed input matches float input", "[fdmt_cpu][cpu]") {
                         const auto expected_pk =
                             run_packed(ref, wf.packed, nbits);
                         if (smearing) {
-                            test::require_packed_near(
-                                expected_pk, expected_f32, ref.get_plan(),
-                                ref.get_nbeams());
+                            test::require_packed_near(expected_pk, expected_f32,
+                                                      ref.get_plan(),
+                                                      ref.get_nbeams());
                         } else {
                             require_beams_exact(expected_pk, expected_f32, ref);
                         }
@@ -399,8 +400,7 @@ TEST_CASE("FDMT packed valid-mode streaming and multiple beams",
             DYNAMIC_SECTION("nchans=" << c.nchans << " dt_min=" << c.dt_min
                                       << " nbits=" << nbits) {
                 const SizeType nchans = c.nchans;
-                const auto row_bytes =
-                    test::packed_row_bytes(block, nbits);
+                const auto row_bytes  = test::packed_row_bytes(block, nbits);
                 FDMT ref(kFMin, kFMax, nchans, block, kTsamp, c.dt_max,
                          c.dt_min, 1, true, "valid", Exec::cpu(1), nbeams,
                          kUnfused, kFloatTree);
@@ -414,7 +414,7 @@ TEST_CASE("FDMT packed valid-mode streaming and multiple beams",
                 for (SizeType b = 0; b < nblks; ++b) {
                     const auto wf =
                         test::random_packed(nbeams * nchans, block, nbits,
-                                      static_cast<unsigned>(100 + b));
+                                            static_cast<unsigned>(100 + b));
                     REQUIRE(wf.packed.size() == nbeams * nchans * row_bytes);
                     const auto expected = run_packed(ref, wf.packed, nbits);
                     const auto got      = run_packed(fdmt, wf.packed, nbits);

@@ -515,6 +515,75 @@ TEST_CASE("FDMT reset_history() on CUDA matches a fresh instance",
                            dmt2_after_reset.begin()));
 }
 
+namespace {
+
+// Keeps the default stream busy for `cycles` device clock cycles.
+__global__ void kernel_spin(long long cycles) {
+    const long long start = clock64();
+    while (clock64() - start < cycles) {
+    }
+}
+
+} // namespace
+
+TEST_CASE("FDMT reset_history() on CUDA is ordered before a call on a "
+          "non-blocking stream",
+          "[fdmt_gpu][gpu]") {
+    // reset_history() zeroes the history on the default stream. A call on a
+    // non-blocking stream right after it must still read the zeros: queue
+    // the zeroing behind a busy default stream and check the next block
+    // against a fresh instance.
+    const float f_min      = 1000.0F;
+    const float f_max      = 1500.0F;
+    const size_t nchans    = 256;
+    const size_t nsamps    = 1024;
+    const float tsamp      = 0.001F;
+    const IndexType dt_max = 512;
+    std::vector<float> block1(nchans * nsamps);
+    std::vector<float> block2(nchans * nsamps);
+    for (size_t i = 0; i < block1.size(); ++i) {
+        block1[i] = static_cast<float>((i % 17) + 1);
+        block2[i] = static_cast<float>((i % 13) + 1);
+    }
+    FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true, "valid",
+              test::gpu_exec());
+    FDMT fresh(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true, "valid",
+               test::gpu_exec());
+    const auto dmt_size = fdmt.get_plan().get_dmt_size();
+    thrust::device_vector<float> d_block1(block1.begin(), block1.end());
+    thrust::device_vector<float> d_block2(block2.begin(), block2.end());
+    thrust::device_vector<float> d_out(dmt_size, -1.0F);
+    thrust::device_vector<float> d_ref(dmt_size, -2.0F);
+    const auto in1 = DeviceSpan<const float>(
+        thrust::raw_pointer_cast(d_block1.data()), d_block1.size());
+    const auto in2 = DeviceSpan<const float>(
+        thrust::raw_pointer_cast(d_block2.data()), d_block2.size());
+    const auto out =
+        DeviceSpan<float>(thrust::raw_pointer_cast(d_out.data()), dmt_size);
+    const auto ref =
+        DeviceSpan<float>(thrust::raw_pointer_cast(d_ref.data()), dmt_size);
+
+    cudaStream_t stream = nullptr;
+    REQUIRE(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) ==
+            cudaSuccess);
+    fdmt.execute(in1, out, Stream{stream});
+    fdmt.execute(in1, out, Stream{stream});
+    REQUIRE(cudaStreamSynchronize(stream) == cudaSuccess);
+
+    kernel_spin<<<1, 1>>>(400'000'000LL); // ~0.2 s on the default stream
+    fdmt.reset_history();
+    fdmt.execute(in2, out, Stream{stream});
+    REQUIRE(cudaStreamSynchronize(stream) == cudaSuccess);
+    REQUIRE(cudaDeviceSynchronize() == cudaSuccess);
+    REQUIRE(cudaStreamDestroy(stream) == cudaSuccess);
+
+    fresh.execute(in2, ref);
+    REQUIRE(cudaDeviceSynchronize() == cudaSuccess);
+    const std::vector<float> got(d_out.begin(), d_out.end());
+    const std::vector<float> want(d_ref.begin(), d_ref.end());
+    test::require_exact(got, want);
+}
+
 TEST_CASE("FDMT add_frb_track recovery across a valid-mode block boundary "
           "on  CUDA",
           "[fdmt_gpu][gpu]") {
@@ -697,8 +766,9 @@ TEST_CASE("FDMT sparse and custom dt_grid parity with CPU",
     }
 }
 
-TEST_CASE("FDMT (gpu) save_history/load_history multiplexes independent streams",
-          "[fdmt_gpu][gpu]") {
+TEST_CASE(
+    "FDMT (gpu) save_history/load_history multiplexes independent streams",
+    "[fdmt_gpu][gpu]") {
     const float f_min         = 1000.0F;
     const float f_max         = 1500.0F;
     const SizeType nchans     = 16;

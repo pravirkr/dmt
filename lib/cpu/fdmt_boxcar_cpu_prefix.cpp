@@ -71,8 +71,7 @@ inline bool check_width_range(const plans::BoxcarPlanePlan& plane,
 #pragma omp simd reduction(|| : hit)
             for (SizeType t = 0; t < n; ++t) {
                 const Prefix sum = (hi[t] - lo[t]) + (hi_in[t] - lo_in[t]);
-                hit = hit ||
-                      (sum >= th && (!cold || start + t >= first_valid));
+                hit = hit || (sum >= th && (!cold || start + t >= first_valid));
             }
         }
         if (hit) {

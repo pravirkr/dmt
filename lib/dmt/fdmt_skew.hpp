@@ -76,6 +76,15 @@
 
 namespace dmt::algorithms::detail {
 
+/// A skewed-window layout whose compact tables would overflow their 32-bit
+/// offsets (FDMTSkewCpu::plan_buffers): that (chunk, leaf) candidate does not
+/// exist, so the path chooser skips it. Its own type, so the chooser catches
+/// nothing else.
+class SkewLayoutTooLarge : public std::length_error {
+public:
+    using std::length_error::length_error;
+};
+
 /// Automatic group-fusion materialization level F >= level.
 inline SizeType auto_skew_fuse_level(const plans::FDMTPlan& plan,
                                      const FDMTSkewWindows& w,
@@ -209,7 +218,7 @@ public:
         m_search_from = m_win.search_from;
         m_fuse =
             auto_skew_fuse_level(plan, m_win, level, m_chunk, m_nthreads, fuse);
-        m_level = skew_leaf_level(plan, m_win, level, m_fuse, m_chunk, leaf);
+        m_level   = skew_leaf_level(plan, m_win, level, m_fuse, m_chunk, leaf);
         m_loc_win = compute_local_skew_windows(plan, m_win, m_level, m_fuse);
         build_tables();
         plan_buffers();
@@ -376,11 +385,10 @@ public:
         detail::put16(out, 1, kHistVersion, 1);
         detail::put16(out, 2, layout_hash(), 4);
         detail::put16(out, 6, m_stream_pos, 4);
-        detail::put16(out, 10,
-                      m_nonint_until > m_stream_pos
-                          ? m_nonint_until - m_stream_pos
-                          : 0,
-                      4);
+        detail::put16(
+            out, 10,
+            m_nonint_until > m_stream_pos ? m_nonint_until - m_stream_pos : 0,
+            4);
         detail::put16(out, 14, m_ring_elem, 1);
         float* ring          = out.data() + kHistHeader;
         const SizeType tot   = m_chan_ring_off[m_nchans];
@@ -1217,7 +1225,7 @@ private:
             m_group_b_elems > kU32 ||
             m_stripe_subs * m_sub_stripe_elems >
                 static_cast<SizeType>(INT32_MAX)) {
-            throw std::length_error(
+            throw SkewLayoutTooLarge(
                 "FDMT skew: plan too large for 32-bit table offsets");
         }
         // Sized for 8-byte (double) running sums whatever the ring's type:
@@ -1778,10 +1786,10 @@ private:
                     for (SizeType l = m_level + 1; l <= m_fuse; ++l) {
                         const StateT* in =
                             ((l - 1 - m_level) % 2 == 0) ? grp_a : grp_b;
-                        StateT* dst_half = (l == m_fuse)              ? out_f
-                                           : ((l - m_level) % 2 == 0) ? grp_a
-                                                                      : grp_b;
-                        const bool at_f  = (l == m_fuse);
+                        StateT* dst_half  = (l == m_fuse)              ? out_f
+                                            : ((l - m_level) % 2 == 0) ? grp_a
+                                                                       : grp_b;
+                        const bool at_f   = (l == m_fuse);
                         const bool stream = !at_f && !batch.in_l3;
                         const auto* ops   = m_ops[l].data();
                         const SizeType lo = m_groups[batch.g_lo].op_lo[l];

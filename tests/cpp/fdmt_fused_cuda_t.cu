@@ -206,10 +206,10 @@ TEST_CASE("FDMT fused valid-mode streaming matches FDMT", "[fdmt_gpu][gpu]") {
                 // load; the fused and unfused engines share the layout.
                 fused.save_history(hist_out);
                 for (SizeType b = 0; b < 8; ++b) {
-                    FDMT& gpu     = (b % 3 == 2) ? unfused : fused;
-                    const auto wf = test::random_packed(
-                        nbeams * nchans, block, 2,
-                        static_cast<unsigned>(80 + b));
+                    FDMT& gpu = (b % 3 == 2) ? unfused : fused;
+                    const auto wf =
+                        test::random_packed(nbeams * nchans, block, 2,
+                                            static_cast<unsigned>(80 + b));
                     gpu.load_history(hist_in);
                     const auto got = beams(gpu, run_2bit(gpu, wf.packed));
                     gpu.save_history(hist_out);

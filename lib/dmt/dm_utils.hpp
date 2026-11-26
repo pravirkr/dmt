@@ -192,8 +192,8 @@ std::vector<float> generate_levin_dm_grid_piecewise(float dm_start,
     if (n == 0) {
         return false;
     }
-    for (const SizeType p : {SizeType{2}, SizeType{3}, SizeType{5},
-                             SizeType{7}}) {
+    for (const SizeType p :
+         {SizeType{2}, SizeType{3}, SizeType{5}, SizeType{7}}) {
         while (n % p == 0) {
             n /= p;
         }

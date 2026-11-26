@@ -95,7 +95,8 @@ TEST_CASE("stream_wait orders a consumer stream after a producer",
     // Producer waits on the host-mapped flag until the host releases it.
     wait_then_set<<<1, 1, 0, producer>>>(d_go, d_flag);
     check_gpu_call(cudaGetLastError());
-    stream_wait(test::gpu_exec().backend, device, Stream{consumer}, Stream{producer});
+    stream_wait(test::gpu_exec().backend, device, Stream{consumer},
+                Stream{producer});
     copy_flag<<<1, 1, 0, consumer>>>(d_flag, d_out);
     check_gpu_call(cudaGetLastError());
     // Neither stream can finish before the host opens the gate.
@@ -109,7 +110,8 @@ TEST_CASE("stream_wait orders a consumer stream after a producer",
     CHECK(out == 1);
 
     // Same stream: nothing to do. Wrong backend: refused.
-    stream_wait(test::gpu_exec().backend, device, Stream{consumer}, Stream{consumer});
+    stream_wait(test::gpu_exec().backend, device, Stream{consumer},
+                Stream{consumer});
     CHECK_THROWS_AS(
         stream_wait(Backend::kCPU, device, Stream{consumer}, Stream{producer}),
         std::invalid_argument);

@@ -145,7 +145,7 @@ void sum_level(const plans::FDMTPlanContainer& pc,
                 reach = std::max<uint64_t>(reach, c.delay + prev.reach[h]);
             }
         }
-        const SizeType base = out.entries.size();
+        const SizeType base   = out.entries.size();
         const SizeType merged = merge_length_bins(a, b, nullptr);
         out.entries.resize(base + merged);
         (void)merge_length_bins(a, b, out.entries.data() + base);

@@ -154,8 +154,8 @@ inline constexpr SizeType kFDMTMinCacheChunk = 256;
 /**
  * @brief GPU automatic chunk: the longest power of two, at least
  * kFDMTMinCacheChunk, whose two state halves (`elem_bytes` per element) fit
- * `cache_bytes` (the device's L2), so each merge reads the level below from
- * L2 rather than DRAM; capped at nsamps. 0 when even the shortest does not
+ * `cache_bytes` (a fixed L2-sized target), so each merge reads the level below
+ * from L2 rather than DRAM; capped at nsamps. 0 when even the shortest does not
  * fit: the merges are DRAM-bound at any chunk and fdmt_chunk_nsamps()'s
  * budget rule applies. On the L40S (96 MiB L2) this is 1.05-1.13x faster than
  * the budget rule on the cryopaf_low presets.

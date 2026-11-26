@@ -1020,7 +1020,10 @@ private:
 
     /// Single launch helper for `kernel_execute_iter` across all FDMT paths.
     /// Returns true when the ring advance was fused into the merge kernel.
-    template <FDMTMode Mode, typename TIn, typename TOut, typename THist = float>
+    template <FDMTMode Mode,
+              typename TIn,
+              typename TOut,
+              typename THist = float>
     static bool launch_execute_iter(const TIn* in_ptr,
                                     TOut* out_ptr,
                                     const plans::FDMTCoordDPtrs& sums,

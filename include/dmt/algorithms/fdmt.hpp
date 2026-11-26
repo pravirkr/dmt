@@ -185,8 +185,10 @@ public:
      * - "roll": Roll FDMT transform using rotation of the input waterfall.
      * (default: "valid").
      * @param exec Backend and its resources (default: CPU, 1 thread), e.g.
-     * `Exec::cpu(8)` or `Exec::cuda(0)`. It takes the place of the old
-     * `nthreads` / `device_id` argument; an `int` does not convert to it.
+     * `Exec::cpu(8)` or `Exec::cuda(0)`. On a GPU, `Exec::cuda(device,
+     * nthreads)` sets the host worker threads that stage a host-memory
+     * result through pinned buffers (see above). It takes the place of the
+     * old `nthreads` / `device_id` argument; an `int` does not convert to it.
      * @throws std::invalid_argument if `exec.backend` is not in this build
      * (see available_backends()).
      * @param nbeams Number of independent beams to process together
@@ -250,9 +252,10 @@ public:
      * cross-block history traffic (a few per cent at a few thousand samples).
      * 0 (default) = automatic: the
      * longest power of two >= 2048 whose state fits 2 GiB, capped at nsamps
-     * (GPU: the longest power of two >= 256 whose state fits the device L2,
-     * when one does; see get_chunk_nsamps()); other values are rounded up to
-     * a multiple of 64. The stepper (reset()/advance()) needs chunk >= nsamps.
+     * (GPU: the longest power of two >= 256 whose state fits a fixed 96 MiB
+     * cache target, the L40S's L2, when one does; see get_chunk_nsamps());
+     * other values are rounded up to a multiple of 64. The stepper
+     * (reset()/advance()) needs chunk >= nsamps.
      * @param max_memory_bytes Budget for everything the instance allocates
      * (get_memory_usage().total(); default kFDMTDefaultMaxMemory, 10 GiB).
      * A fast streaming path that fits is taken (close to the fastest). A
@@ -356,8 +359,8 @@ public:
      * decisions and tables, with every working buffer sized but not
      * allocated (exact: the constructor allocates exactly these sizes).
      * Throws as the constructor would when nothing fits max_memory_bytes.
-     * A GPU backend needs the device (it reads its shared memory and L2
-     * sizes) but allocates no device memory; the CUDA context, created on
+     * A GPU backend needs the device (it reads its shared memory size) but
+     * allocates no device memory; the CUDA context, created on
      * first use, is not counted (nor in get_memory_usage()).
      * One overload per constructor, with the same arguments.
      */
@@ -581,9 +584,12 @@ public:
      * levels' cross-block history update, so this throws std::logic_error
      * instead. reset_history() abandons the unfinished block and the stream.
      * The stepper always runs level by level (never fused), on whole
-     * blocks: it needs get_chunk_nsamps() == nsamps.
+     * blocks: it needs get_chunk_nsamps() == nsamps. The skewed-window path
+     * (chosen when max_memory_bytes is below the tree path's) has no
+     * stepper on any backend; use execute(), or a budget that fits the
+     * tree path.
      * @throws std::logic_error if a "valid"-mode block is still unfinished,
-     * or if the engine runs blocks in chunks.
+     * if the engine runs blocks in chunks, or on the skewed-window path.
      */
     void reset(std::span<const float> waterfall, std::span<float> dmt);
 

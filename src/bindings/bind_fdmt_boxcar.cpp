@@ -97,13 +97,13 @@ void bind_boxcar_common(py::class_<Search>& cls, const char* drain_doc) {
                                py::return_value_policy::reference_internal)
         .def_property_readonly(
             "config", [](const Search& search) { return search.get_config(); })
-        .def_property_readonly(
-            "search_plans",
-            [](const Search& search) {
-                const auto planes = search.get_search_plans();
-                return std::vector<plans::BoxcarPlanePlan>(planes.begin(),
-                                                           planes.end());
-            })
+        .def_property_readonly("search_plans",
+                               [](const Search& search) {
+                                   const auto planes =
+                                       search.get_search_plans();
+                                   return std::vector<plans::BoxcarPlanePlan>(
+                                       planes.begin(), planes.end());
+                               })
         .def_property_readonly("nbeams", &Search::get_nbeams)
         .def_property_readonly("chunk_nsamps", &Search::get_chunk_nsamps)
         .def_property_readonly("nthreads", &Search::nthreads)
@@ -516,9 +516,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
             "row has searched it (the largest subband row lag on the skewed "
             "paths; 0 otherwise).")
         .def_property_readonly("fuse_levels", &FDMTBoxcar::get_fuse_levels);
-    bind_boxcar_common(
-        fdmt_boxcar_cls,
-        R"doc(
+    bind_boxcar_common(fdmt_boxcar_cls,
+                       R"doc(
             End of stream: search the stream up to its last sample and emit
             the open excursions (as :meth:`flush`). Without it the last
             :attr:`search_latency` samples are never searched. The stream ends:
@@ -614,9 +613,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
             "waterfall"_a)
         .def_property_readonly("output_latency",
                                &FDMTFFTBoxcar::get_output_latency);
-    bind_boxcar_common(
-        fdmt_fft_boxcar_cls,
-        R"doc(
+    bind_boxcar_common(fdmt_fft_boxcar_cls,
+                       R"doc(
             End of stream: search the stream up to its last sample and emit
             the open excursions (as :meth:`flush`). Without it the last
             :attr:`output_latency` samples are never searched. The stream ends:

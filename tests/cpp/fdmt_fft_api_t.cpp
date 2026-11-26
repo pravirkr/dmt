@@ -231,11 +231,11 @@ TEST_CASE("DDMTFFT forced segments equal the single transform",
         CAPTURE(algorithms::to_string(method));
         const DDMTFFTOptions opts{.method = method};
         DDMTFFT single(plan, Exec::cpu(), 1, opts);
-        const auto segmented = algorithms::detail::make_ddmt_fft_cpu(
-            plan, {.nbeams      = 1,
-                   .exec        = Exec::cpu(),
-                   .options     = opts,
-                   .max_segment = 1024});
+        const auto segmented =
+            algorithms::detail::make_ddmt_fft_cpu(plan, {.nbeams  = 1,
+                                                         .exec    = Exec::cpu(),
+                                                         .options = opts,
+                                                         .max_segment = 1024});
         const auto ndm = plan.get_dm_arr().size();
         for (unsigned blk = 0; blk < 2; ++blk) {
             const auto wf = noise(nch * ns, 30 + blk);

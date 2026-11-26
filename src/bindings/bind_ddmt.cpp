@@ -528,56 +528,41 @@ void bind_ddmt(py::module_& mod) {
         .def("history_state_size", &DDMT::history_state_size)
         .def("save_history",
              [](const DDMT& ddmt) -> py::object {
-                 const auto& plan = ddmt.get_plan();
-                 const auto sz    = ddmt.history_state_size();
-                 if (plan.get_nbits() == 32) {
-                     py::array_t<float, py::array::c_style> hist(
+                 const auto sz   = ddmt.history_state_size();
+                 const auto save = [&](auto tag) -> py::object {
+                     using T = decltype(tag);
+                     py::array_t<T, py::array::c_style> hist(
                          static_cast<py::ssize_t>(sz));
-                     ddmt.save_history(
-                         std::span<float>(hist.mutable_data(), hist.size()));
+                     const std::span<T> out(hist.mutable_data(), hist.size());
+                     {
+                         const py::gil_scoped_release release;
+                         ddmt.save_history(out);
+                     }
                      return hist;
-                 }
-                 py::array_t<uint8_t, py::array::c_style> hist(
-                     static_cast<py::ssize_t>(sz));
-                 ddmt.save_history(
-                     std::span<uint8_t>(hist.mutable_data(), hist.size()));
-                 return hist;
+                 };
+                 return ddmt.get_plan().get_nbits() == 32 ? save(float{})
+                                                          : save(uint8_t{});
              })
         .def(
             "load_history",
             [](DDMT& ddmt, const py::array& hist_obj) {
-                const auto& plan = ddmt.get_plan();
-                const auto nbits = plan.get_nbits();
-                // Validate the *actual* dtype before casting: py::array_t's
-                // implicit conversion would otherwise silently truncate e.g. a
-                // float32 array into uint8 instead of raising a clear error.
-                if (nbits == 32) {
-                    if (hist_obj.dtype().kind() != 'f' ||
-                        hist_obj.itemsize() != 4) {
-                        throw std::invalid_argument(fmt::format(
-                            "DDMT.load_history: plan nbits=32 expects a "
-                            "float32 array, got dtype '{}'",
-                            std::string(py::str(hist_obj.dtype()))));
-                    }
-                    auto hist =
-                        py::array_t<float, py::array::c_style>(hist_obj);
-                    ddmt.load_history(
-                        std::span<const float>(hist.data(), hist.size()));
+                // Exact dtype and C order, as every host input: plan nbits
+                // 32 keeps float32 history, packed plans uint8.
+                const auto load = [&](auto tag, const char* dtype_name) {
+                    using T         = decltype(tag);
+                    const auto hist = require_contiguous_array<T>(
+                        hist_obj, "DDMT.load_history", dtype_name);
+                    const std::span<const T> in(hist.data(), hist.size());
+                    const py::gil_scoped_release release;
+                    ddmt.load_history(in);
+                };
+                if (ddmt.get_plan().get_nbits() == 32) {
+                    load(float{}, "float32");
                 } else {
-                    if (hist_obj.dtype().kind() != 'u' ||
-                        hist_obj.itemsize() != 1) {
-                        throw std::invalid_argument(fmt::format(
-                            "DDMT.load_history: plan nbits={} expects a "
-                            "uint8 array, got dtype '{}'",
-                            nbits, std::string(py::str(hist_obj.dtype()))));
-                    }
-                    auto hist =
-                        py::array_t<uint8_t, py::array::c_style>(hist_obj);
-                    ddmt.load_history(
-                        std::span<const uint8_t>(hist.data(), hist.size()));
+                    load(uint8_t{}, "uint8");
                 }
             },
-            "history"_a)
+            py::arg("history").noconvert())
         .def(
             "save_history",
             [](const DDMT& ddmt, const DeviceArray& out,

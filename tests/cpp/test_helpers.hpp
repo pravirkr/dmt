@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -29,6 +30,15 @@
 #endif
 
 namespace dmt::test {
+
+/// Stores the float with bit pattern @p bits in @p x through memcpy. Tests
+/// build NaN and infinity this way: the test sources compile with
+/// -ffast-math, where a NaN or infinity literal is undefined behaviour and
+/// clang may fold it to another value (-Wnan-infinity-disabled).
+inline void set_float_bits(float& x, std::uint32_t bits) noexcept {
+    static_assert(sizeof(x) == sizeof(bits));
+    std::memcpy(&x, &bits, sizeof(x));
+}
 
 // Default observation parameters reused across FDMT-family tests.
 inline constexpr float kFMin          = 1000.0F;
@@ -93,10 +103,8 @@ struct PackedWaterfall {
     std::vector<uint8_t> packed;
 };
 
-inline PackedWaterfall random_packed(SizeType nrows,
-                                     SizeType nsamps,
-                                     SizeType nbits,
-                                     unsigned seed) {
+inline PackedWaterfall
+random_packed(SizeType nrows, SizeType nsamps, SizeType nbits, unsigned seed) {
     const auto vals = dmt::test_random::uniform_int<uint32_t>(
         nrows * nsamps, seed, 0, max_sample_value(nbits));
     PackedWaterfall out{

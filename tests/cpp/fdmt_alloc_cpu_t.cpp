@@ -81,9 +81,8 @@ TEST_CASE("FDMT execute and stepper do not allocate", "[fdmt_cpu][cpu]") {
     const SizeType nbeams = 2;
     const SizeType nbits  = 2;
     std::vector<float> wf(nbeams * nchans * nsamps, 1.0F);
-    std::vector<uint8_t> packed(
-        nbeams * nchans * (((nsamps * nbits) + 7) / 8),
-        0x5A);
+    std::vector<uint8_t> packed(nbeams * nchans * (((nsamps * nbits) + 7) / 8),
+                                0x5A);
     // Mixed-sign dt range exercises the running box rows of level 0.
     for (const std::string mode : {"full", "roll", "valid"}) {
         for (const SizeType fuse : {SizeType{0}, SizeType{3}, kFDMTAutoFuse}) {

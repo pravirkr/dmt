@@ -337,11 +337,10 @@ public:
                     m_frac_s.size() * sizeof(double) +
                     (m_geo ? m_geo->twiddle_bytes() : 0) +
                     (m_step_geo ? m_step_geo->twiddle_bytes() : 0),
-                .state     = m_deferred.size(m_spectra) * sizeof(float) +
-                             (m_deferred.size(m_out_spec) +
-                              m_step_spectra.size() + m_state_a.size() +
-                              m_state_b.size()) *
-                                 sizeof(ComplexType),
+                .state = m_deferred.size(m_spectra) * sizeof(float) +
+                         (m_deferred.size(m_out_spec) + m_step_spectra.size() +
+                          m_state_a.size() + m_state_b.size()) *
+                             sizeof(ComplexType),
                 .history   = m_deferred.size(m_overlap) * sizeof(float),
                 .workspace = work,
                 .output    = 0};
@@ -692,9 +691,9 @@ private:
         for (const auto& l : m_levels) {
             nodes += l.sum.size() + l.copy.size();
         }
-        const auto seg = fdmt_fft::choose_segments(
-            m_geom, m_mode, m_nsamps_out, nodes, m_nchans, m_ndms,
-            m_max_segment);
+        const auto seg =
+            fdmt_fft::choose_segments(m_geom, m_mode, m_nsamps_out, nodes,
+                                      m_nchans, m_ndms, m_max_segment);
         m_seg_len   = seg.n_fft;
         m_nseg      = seg.nseg;
         m_seg_hop   = seg.hop;
@@ -1019,10 +1018,10 @@ private:
                 const auto nc = std::min(kFwdBatch, m_nchans - c0);
                 for (SizeType i = 0; i < nc; ++i) {
                     const auto c = c0 + i;
-                    fill_segment(
-                        w.time.data(), src, (beam * m_nchans) + c,
-                        m_overlap_len > 0 ? overlap_row(beam, c) : nullptr,
-                        seg);
+                    fill_segment(w.time.data(), src, (beam * m_nchans) + c,
+                                 m_overlap_len > 0 ? overlap_row(beam, c)
+                                                   : nullptr,
+                                 seg);
                     g.r2c->r2c(w.time.data(),
                                w.batch.data() + (i * g.bins_stride));
                 }

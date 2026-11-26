@@ -171,6 +171,13 @@ class TestPlans:
                 libdmt.DDMTPlan.generate_levin_dm_grid(
                     bad_val, 100.0, 0.001, 0.001, 1000.0, 1500.0, 64, 1.15
                 )
+        # 8. A Levin grid needs a band of at least two channels.
+        for fn in (
+            libdmt.DDMTPlan.generate_levin_dm_grid,
+            libdmt.DDMTPlan.generate_levin_dm_grid_piecewise,
+        ):
+            with pytest.raises(ValueError, match="nchans"):
+                fn(0.0, 100.0, 0.001, 0.001, 1000.0, 1500.0, 1, 1.15)
 
     def test_effective_variance_and_sigma(self) -> None:
         nchans = 64

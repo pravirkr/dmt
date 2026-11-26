@@ -182,8 +182,7 @@ void BoxcarNoiseModel::fill(std::span<const uint8_t> mask, bool layout) {
                 std::span<const Bin> sb;
                 if (c.i_coord_head != SIZE_MAX) {
                     const SizeType b = c.head_buf_offset / prev;
-                    sb               = {in.data() + in_off[b],
-                                        in.data() + in_off[b + 1]};
+                    sb = {in.data() + in_off[b], in.data() + in_off[b + 1]};
                 }
                 return merge_length_bins(sa, sb, dst);
             };
@@ -257,10 +256,10 @@ BoxcarNoiseModel::compute(std::span<const uint8_t> mask) {
         const double mw_ref = m_packed ? m_reference_mean[r] : 0.0;
         // Shared with make_boxcar_plans(): bit-identical arithmetic and order.
         for (SizeType f = 0; f < nf; ++f) {
-            const auto res = row_width_noise(
-                hist, m_widths[f], m_config, m_smear,
-                m_plan.get_box_fraction_bits(), unit, m_packed, mw, mw_ref,
-                true);
+            const auto res =
+                row_width_noise(hist, m_widths[f], m_config, m_smear,
+                                m_plan.get_box_fraction_bits(), unit, m_packed,
+                                mw, mw_ref, true);
             const SizeType k     = (static_cast<SizeType>(r) * nf) + f;
             ok                   = ok && res.ok_float && res.ok_int;
             tables->inv_sigma[k] = res.inv_sigma;

@@ -87,11 +87,11 @@ struct FDMTCoordCopyD {
     gpu_utils::PlannedVector<int> tail_nsamps;
 
     __host__ FDMTCoordCopyDPtrs get_raw_ptrs() const {
-        return {
-            .nsamps          = thrust::raw_pointer_cast(nsamps.data()),
-            .buf_offset      = thrust::raw_pointer_cast(buf_offset.data()),
-            .tail_buf_offset = thrust::raw_pointer_cast(tail_buf_offset.data()),
-            .tail_nsamps     = thrust::raw_pointer_cast(tail_nsamps.data())};
+        return {.nsamps     = thrust::raw_pointer_cast(nsamps.data()),
+                .buf_offset = thrust::raw_pointer_cast(buf_offset.data()),
+                .tail_buf_offset =
+                    thrust::raw_pointer_cast(tail_buf_offset.data()),
+                .tail_nsamps = thrust::raw_pointer_cast(tail_nsamps.data())};
     }
 };
 
@@ -157,9 +157,9 @@ transfer_coords_impl(const std::vector<std::vector<FDMTCoord>>& host_coords,
     device_coords.hist_offset     = hist_offset;
 }
 
-__host__ inline void
-transfer_copy_coords_impl(const std::vector<std::vector<FDMTCoord>>& host_coords,
-                          FDMTCoordCopyD& device_coords) {
+__host__ inline void transfer_copy_coords_impl(
+    const std::vector<std::vector<FDMTCoord>>& host_coords,
+    FDMTCoordCopyD& device_coords) {
     std::vector<int> nsamps, buf_offset, tail_buf_offset, tail_nsamps;
 
     size_t total_size = 0;

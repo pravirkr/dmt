@@ -48,7 +48,7 @@ fft_reference(const plans::FDMTPlan& plan,
     } else {
         const auto geom = algorithms::fdmt_fft::make_geometry(
             plan, FDMTMode::kValid, frac, smear);
-        latency = geom.latency;
+        latency        = geom.latency;
         const auto eng = algorithms::detail::make_fdmt_fft_cpu(
             plan, {.use_box_smearing  = smear,
                    .mode              = FDMTMode::kValid,

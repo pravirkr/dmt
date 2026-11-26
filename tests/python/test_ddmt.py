@@ -449,9 +449,7 @@ class TestSDMT:
         sdmt = SDMT(self.F_MIN, self.F_MAX, self.NCHANS, self.TSAMP, self.DMS, nbits=8)
         out_chan = sdmt.execute(data, nsamps=nsamps)
         sdmt.reset_history()
-        out_time = sdmt.execute_time_major(
-            np.ascontiguousarray(data.T), nsamps=nsamps
-        )
+        out_time = sdmt.execute_time_major(np.ascontiguousarray(data.T), nsamps=nsamps)
         np.testing.assert_array_equal(out_time, out_chan)
 
     def test_unavailable_backend_raises(self) -> None:

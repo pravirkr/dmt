@@ -33,8 +33,8 @@ cpu_reference(const plans::FDMTPlan& plan,
             beam[k].assign(input[k].begin() + b * size,
                            input[k].begin() + (b + 1) * size);
         }
-        auto c =
-            fft_reference(plan, cfg, smear, frac, kill, exec, beam, max_segment);
+        auto c = fft_reference(plan, cfg, smear, frac, kill, exec, beam,
+                               max_segment);
         for (auto& x : c) {
             x.beam_idx = static_cast<uint32_t>(b);
         }
@@ -50,7 +50,7 @@ TEST_CASE("FDMTFFTBoxcar GPU host and device APIs match direct reference",
     const plans::FDMTPlan plan(700, 1200, 7, 751, 0.001F,
                                std::vector<IndexType>{0, 4, 17, 40, 97});
     const auto input = waterfalls(plan, 2, 4);
-    const Exec exec = test::gpu_exec();
+    const Exec exec  = test::gpu_exec();
     for (const bool segmented : {false, true}) {
         for (const bool frac : {true, false}) {
             for (const auto mode :
@@ -154,7 +154,7 @@ TEST_CASE("FDMTFFTBoxcar GPU memory budget shortens the segments",
     cfg.detect_thresh    = 6.0F;
     cfg.max_candidates   = 200000;
     cfg.max_cands_per_dm = 0;
-    const Exec exec = test::gpu_exec();
+    const Exec exec      = test::gpu_exec();
     FDMTFFTBoxcar open(plan, cfg, true, exec);
     // Half of what the segments take: the input block reserved for host
     // calls (staging) does not shrink with them.
@@ -190,7 +190,7 @@ TEST_CASE("FDMTFFTBoxcar GPU budget does not count host candidates",
     BoxcarConfig cfg;
     cfg.max_boxcar     = 32;
     cfg.max_candidates = SizeType{1} << 22;
-    const Exec exec = test::gpu_exec();
+    const Exec exec    = test::gpu_exec();
     const FDMTFFTBoxcar open(plan, cfg, true, exec);
     const auto usage          = open.get_memory_usage();
     const SizeType host_cands = cfg.max_candidates * sizeof(RawCandidate);

@@ -148,10 +148,8 @@ struct Output {
 };
 
 template <typename Engine>
-Output run_host(Engine& ddmt,
-                const DDMTPlan& plan,
-                SizeType nbeams,
-                const Input& in) {
+Output
+run_host(Engine& ddmt, const DDMTPlan& plan, SizeType nbeams, const Input& in) {
     Output out;
     const auto n =
         nbeams * plan.get_dm_arr().size() * ddmt.get_output_nsamps(in.nsamps);
@@ -205,7 +203,7 @@ Output run_time_major(Engine& ddmt,
                       const Input& in,
                       bool on_device) {
     Output out;
-    const auto n  =
+    const auto n =
         nbeams * plan.get_dm_arr().size() * ddmt.get_output_nsamps(in.nsamps);
     const auto tm = in.time_major(nbeams);
     out.i.resize(n);

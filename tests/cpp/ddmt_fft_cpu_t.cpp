@@ -695,8 +695,8 @@ TEST_CASE("DDMTFFT geometry cache evicts one LRU entry (cpu)",
         CHECK(eng.get_memory_usage().total() == after_five.total());
         float max_err = 0.0F;
         for (const float v : out) {
-            max_err = std::max(max_err,
-                               std::abs(v - static_cast<float>(nchans)));
+            max_err =
+                std::max(max_err, std::abs(v - static_cast<float>(nchans)));
         }
         CHECK(max_err < 5e-3F);
     }

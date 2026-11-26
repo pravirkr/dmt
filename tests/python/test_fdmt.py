@@ -171,7 +171,7 @@ class TestFDMT:
 
         # Allocate custom buffer matching buffer_size
         custom_buf = np.zeros(thefdmt.plan.buffer_size, dtype=np.float32)
-        thefdmt.reset(waterfall, custom_buf)
+        thefdmt.reset(waterfall, dmt=custom_buf)
         thefdmt.advance_until_remaining(1)
         res = thefdmt.finalize()
 
@@ -199,7 +199,7 @@ class TestFDMT:
         # Buffer too small
         undersized_buf = np.zeros(10, dtype=np.float32)
         with pytest.raises(ValueError):
-            thefdmt.reset(waterfall, undersized_buf)
+            thefdmt.reset(waterfall, dmt=undersized_buf)
 
         # Invalid waterfall dimension
         with pytest.raises(RuntimeError):
@@ -980,7 +980,7 @@ class TestFDMT:
                 waterfall[:, b * block_size : (b + 1) * block_size]
             )
             dmt_buf = np.zeros(fdmt_valid.plan.buffer_size, dtype=np.float32)
-            fdmt_valid.reset(block, dmt_buf)
+            fdmt_valid.reset(block, dmt=dmt_buf)
             fdmt_valid.advance_until_remaining(2)
             assert fdmt_valid.num_subbands == 4
             for s in range(4):

@@ -394,7 +394,7 @@ TEST_CASE("GPU FDMTBoxcar declared per-call masks: a search latency over one "
     const auto est = FDMTBoxcar::estimate_memory(
         plan, cfg, true, kGpu, 1, algorithms::kFDMTAutoFuse, 0, budget);
     INFO(est.search_path);
-    REQUIRE_FALSE(est.search_path.empty());
+    REQUIRE(est.search_path.find("windowed top") != std::string::npos);
     REQUIRE(est.search_latency > plan.get_nsamps());
     cfg.per_call_masks  = true;
     const auto declared = FDMTBoxcar::estimate_memory(
@@ -643,7 +643,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks equal the CPU",
                                 auto gpu =
                                     make_packed(plan, cfg, kGpu, ctor, chunk);
                                 compare_exact(host_run(gpu, input, masks, true),
-                                           want);
+                                              want);
                                 // Device input on a nondefault stream.
                                 cudaStream_t st;
                                 gpu_utils::check_gpu_call(
@@ -771,7 +771,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: short blocks at 1-8 bits, "
                     host_run(cpu, input, masks, false, &cpu_flags);
                 REQUIRE(want.size() > 20);
                 compare_exact(host_run(gpu, input, masks, false, &gpu_flags),
-                           want);
+                              want);
                 CHECK(gpu_flags == cpu_flags);
                 if (c.keep) {
                     CHECK(std::ranges::count(cpu_flags, true) > 0);

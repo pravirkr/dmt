@@ -99,6 +99,7 @@ if(DMT_GPU_BACKEND)
   list(APPEND INTERNAL_TEST_SOURCES ${INTERNAL_TEST_SOURCES_GPU})
 endif()
 
+# Common settings of a test executable; include_lib adds lib/ to its include path.
 function(dmt_configure_test_target target_name include_lib)
   if(include_lib)
     target_include_directories(

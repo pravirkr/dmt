@@ -73,9 +73,8 @@ inline double row_mean_weight(std::span<const BoxcarLengthBin> hist,
         if (e.count == 0) {
             continue;
         }
-        const SizeType len = e.len;
-        const double weight =
-            smear ? box_weight(len, frac_bits) * unit : 1.0;
+        const SizeType len  = e.len;
+        const double weight = smear ? box_weight(len, frac_bits) * unit : 1.0;
         sum += static_cast<double>(e.count) * static_cast<double>(len) * weight;
     }
     return sum;
@@ -114,10 +113,9 @@ inline RowWidthNoise row_width_noise(std::span<const BoxcarLengthBin> hist,
         if (e.count == 0) {
             continue;
         }
-        const SizeType len = e.len;
-        const double weight =
-            smear ? box_weight(len, frac_bits) * unit : 1.0;
-        const auto n = static_cast<double>(e.count);
+        const SizeType len  = e.len;
+        const double weight = smear ? box_weight(len, frac_bits) * unit : 1.0;
+        const auto n        = static_cast<double>(e.count);
         variance += n * fdmt_trapezoid_variance(len, width, w_edge, weight);
     }
     RowWidthNoise out;
@@ -128,10 +126,10 @@ inline RowWidthNoise row_width_noise(std::span<const BoxcarLengthBin> hist,
     const float inv_sigma = static_cast<float>(1.0 / sigma);
     const float threshold = static_cast<float>(config.detect_thresh * sigma);
     out.ok_float          = utils::is_finite_bits(inv_sigma) &&
-                   utils::is_finite_bits(threshold) && inv_sigma > 0 &&
-                   threshold > 0;
-    out.inv_sigma = inv_sigma;
-    out.thresh    = threshold;
+                            utils::is_finite_bits(threshold) && inv_sigma > 0 &&
+                            threshold > 0;
+    out.inv_sigma         = inv_sigma;
+    out.thresh            = threshold;
     if (packed) {
         const double scale = smear ? 1.0 / unit : 1.0;
         const double filter_weight =
@@ -154,7 +152,7 @@ inline RowWidthNoise row_width_noise(std::span<const BoxcarLengthBin> hist,
             const bool fits = cutoff < std::ldexp(1.0, 64) && shift >= 0 &&
                               shift < std::ldexp(1.0, 63) &&
                               shift == std::floor(shift);
-            out.ok_int = fits;
+            out.ok_int      = fits;
             if (fits) {
                 const auto c0      = static_cast<uint64_t>(cutoff);
                 const auto sh      = static_cast<uint64_t>(shift);
@@ -428,16 +426,15 @@ public:
         return m_ring;
     }
     [[nodiscard]] const std::vector<std::pair<SizeType, SizeType>>&
-    active_kill_runs(
-        const std::vector<std::pair<SizeType, SizeType>>& default_runs)
-        const noexcept {
+    active_kill_runs(const std::vector<std::pair<SizeType, SizeType>>&
+                         default_runs) const noexcept {
         return m_enabled ? m_ring.back().kill_runs : default_runs;
     }
 
     void push(BlockNoise entry) { m_pending = std::move(entry); }
 
-    void reset(
-        const std::vector<std::pair<SizeType, SizeType>>& default_kill_runs) {
+    void
+    reset(const std::vector<std::pair<SizeType, SizeType>>& default_kill_runs) {
         m_pending.reset();
         m_evicted.reset();
         m_prev_evicted.reset();
@@ -465,7 +462,7 @@ public:
             entry.steady    = m_ring.back().steady;
             entry.kill_runs = default_kill_runs;
         }
-        entry.first_sample = position;
+        entry.first_sample         = position;
         m_prev_evicted             = std::move(m_evicted);
         m_catch_undo               = {};
         m_catch_undo.has_catch_all = m_has_catch_all;
@@ -532,9 +529,8 @@ public:
         return undo_commit();
     }
 
-    [[nodiscard]] uint64_t catch_all_begin(uint64_t position,
-                                           uint64_t block_nsamps) const
-        noexcept {
+    [[nodiscard]] uint64_t
+    catch_all_begin(uint64_t position, uint64_t block_nsamps) const noexcept {
         if (!m_enabled || m_ring_needed <= m_ring_size) {
             return UINT64_MAX;
         }

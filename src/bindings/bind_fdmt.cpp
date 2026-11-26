@@ -271,8 +271,8 @@ void bind_fdmt(py::module_& mod) {
             Each chunk costs a little cross-block
             history traffic. ``None`` (default) picks the longest power of
             two >= 2048 whose state fits 2 GiB, capped at ``nsamps`` (GPU:
-            the longest power of two >= 256 whose state fits the device L2,
-            when one does; see :attr:`chunk_nsamps`); other values are
+            the longest power of two >= 256 whose state fits a fixed 96 MiB
+            cache target, the L40S's L2, when one does; see :attr:`chunk_nsamps`); other values are
             rounded up to a multiple of 64. The stepper needs ``chunk_nsamps >= nsamps``.
         max_memory_bytes : int, optional
             Keyword-only. Budget for everything the instance allocates
@@ -820,11 +820,12 @@ void bind_fdmt(py::module_& mod) {
                 const py::gil_scoped_release release;
                 fdmt.reset(in_span, dmt_span);
             },
-            py::arg("waterfall").noconvert(),
+            py::arg("waterfall").noconvert(), py::kw_only(),
             py::arg("dmt").noconvert() = py::none(),
             R"doc(
-            Reset and initialize the stepper with waterfall and optional dmt
-            buffer (at least ``nbeams * plan.dmt_size`` floats).
+            Reset and initialize the stepper with waterfall and an optional
+            keyword-only ``dmt`` buffer (at least ``nbeams * plan.dmt_size``
+            floats).
 
             In ``mode='valid'`` a block must be finalized before the next
             ``reset``/``execute`` (else RuntimeError); :meth:`reset_history`
@@ -855,7 +856,7 @@ void bind_fdmt(py::module_& mod) {
                 fdmt_reset_device<FDMT>(self, "FDMT.reset", waterfall,
                                         std::nullopt, dmt, stream);
             },
-            py::arg("waterfall"), py::arg("dmt") = py::none(), py::kw_only(),
+            py::arg("waterfall"), py::kw_only(), py::arg("dmt") = py::none(),
             py::arg("stream") = py::none())
         .def(
             "advance",
@@ -959,8 +960,11 @@ void bind_fdmt(py::module_& mod) {
                 const auto sz = fdmt.history_state_size();
                 py::array_t<float, py::array::c_style> hist(
                     static_cast<py::ssize_t>(sz));
-                fdmt.save_history(
-                    std::span<float>(hist.mutable_data(), hist.size()));
+                const std::span<float> out(hist.mutable_data(), hist.size());
+                {
+                    const py::gil_scoped_release release;
+                    fdmt.save_history(out);
+                }
                 return hist;
             },
             R"doc(
@@ -973,19 +977,15 @@ void bind_fdmt(py::module_& mod) {
         .def(
             "load_history",
             [](FDMT& fdmt, const py::array& hist_obj) {
-                if (hist_obj.dtype().kind() != 'f' ||
-                    hist_obj.itemsize() != 4) {
-                    throw std::invalid_argument(
-                        "FDMT.load_history: expected a float32 array");
-                }
-                auto hist =
-                    hist_obj.cast<py::array_t<float, py::array::c_style>>();
+                const auto hist = require_contiguous_array<float>(
+                    hist_obj, "FDMT.load_history", "float32");
                 // The size is checked by the engine (a CPU skewed-window
                 // engine accepts a packed or a float ring layout).
-                fdmt.load_history(
-                    std::span<const float>(hist.data(), hist.size()));
+                const std::span<const float> in(hist.data(), hist.size());
+                const py::gil_scoped_release release;
+                fdmt.load_history(in);
             },
-            py::arg("history"),
+            py::arg("history").noconvert(),
             R"doc(
         Restore previously saved streaming history state from a 1D float32 NumPy array.
         Raises ValueError when the header shows a different configuration (DM
@@ -1476,8 +1476,7 @@ void bind_fdmt(py::module_& mod) {
                                            stream);
             },
             py::arg("waterfall_packed"), py::kw_only(), py::arg("nbits"),
-            py::arg("dmt")    = py::none(),
-            py::arg("stream") = py::none())
+            py::arg("dmt") = py::none(), py::arg("stream") = py::none())
         .def(
             "reset",
             [](const py::object& self, const DeviceArray& waterfall,
@@ -1485,7 +1484,7 @@ void bind_fdmt(py::module_& mod) {
                 fdmt_reset_device<FDMTFFT>(self, "FDMTFFT.reset", waterfall,
                                            std::nullopt, dmt, stream);
             },
-            py::arg("waterfall"), py::arg("dmt") = py::none(), py::kw_only(),
+            py::arg("waterfall"), py::kw_only(), py::arg("dmt") = py::none(),
             py::arg("stream") = py::none(),
             "Initialize the stepper from device arrays (GPU backends), as "
             ":meth:`FDMT.reset`.")
@@ -1505,7 +1504,7 @@ void bind_fdmt(py::module_& mod) {
                 const py::gil_scoped_release release;
                 fdmt.reset(in_span, dmt_span);
             },
-            py::arg("waterfall").noconvert(),
+            py::arg("waterfall").noconvert(), py::kw_only(),
             py::arg("dmt").noconvert() = py::none())
         .def(
             "advance",
@@ -1596,8 +1595,11 @@ void bind_fdmt(py::module_& mod) {
             [](const FDMTFFT& fdmt) {
                 py::array_t<float, py::array::c_style> hist(
                     static_cast<py::ssize_t>(fdmt.history_state_size()));
-                fdmt.save_history(
-                    std::span<float>(hist.mutable_data(), hist.size()));
+                const std::span<float> out(hist.mutable_data(), hist.size());
+                {
+                    const py::gil_scoped_release release;
+                    fdmt.save_history(out);
+                }
                 return hist;
             },
             "Save the streaming history into a 1D float32 array.")
@@ -1782,10 +1784,9 @@ void bind_fdmt(py::module_& mod) {
             const auto grid       = extract_dm_grid(obj);
             auto [dmt, fdmt_plan] = [&] {
                 const py::gil_scoped_release release;
-                return algorithms::compute_fdmt(in_span, f_min, f_max, nchans,
-                                                nsamps, tsamp, grid,
-                                                use_box_smearing, mode, exec,
-                                                nbeams);
+                return algorithms::compute_fdmt(
+                    in_span, f_min, f_max, nchans, nsamps, tsamp, grid,
+                    use_box_smearing, mode, exec, nbeams);
             }();
             return std::make_tuple(as_pyarray(std::move(dmt)),
                                    std::move(fdmt_plan));

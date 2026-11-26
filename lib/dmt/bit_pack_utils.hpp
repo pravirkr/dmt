@@ -163,21 +163,23 @@ constexpr uint32_t max_sample_value(SizeType nbits) noexcept {
     return (1U << nbits) - 1U;
 }
 
-/** @brief True when @p nbits is one of the packed integer widths (1, 2, 4, 8, 16). */
+/** @brief True when @p nbits is one of the packed integer widths (1, 2, 4, 8,
+ * 16). */
 constexpr bool is_packed_width(SizeType nbits) noexcept {
     return nbits == 1 || nbits == 2 || nbits == 4 || nbits == 8 || nbits == 16;
 }
 
-/** @brief Byte length of one channel row holding @p nsamps samples (float when 32). */
+/** @brief Byte length of one channel row holding @p nsamps samples (float when
+ * 32). */
 constexpr SizeType row_bytes_for(SizeType nsamps, SizeType nbits) noexcept {
     return nbits == 32 ? nsamps * sizeof(float)
                        : packed_row_bytes(nsamps, nbits);
 }
 
-/** @brief Calls `f.template operator()<NBITS>()` for runtime width 1, 2, 4, 8, 16, or 32. */
+/** @brief Calls `f.template operator()<NBITS>()` for runtime width 1, 2, 4, 8,
+ * 16, or 32. */
 template <typename F>
-inline void
-dispatch_nbits(SizeType nbits, F&& f, const char* caller = "dmt") {
+inline void dispatch_nbits(SizeType nbits, F&& f, const char* caller = "dmt") {
     switch (nbits) {
     case 1:
         f.template operator()<1>();
@@ -198,9 +200,9 @@ dispatch_nbits(SizeType nbits, F&& f, const char* caller = "dmt") {
         f.template operator()<32>();
         break;
     default:
-        throw std::invalid_argument(std::string(caller) +
-                                    ": unsupported nbits=" +
-                                    std::to_string(nbits));
+        throw std::invalid_argument(
+            std::string(caller) +
+            ": unsupported nbits=" + std::to_string(nbits));
     }
 }
 

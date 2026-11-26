@@ -1111,7 +1111,7 @@ FDMTBoxcarMemoryUsage FDMTBoxcarCudaEngine::memory_usage() const noexcept {
                       (m_bright_rank_d.size() * sizeof(uint32_t)) +
                       (sizeof(KeepSelect) * m_bright_sel_d.size()) +
                       (m_bright_hist_d.size() * sizeof(uint64_t)),
-        .staging = (m_input_d.size() * sizeof(float)) + m_keep_d.size(),
+        .staging    = (m_input_d.size() * sizeof(float)) + m_keep_d.size(),
         .host = host_plan + (m_slots.size() * slot_floats() * sizeof(float)) +
                 (m_candidates_h.size() * sizeof(RawCandidate)) +
                 (m_plane_counts_h.size() * sizeof(CandidateCounts))};

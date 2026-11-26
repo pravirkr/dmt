@@ -19,7 +19,6 @@
 #include "dmt/modes.hpp"
 
 #include "cpu/fdmt_cpu_engine.hpp"
-
 #include "test_random.hpp"
 
 // The CUDA backend's fused-level tile (lib/dmt/fdmt_fused_tile.hpp), run
@@ -601,7 +600,7 @@ TEST_CASE("FDMT automatic fusion depth in valid mode matches tile constants",
     constexpr SizeType kTile  = Engine::kFuseTiles.back();
     constexpr SizeType kMinGr = Engine::kFuseGroupsPerThread;
     const auto working_set    = [](const plans::FDMTPlan& plan, SizeType fuse,
-                                SizeType tile) {
+                                   SizeType tile) {
         const auto& pc         = plan.get_container();
         const SizeType ngroups = pc.state_shape[fuse].nchans;
         double total           = 0.0;

@@ -135,8 +135,8 @@ void check_long_excursion_frontier(Exec exec) {
             CHECK(held[0] < 3 * ns);
             // The closing candidate begins at the held frontier, and no
             // later candidate begins before it.
-            const auto oldest = std::ranges::min_element(
-                all, {}, [&](const RawCandidate& c) {
+            const auto oldest =
+                std::ranges::min_element(all, {}, [&](const RawCandidate& c) {
                     return c.end_sample >= 2500 ? c.begin_sample : UINT64_MAX;
                 });
             REQUIRE(oldest != all.end());

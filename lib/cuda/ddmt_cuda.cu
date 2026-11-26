@@ -938,7 +938,6 @@ private:
         upload(m_sdmt_wins_d, best->wins.begin(), best->wins.end());
         upload(m_sdmt_nodes_d, best->nodes.begin(), best->nodes.end());
         upload(m_sdmt_trials_d, best->trials.begin(), best->trials.end());
-        return true;
         with_sdmt_cfg(best_cfg, [&]<class Cfg>() {
             gpu_utils::check_gpu_call(
                 cudaFuncSetAttribute(
@@ -947,6 +946,7 @@ private:
                     cudaFuncAttributeMaxDynamicSharedMemorySize, optin),
                 "SDMT: setting kernel shared memory failed");
         });
+        return true;
     }
 
     template <unsigned NBITS, class Cfg>

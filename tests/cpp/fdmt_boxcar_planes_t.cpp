@@ -192,7 +192,8 @@ void check_share(Exec exec) {
                                 auto h = have[p];
                                 std::ranges::sort(h, brighter);
                                 for (SizeType i = 0; i < n; ++i) {
-                                    REQUIRE(same_candidate_exact(h[i], want[p][i]));
+                                    REQUIRE(
+                                        same_candidate_exact(h[i], want[p][i]));
                                 }
                             } else {
                                 // Some of the plane's own.

@@ -583,7 +583,7 @@ private:
             // very long transforms leave the caches.
             constexpr SizeType kMaxAutoMbin = SizeType{1} << 20;
             m_mbin                          = 0;
-            double best                     = std::numeric_limits<double>::max();
+            double best = std::numeric_limits<double>::max();
             for (SizeType m = 16; m <= kMaxAutoMbin; m *= 2) {
                 if (m <= (2 * novc) + 1) {
                     continue;

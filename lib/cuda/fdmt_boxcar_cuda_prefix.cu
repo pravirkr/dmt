@@ -154,7 +154,7 @@ DMT_D bool detect_tile_grouped(const T* ring,
                 break;
             }
             const uint32_t idx = position + 1U + static_cast<uint32_t>(s);
-            const T cur = [&] {
+            const T cur        = [&] {
                 if constexpr (std::is_integral_v<T>) {
                     return current_raw.v[k];
                 } else {
@@ -206,11 +206,11 @@ DMT_D bool detect_tile_grouped(const T* ring,
         }
         // Bound of the whole group; a pass is checked width by width from
         // the ring (mn holds range minima now).
-        const int span = 1 << grp.level;
-        const float bound_thr =
-            std::is_integral_v<T> ? (group_thresholds[g] - margin)
-                                  : group_thresholds[g];
-        bool pass = false;
+        const int span        = 1 << grp.level;
+        const float bound_thr = std::is_integral_v<T>
+                                    ? (group_thresholds[g] - margin)
+                                    : group_thresholds[g];
+        bool pass             = false;
 #pragma unroll
         for (int k = 0; k < kItems; ++k) {
             const int s = k * kBlockThreads + tid;
@@ -323,16 +323,17 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
         keep_q, detected_all, plane_slots, plane_cap, pending);
     const int tid       = static_cast<int>(threadIdx.x);
     const auto lookback = static_cast<uint32_t>(max_width - 1);
-    const auto noise    = resolve_row_noise<T, kBlockNoise>(
+    RowNoisePlay<kBlockNoise> play{};
+    const auto noise = resolve_row_noise<T, kBlockNoise>(
         input, row_index, nfilters, max_width, widths, thresholds, inv_sigma,
-        integer_thresholds, block_tables);
+        integer_thresholds, block_tables, play);
     const uint32_t* wtab = widths;
     const T* ttab        = noise.thr_row();
     if (shared_tables) {
         T* s_thr       = ring + mask + 1;
         auto* s_widths = reinterpret_cast<uint32_t*>(s_thr + nfilters);
         stage_row_tables<T, kBlockThreads, kBlockNoise>(s_thr, s_widths, widths,
-                                                        nfilters, noise);
+                                                        nfilters, noise, play);
         wtab = s_widths;
         ttab = s_thr;
     }
@@ -378,9 +379,8 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     // Whether a run is open, as any_open_peaks() would find: kept per row by
     // the last call, so the common call never reads the row's peaks.
     bool open = input.sample_begin > 0 && open_all[index] != 0;
-    bootstrap_carry_ring<T, C, kBlockThreads>(shared, ring, mask, carry,
-                                              max_width, lookback,
-                                              input.sample_begin);
+    bootstrap_carry_ring<T, C, kBlockThreads>(
+        shared, ring, mask, carry, max_width, lookback, input.sample_begin);
     for (SizeType t0 = 0; t0 < input.nsamps; t0 += kBlockTile) {
         const int n = static_cast<int>(
             input.nsamps - t0 < kBlockTile ? input.nsamps - t0 : kBlockTile);

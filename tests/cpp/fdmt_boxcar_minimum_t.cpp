@@ -171,12 +171,11 @@ void check_minimum_equals_default(Exec exec) {
     }
     for (const bool packed : {false, true}) {
         DYNAMIC_SECTION((packed ? "packed 8-bit" : "float")) {
-            const BoxcarConfig cfg(24, 1.5F, 4.2F, 73.9F,
-                                   PeakFindingMode::kContiguousPeakPerWidth,
-                                   1U << 20, 0, true, packed ? 8 : 32,
-                                   packed ? 127.5F : 0.0F);
-            const auto min = FDMTBoxcar::estimate_minimum_memory(
-                plan, cfg, true, exec);
+            const BoxcarConfig cfg(
+                24, 1.5F, 4.2F, 73.9F, PeakFindingMode::kContiguousPeakPerWidth,
+                1U << 20, 0, true, packed ? 8 : 32, packed ? 127.5F : 0.0F);
+            const auto min =
+                FDMTBoxcar::estimate_minimum_memory(plan, cfg, true, exec);
             FDMTBoxcar at_min(plan, cfg, true, exec, 1,
                               algorithms::kFDMTAutoFuse, 0,
                               min.max_memory_bytes);
@@ -188,9 +187,9 @@ void check_minimum_equals_default(Exec exec) {
                 std::vector<RawCandidate> out;
                 for (SizeType b = 0; b < kBlocks; ++b) {
                     if (packed) {
-                        boxcar_test::append(
-                            out, s.execute(std::span<const uint8_t>(
-                                     packed_blocks[b])));
+                        boxcar_test::append(out,
+                                            s.execute(std::span<const uint8_t>(
+                                                packed_blocks[b])));
                     } else {
                         boxcar_test::append(
                             out,

@@ -560,8 +560,7 @@ TEST_CASE("Packed FDMTBoxcar wide windows exceed uint32 safely",
     CHECK(found);
 }
 
-TEST_CASE("Trapezoidal FDMTBoxcar sensitivity",
-          "[boxcar][trapezoid][cpu]") {
+TEST_CASE("Trapezoidal FDMTBoxcar sensitivity", "[boxcar][trapezoid][cpu]") {
     // Verify off-phase pulse sensitivity gain for [0.5, 1.0, 0.5] profile at
     // DM=0. (Analytical trapezoid variance formula is verified in
     // boxcar_plans_trace_t.cpp.)
@@ -693,8 +692,7 @@ void check_width_screen(Exec exec) {
                 REQUIRE_FALSE(expected_packed.empty());
                 pcfg.input_nbits = 8;
                 pcfg.input_mean  = 127.5F;
-                for (const SizeType chunk :
-                     {SizeType{64}, plan.get_nsamps()}) {
+                for (const SizeType chunk : {SizeType{64}, plan.get_nsamps()}) {
                     FDMTBoxcar search(plan, cfg, true, exec, 1,
                                       algorithms::kFDMTAutoFuse, chunk);
                     std::vector<RawCandidate> actual;
@@ -1151,11 +1149,10 @@ void check_white_noise_far(Exec exec) {
                 uint64_t detected = 0;
                 for (SizeType b = 0; b < kBlocks; ++b) {
                     const auto res =
-                        packed
-                            ? search.execute(
-                                  std::span<const uint8_t>(packed_blocks[b]))
-                            : search.execute(
-                                  std::span<const float>(float_blocks[b]));
+                        packed ? search.execute(
+                                     std::span<const uint8_t>(packed_blocks[b]))
+                               : search.execute(
+                                     std::span<const float>(float_blocks[b]));
                     REQUIRE_FALSE(res.overflowed());
                     detected += res.total_detected;
                 }

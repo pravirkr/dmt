@@ -498,6 +498,15 @@ make_boxcar_driver(std::unique_ptr<FDMTEngine> fdmt);
 [[nodiscard]] std::unique_ptr<BoxcarDriver>
 make_boxcar_driver(std::unique_ptr<FDMTFFTEngine> fft);
 
+/// Test seam (internal tests only; null otherwise): when set,
+/// make_boxcar_driver() hands every driver it builds to this function and
+/// returns its result, so a test can wrap the transform of a public
+/// FDMTBoxcar (fail a call after the engine committed its block noise,
+/// record the skewed path's row lags). Read once per construction.
+using BoxcarDriverWrap =
+    std::unique_ptr<BoxcarDriver> (*)(std::unique_ptr<BoxcarDriver>);
+inline BoxcarDriverWrap g_boxcar_driver_wrap = nullptr; // NOLINT
+
 /// Per-call kill-mask entries live in `dmt/boxcar_noise.hpp` (`BlockNoise`).
 
 class FDMTBoxcarEngine : public FDMTSearchSink {
@@ -525,10 +534,10 @@ public:
     virtual CandidateResultView execute_zero() {
         throw std::logic_error("FDMTBoxcar: no zero-block execute here");
     }
-    virtual SizeType chunk_nsamps() const noexcept = 0;
-    virtual SizeType fuse_levels() const noexcept  = 0;
+    virtual SizeType chunk_nsamps() const noexcept       = 0;
+    virtual SizeType fuse_levels() const noexcept        = 0;
     [[nodiscard]] virtual FDMTPath path() const noexcept = 0;
-    virtual std::string search_path() const        = 0;
+    virtual std::string search_path() const              = 0;
     /// drain(): endpoints at or after `stop` are not searched (UINT64_MAX:
     /// none); reset_history() clears it.
     virtual void set_search_stop(uint64_t stop) noexcept = 0;

@@ -45,9 +45,8 @@ FDMTCpuEngine::FDMTCpuEngine(const plans::FDMTPlan& plan,
       m_chunk(chunk),
       m_search_nbits(cfg.search_nbits),
       m_search_upper(cfg.search_upper_levels),
-      m_search_u32(detail::int_search_fits_u32(m_plan,
-                                               m_use_box_smearing,
-                                               m_search_nbits)),
+      m_search_u32(detail::int_search_fits_u32(
+          m_plan, m_use_box_smearing, m_search_nbits)),
       m_skew_leaf(skew_leaf) {
     if (m_nbeams == 0) {
         throw std::invalid_argument("FDMT: nbeams must be at least 1");
@@ -399,9 +398,9 @@ detail::try_make_fdmt_cpu(const plans::FDMTPlan& plan,
     const SizeType state_elem = (cfg.search_nbits == 32 || search_u32)
                                     ? sizeof(uint32_t)
                                     : sizeof(uint64_t);
-    const SizeType auto_chunk = detail::fdmt_chunk_nsamps(
-        plan, cfg.mode, cfg.nbeams, cfg.chunk_nsamps, cfg.search_upper_levels,
-        state_elem);
+    const SizeType auto_chunk =
+        detail::fdmt_chunk_nsamps(plan, cfg.mode, cfg.nbeams, cfg.chunk_nsamps,
+                                  cfg.search_upper_levels, state_elem);
 
     const SizeType niters = plan.get_niters();
     const SizeType nsamps = plan.get_nsamps();
@@ -495,8 +494,8 @@ detail::try_make_fdmt_cpu(const plans::FDMTPlan& plan,
         try {
             eng = std::make_unique<detail::fdmt_cpu::FDMTCpuEngine>(
                 plan, deferred_cfg, cand.skew, cand.chunk, cand.leaf);
-        } catch (const std::length_error&) {
-            continue;
+        } catch (const detail::SkewLayoutTooLarge&) {
+            continue; // this (chunk, leaf) layout overflows its tables
         }
         const SizeType used = eng->get_memory_usage().total();
         if (!cand.skew) {

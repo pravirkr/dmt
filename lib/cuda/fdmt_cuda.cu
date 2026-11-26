@@ -27,17 +27,17 @@ FDMTCudaEngine::FDMTCudaEngine(const plans::FDMTPlan& plan,
     m_max_memory   = cfg.max_memory_bytes;
     m_path         = cfg.path;
     m_search_only  = cfg.search_only;
-    // Automatic chunk: L2-resident state when it fits, else the budget rule.
+    // Automatic chunk: state within the fixed cache target when it fits,
+    // else the budget rule.
     const SizeType elem = (m_search_nbits == 32 || m_search_u32)
                               ? sizeof(uint32_t)
                               : sizeof(uint64_t);
     const SizeType cached =
         cfg.chunk_nsamps == 0 ? detail::fdmt_gpu_cache_chunk(m_plan, cfg) : 0;
-    m_chunk = cached != 0
-                  ? cached
-                  : detail::fdmt_chunk_nsamps(m_plan, m_mode, m_nbeams,
-                                              cfg.chunk_nsamps, m_search_upper,
-                                              elem);
+    m_chunk = cached != 0 ? cached
+                          : detail::fdmt_chunk_nsamps(m_plan, m_mode, m_nbeams,
+                                                      cfg.chunk_nsamps,
+                                                      m_search_upper, elem);
     m_requested_fuse = cfg.fuse_levels;
     {
         // Deferred: every device buffer is sized here, allocated by
@@ -1081,8 +1081,8 @@ void FDMTCudaEngine::configure_top(plans::FDMTPlanContainer& relaid) {
         m_path == Path::kAuto && !m_search_only && m_search_nbits == 32 &&
         m_plan.get_tree_history_size() >
             static_cast<SizeType>(std::numeric_limits<uint32_t>::max());
-    bool use_skewed = !m_direct || detail::is_skewed_path(m_path) ||
-                      tree_overflow;
+    bool use_skewed =
+        !m_direct || detail::is_skewed_path(m_path) || tree_overflow;
     if (!use_skewed) {
         plan = detail::build_fdmt_direct_top(m_plan, level, target, false);
         while (m_nbeams * static_cast<SizeType>(plan.ring_size) *
@@ -1231,14 +1231,12 @@ SizeType detail::fdmt_gpu_cache_chunk(const plans::FDMTPlan& plan,
                                                  cfg.search_nbits);
     const SizeType elem =
         (cfg.search_nbits == 32 || u32) ? sizeof(uint32_t) : sizeof(uint64_t);
-    int l2 = 0;
-    if (cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, cfg.exec.device) !=
-            cudaSuccess ||
-        l2 <= 0) {
-        return 0;
-    }
-    return detail::fdmt_cache_chunk(plan, cfg.nbeams, elem,
-                                    static_cast<SizeType>(l2),
+    // A fixed cache target, not the device's L2 size: the chunk, the path
+    // and the memory estimate then depend on the arguments only. 96 MiB is
+    // the L40S's L2 (the published benchmarks); smaller targets cost 7-50%
+    // (geometric mean per preset) on the L40S.
+    constexpr SizeType kGpuCacheBytes = SizeType{96} << 20;
+    return detail::fdmt_cache_chunk(plan, cfg.nbeams, elem, kGpuCacheBytes,
                                     cfg.search_upper_levels);
 }
 
@@ -1288,11 +1286,11 @@ GpuPathAttempt try_fdmt_gpu_path(const plans::FDMTPlan& plan,
         .engine     = nullptr,
         .needed     = used,
         .built_path = path,
-        .error      = fmt::format("FDMT (cuda): this configuration needs {:.2f} "
-                                  "GiB, over max_memory_bytes ({:.2f} GiB)",
-                                  static_cast<double>(used) / (1 << 30),
-                                  static_cast<double>(cfg.max_memory_bytes) /
-                                      (1 << 30)),
+        .error =
+            fmt::format("FDMT (cuda): this configuration needs {:.2f} "
+                        "GiB, over max_memory_bytes ({:.2f} GiB)",
+                        static_cast<double>(used) / (1 << 30),
+                        static_cast<double>(cfg.max_memory_bytes) / (1 << 30)),
     };
 }
 } // namespace

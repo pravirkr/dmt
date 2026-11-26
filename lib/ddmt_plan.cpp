@@ -82,15 +82,14 @@ public:
           m_nchans(nchans),
           m_tsamp(tsamp),
           m_nbits(nbits) {
-        auto dm_arr = levin.piecewise_uniform
-                          ? utils::generate_levin_dm_grid_piecewise(
-                                levin.dm_start, levin.dm_end, tsamp,
-                                levin.pulse_width, f_min, f_max, nchans,
-                                levin.tol)
-                          : utils::generate_levin_dm_grid(
-                                levin.dm_start, levin.dm_end, tsamp,
-                                levin.pulse_width, f_min, f_max, nchans,
-                                levin.tol);
+        auto dm_arr =
+            levin.piecewise_uniform
+                ? utils::generate_levin_dm_grid_piecewise(
+                      levin.dm_start, levin.dm_end, tsamp, levin.pulse_width,
+                      f_min, f_max, nchans, levin.tol)
+                : utils::generate_levin_dm_grid(levin.dm_start, levin.dm_end,
+                                                tsamp, levin.pulse_width, f_min,
+                                                f_max, nchans, levin.tol);
         validate_inputs(dm_arr, kill_mask);
         configure_plan(std::move(dm_arr), kill_mask);
         logging::debug("DDMT Levin: dm_start={}, dm_end={}, count={}",
@@ -247,13 +246,13 @@ private:
     }
     void configure_plan(std::vector<float> dm_arr,
                         std::span<const uint8_t> kill_mask) {
-        m_container.nchans    = m_nchans;
-        m_container.dm_arr    = std::move(dm_arr);
-        m_container.nbits     = m_nbits;
-        m_container.kill_mask = kill_mask.empty()
-                                    ? std::vector<uint8_t>(m_nchans, 1)
-                                    : std::vector<uint8_t>(kill_mask.begin(),
-                                                           kill_mask.end());
+        m_container.nchans = m_nchans;
+        m_container.dm_arr = std::move(dm_arr);
+        m_container.nbits  = m_nbits;
+        m_container.kill_mask =
+            kill_mask.empty()
+                ? std::vector<uint8_t>(m_nchans, 1)
+                : std::vector<uint8_t>(kill_mask.begin(), kill_mask.end());
         canonicalize_mask(m_container.kill_mask);
         // Channel c is centred at f_min + (c + 1/2) df; output times refer
         // to f_ref (get_f_ref(), get_time_offset()).
@@ -423,6 +422,17 @@ std::vector<float> DDMTPlan::get_effective_variance_grid() const noexcept {
 std::vector<float> DDMTPlan::get_effective_sigma_grid() const noexcept {
     return m_impl->get_effective_sigma_grid();
 }
+namespace {
+// The public Levin grids are band grids: at least two channels, as the DM
+// grid builders require (dm_grids.cpp validate_band).
+void check_levin_nchans(SizeType nchans) {
+    if (nchans < 2) {
+        throw std::invalid_argument(fmt::format(
+            "Levin DM grid: invalid nchans={} (must be >= 2)", nchans));
+    }
+}
+} // namespace
+
 std::vector<float> DDMTPlan::generate_levin_dm_grid(float dm_start,
                                                     float dm_end,
                                                     float tsamp,
@@ -431,6 +441,7 @@ std::vector<float> DDMTPlan::generate_levin_dm_grid(float dm_start,
                                                     float f_max,
                                                     SizeType nchans,
                                                     float tol) {
+    check_levin_nchans(nchans);
     return utils::generate_levin_dm_grid(dm_start, dm_end, tsamp, pulse_width,
                                          f_min, f_max, nchans, tol);
 }
@@ -444,6 +455,7 @@ DDMTPlan::generate_levin_dm_grid_piecewise(float dm_start,
                                            SizeType nchans,
                                            float tol,
                                            SizeType min_run) {
+    check_levin_nchans(nchans);
     return utils::generate_levin_dm_grid_piecewise(dm_start, dm_end, tsamp,
                                                    pulse_width, f_min, f_max,
                                                    nchans, tol, min_run);

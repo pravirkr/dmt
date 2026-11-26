@@ -31,7 +31,7 @@ template <FDMTMode Mode,
           typename Input,
           typename TOut,
           bool HasChanDM = false>
-__global__ __launch_bounds__(1024) void
+__global__ void
 kernel_init_fdmt(const Input waterfall,
                  TOut* __restrict__ state,
                  const int* __restrict__ grids0_dt_grid_ptr,
@@ -657,8 +657,8 @@ void FDMTCudaEngine::execute_search_int_direct(const Source& chunk_at,
                                                detail::FDMTSearchSink& sink,
                                                Stream queue,
                                                cudaStream_t stream) {
-    const SizeType root = m_plan.get_niters();
-    const auto h_stride = static_cast<int64_t>(m_ring_size);
+    const SizeType root  = m_plan.get_niters();
+    const auto h_stride  = static_cast<int64_t>(m_ring_size);
     const auto level_ptr = [&](SizeType l) { return state_level_ptr<TInt>(l); };
     const auto beam_stride = static_cast<int64_t>(m_half_elems);
     const auto consume     = [&](SizeType l, const TInt* src, const TInt* prev,

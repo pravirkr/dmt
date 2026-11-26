@@ -252,9 +252,9 @@ std::vector<float> FDMTPlan::Impl::get_smearing_grid_final() const noexcept {
         return smearing_grid;
     }
     for (SizeType i_dm = 0; i_dm < ndms; ++i_dm) {
-        smearing_row(m_niters, i_dm,
-                     std::span<float>(&smearing_grid[i_dm * m_nchans],
-                                      m_nchans));
+        smearing_row(
+            m_niters, i_dm,
+            std::span<float>(&smearing_grid[i_dm * m_nchans], m_nchans));
     }
     return smearing_grid;
 }

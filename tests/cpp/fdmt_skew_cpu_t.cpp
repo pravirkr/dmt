@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <optional>
 #include <random>
 #include <span>
 #include <string>
@@ -21,7 +22,9 @@
 #include "dmt/fdmt_history.hpp"
 #include "dmt/fdmt_skew.hpp"
 
+#include "boxcar_driver_hook.hpp"
 #include "fdmt_boxcar_overflow_reference.hpp"
+#include "fdmt_boxcar_reference.hpp"
 #include "test_helpers.hpp"
 #include "test_random.hpp"
 #include "test_sized.hpp"
@@ -444,10 +447,10 @@ DMT_SIZED_TEST_CASE("FDMT engine skewed path: wiring, history and input types",
         std::vector<float> junk(hsize, 0.5F);
         REQUIRE_THROWS_AS(a->load_history(junk), std::invalid_argument);
         auto nan_hdr = hist;
-        nan_hdr[6]   = std::numeric_limits<float>::quiet_NaN();
+        test::set_float_bits(nan_hdr[6], 0x7FC00000U); // quiet NaN
         REQUIRE_THROWS_AS(a->load_history(nan_hdr), std::invalid_argument);
         auto inf_hdr = hist;
-        inf_hdr[6]   = std::numeric_limits<float>::infinity();
+        test::set_float_bits(inf_hdr[6], 0x7F800000U); // +infinity
         REQUIRE_THROWS_AS(a->load_history(inf_hdr), std::invalid_argument);
     }
 
@@ -723,26 +726,49 @@ void require_same_before(std::vector<RawCandidate> actual,
     REQUIRE(sub < actual.size());
 }
 
-/// Runs public FDMTBoxcar over `nblocks` blocks, using estimate_minimum_memory()
-/// when `skew` is true (so the skewed/windowed path is chosen) and default
-/// budget when `skew` is false (so the tree path is chosen).
-SearchRun run_boxcar_stream(
-    const plans::FDMTPlan& plan,
-    Exec exec,
-    bool skew,
-    bool packed,
-    SizeType nblocks,
-    SizeType chunk                                 = 1024,
-    bool drain                                     = false,
-    const std::vector<std::vector<uint8_t>>* masks = nullptr,
-    float wtsp                                     = 1.5F,
-    const BoxcarConfig* box_in                     = nullptr,
-    std::vector<std::vector<RawCandidate>>* per_call = nullptr,
-    bool manual_zero_drain                           = false,
-    SizeType bad_call_at                             = SIZE_MAX) {
-    BoxcarConfig box = box_in != nullptr ? *box_in : search_config(packed, wtsp);
+/// Runs public FDMTBoxcar over `nblocks` blocks, using
+/// estimate_minimum_memory() when `skew` is true (so the skewed/windowed path
+/// is chosen) and default budget when `skew` is false (so the tree path is
+/// chosen). `bad_call_at` (with `masks`): before that block (nblocks: before
+/// flush() or drain()), a call with a different mask fails: rejected before the
+/// engine commits it (a short waterfall), or with `after_commit`, thrown by
+/// the transform after the commit (test::BoxcarDriverHook). `row_lags`
+/// (host float input): each searched row's lag on the skewed path (0:
+/// unlagged), in plane order.
+SearchRun
+run_boxcar_stream(const plans::FDMTPlan& plan,
+                  Exec exec,
+                  bool skew,
+                  bool packed,
+                  SizeType nblocks,
+                  SizeType chunk                                   = 1024,
+                  bool drain                                       = false,
+                  const std::vector<std::vector<uint8_t>>* masks   = nullptr,
+                  float wtsp                                       = 1.5F,
+                  const BoxcarConfig* box_in                       = nullptr,
+                  std::vector<std::vector<RawCandidate>>* per_call = nullptr,
+                  bool manual_zero_drain                           = false,
+                  SizeType bad_call_at                             = SIZE_MAX,
+                  bool after_commit                                = false,
+                  std::vector<uint64_t>* row_lags                  = nullptr) {
+    BoxcarConfig box =
+        box_in != nullptr ? *box_in : search_config(packed, wtsp);
     if (masks != nullptr) {
         box.per_call_masks = true;
+    }
+    std::optional<test::BoxcarDriverHook> hook;
+    std::vector<std::vector<uint64_t>> lags;
+    std::vector<plans::BoxcarPlanePlan> planes;
+    if (after_commit || row_lags != nullptr) {
+        hook.emplace();
+    }
+    if (row_lags != nullptr) {
+        planes = algorithms::detail::make_boxcar_plans(plan, box, true);
+        hook->level_rows.assign(plan.get_niters() + 1, 0);
+        for (const auto& p : planes) {
+            hook->level_rows[p.level] += p.dm_grid.size();
+        }
+        hook->lags = &lags;
     }
     SizeType budget     = algorithms::kFDMTDefaultMaxMemory;
     SizeType used_chunk = chunk;
@@ -775,17 +801,30 @@ SearchRun run_boxcar_stream(
         REQUIRE(next >= frontier);
         frontier = next;
     };
+    const auto bad_call = [&] {
+        std::vector<uint8_t> bad_mask(plan.get_nchans(), 1);
+        for (SizeType c = 0; c < bad_mask.size() / 2; ++c) {
+            bad_mask[c] = 0;
+        }
+        if (after_commit) {
+            const auto bad = search_block(n, 7777);
+            hook->armed    = true;
+            REQUIRE_THROWS_AS(
+                search.execute(std::span<const float>(bad.values),
+                               std::span<const uint8_t>(bad_mask)),
+                std::runtime_error);
+            REQUIRE_FALSE(hook->armed);
+            return;
+        }
+        const std::vector<float> bad_wf(n - 1, 0.0F);
+        REQUIRE_THROWS_AS(search.execute(std::span<const float>(bad_wf),
+                                         std::span<const uint8_t>(bad_mask)),
+                          std::invalid_argument);
+    };
     for (SizeType b = 0; b < nblocks; ++b) {
         const auto blk = search_block(n, 900 + static_cast<unsigned>(b));
         if (masks != nullptr && b == bad_call_at) {
-            std::vector<uint8_t> bad_mask(plan.get_nchans(), 1);
-            for (SizeType c = 0; c < bad_mask.size() / 2; ++c) {
-                bad_mask[c] = 0;
-            }
-            const std::vector<float> bad_wf(n - 1, 0.0F);
-            REQUIRE_THROWS_AS(search.execute(std::span<const float>(bad_wf),
-                                             std::span<const uint8_t>(bad_mask)),
-                              std::invalid_argument);
+            bad_call();
         }
         if (masks != nullptr) {
             add(search.execute(std::span<const float>(blk.values),
@@ -796,10 +835,22 @@ SearchRun run_boxcar_stream(
             add(search.execute(std::span<const float>(blk.values)));
         }
     }
+    if (masks != nullptr && bad_call_at == nblocks && nblocks > 0) {
+        bad_call();
+    }
+    if (row_lags != nullptr) {
+        row_lags->clear();
+        for (SizeType l = 0; l < hook->level_rows.size(); ++l) {
+            for (SizeType r = 0; r < hook->level_rows[l]; ++r) {
+                row_lags->push_back(
+                    l < lags.size() && !lags[l].empty() ? lags[l][r] : 0);
+            }
+        }
+    }
     run.usage_before = search.get_memory_usage();
     if (drain && manual_zero_drain && run.latency > 0) {
-        const uint64_t end     = nblocks * plan.get_nsamps();
-        const SizeType pad     = static_cast<SizeType>(
+        const uint64_t end = nblocks * plan.get_nsamps();
+        const SizeType pad = static_cast<SizeType>(
             (run.latency + plan.get_nsamps() - 1) / plan.get_nsamps());
         const auto last_mask   = masks != nullptr && nblocks > 0
                                      ? std::span<const uint8_t>(masks->back())
@@ -820,8 +871,8 @@ SearchRun run_boxcar_stream(
         } else {
             const std::vector<float> zeros(n, 0.0F);
             for (SizeType p = 0; p < pad; ++p) {
-                add_clamped(search.execute(std::span<const float>(zeros),
-                                           last_mask));
+                add_clamped(
+                    search.execute(std::span<const float>(zeros), last_mask));
             }
         }
         add_clamped(search.flush());
@@ -866,11 +917,11 @@ void check_zero_drain(const plans::FDMTPlan& plan,
                       bool packed,
                       const std::vector<std::vector<uint8_t>>* masks) {
     const SizeType blocks = masks != nullptr ? masks->size() : 3;
-    const auto fresh      = run_boxcar_stream(plan, exec, true, packed, blocks,
-                                              0, true, masks);
-    const auto ref        = run_boxcar_stream(plan, exec, true, packed, blocks,
-                                              0, true, masks, 1.5F, nullptr,
-                                              nullptr, /*manual_zero_drain=*/true);
+    const auto fresh =
+        run_boxcar_stream(plan, exec, true, packed, blocks, 0, true, masks);
+    const auto ref =
+        run_boxcar_stream(plan, exec, true, packed, blocks, 0, true, masks,
+                          1.5F, nullptr, nullptr, /*manual_zero_drain=*/true);
     REQUIRE(fresh.latency > 0);
     REQUIRE(fresh.searched == blocks * plan.get_nsamps());
     REQUIRE(ref.searched == fresh.searched);
@@ -889,8 +940,8 @@ DMT_SIZED_TEST_CASE("FDMTBoxcar skewed path: subband search matches the tree",
         for (const bool packed : {false, true}) {
             DYNAMIC_SECTION("depth " << depth << " packed " << packed) {
                 constexpr SizeType kBlocks = 3;
-                const auto skew            = run_boxcar_stream(
-                    plan, Exec::cpu(), true, packed, kBlocks, 0);
+                const auto skew = run_boxcar_stream(plan, Exec::cpu(), true,
+                                                    packed, kBlocks, 0);
                 const auto tree = run_boxcar_stream(plan, Exec::cpu(), false,
                                                     packed, kBlocks, 1024);
                 REQUIRE(skew.latency > 0);
@@ -965,10 +1016,10 @@ DMT_SIZED_TEST_CASE("FDMTBoxcar skewed path: per-call masks match the tree",
             const auto plan  = make_plan(kCryopafLband, full ? 4096 : 2048,
                                          full ? 400.0F : 250.0F, depth);
             const auto masks = changing_masks(plan.get_nchans(), kBlocks);
-            const auto skew  = run_boxcar_stream(
-                plan, Exec::cpu(), true, false, kBlocks, 0, true, &masks);
-            const auto tree = run_boxcar_stream(
-                plan, Exec::cpu(), false, false, kBlocks, 1024, true, &masks);
+            const auto skew  = run_boxcar_stream(plan, Exec::cpu(), true, false,
+                                                 kBlocks, 0, true, &masks);
+            const auto tree = run_boxcar_stream(plan, Exec::cpu(), false, false,
+                                                kBlocks, 1024, true, &masks);
             REQUIRE(skew.latency > 0);
             REQUIRE(tree.latency == 0);
             require_same_before(skew.candidates, tree.candidates, UINT64_MAX);
@@ -983,13 +1034,16 @@ DMT_SIZED_TEST_CASE(
     "FDMTBoxcar skewed path: per-call masks on short blocks use the "
     "catch-all",
     "[fdmt_cpu][cpu][skew][boxcar][mask]") {
-    for (const auto& [depth, ns] : {std::pair{SizeType{1}, SizeType{128}},
-                                    std::pair{SizeType{3}, SizeType{128}},
-                                    std::pair{SizeType{3}, SizeType{512}}}) {
+    // The small variant leaves out the 512-sample blocks (its reference
+    // dominates the run time under ASan).
+    std::vector<std::pair<SizeType, SizeType>> cases{{1, 128}, {3, 128}};
+    if (full) {
+        cases.emplace_back(3, 512);
+    }
+    for (const auto& [depth, ns] : cases) {
         DYNAMIC_SECTION("depth " << depth << " block " << ns) {
-            const auto plan =
-                make_plan(kCryopafLband, ns, 600.0F, depth);
-            const SizeType nb = (full ? 12288 : 4096) / ns;
+            const auto plan   = make_plan(kCryopafLband, ns, 600.0F, depth);
+            const SizeType nb = (full ? 12288 : 2048) / ns;
             const SizeType nc = plan.get_nchans();
             std::vector<std::vector<uint8_t>> masks;
             for (SizeType b = 0; b < nb; ++b) {
@@ -1016,26 +1070,65 @@ DMT_SIZED_TEST_CASE(
             auto box          = search_config(false);
             box.detect_thresh = 3.5F;
             box.screen_mode   = BoxcarScreenMode::kAuto;
-            const auto kadane = run_boxcar_stream(plan, Exec::cpu(), true,
-                                                  false, nb, 64, true, &masks,
-                                                  1.5F, &box);
+            std::vector<uint64_t> lags;
+            const auto kadane = run_boxcar_stream(
+                plan, Exec::cpu(), true, false, nb, 64, true, &masks, 1.5F,
+                &box, nullptr, false, SIZE_MAX, false, &lags);
             REQUIRE(kadane.latency > ns);
             REQUIRE(kadane.searched == nb * ns);
+            REQUIRE(
+                std::ranges::any_of(lags, [](uint64_t l) { return l > 0; }));
+            // The engine's ring: entries blocks of the largest reach need,
+            // of the 1 + ceil(latency / ns) these need. Blocks this short
+            // evict entries, so the catch-all stands for them.
+            auto box_masked           = box;
+            box_masked.per_call_masks = true;
+            const auto planes =
+                algorithms::detail::make_boxcar_plans(plan, box_masked, true);
+            const algorithms::detail::BoxcarNoiseModel model(plan, box_masked,
+                                                             true, 1);
+            const uint64_t reach =
+                model.max_support() + planes.front().widths.back() - 1;
+            const SizeType needed =
+                1 + static_cast<SizeType>((kadane.latency + ns - 1) / ns);
+            const SizeType ring =
+                1 + static_cast<SizeType>((kadane.latency + reach - 1) / reach);
+            REQUIRE(needed > ring);
+            std::vector<std::vector<float>> input;
+            for (SizeType b = 0; b < nb; ++b) {
+                input.push_back(
+                    search_block(nc * ns, 900 + static_cast<unsigned>(b))
+                        .values);
+            }
+            const auto expected = boxcar_test::masked_reference(
+                plan, box_masked, true, input, {}, masks, lags, ring, needed);
+            require_same_before(kadane.candidates, expected.candidates,
+                                UINT64_MAX);
+            // A call failing after its commit (the catch-all replaced the
+            // front entry), mid-stream or right before drain(), leaves the
+            // stream unchanged.
+            for (const SizeType fail_at : {nb / 2 + 1, nb}) {
+                const auto failed = run_boxcar_stream(
+                    plan, Exec::cpu(), true, false, nb, 64, true, &masks, 1.5F,
+                    &box, nullptr, false, fail_at, true);
+                require_same_before(failed.candidates, kadane.candidates,
+                                    UINT64_MAX, 0.0F);
+            }
 
             auto box_prefix        = box;
             box_prefix.screen_mode = BoxcarScreenMode::kPrefix;
-            const auto prefix      = run_boxcar_stream(
-                plan, Exec::cpu(), true, false, nb, 64, true, &masks, 1.5F,
-                &box_prefix);
+            const auto prefix =
+                run_boxcar_stream(plan, Exec::cpu(), true, false, nb, 64, true,
+                                  &masks, 1.5F, &box_prefix);
             REQUIRE(prefix.latency == kadane.latency);
             require_same_before(kadane.candidates, prefix.candidates,
                                 UINT64_MAX);
 
             auto box_none        = box;
             box_none.screen_mode = BoxcarScreenMode::kNone;
-            const auto none      = run_boxcar_stream(
-                plan, Exec::cpu(), true, false, nb, 64, true, &masks, 1.5F,
-                &box_none);
+            const auto none =
+                run_boxcar_stream(plan, Exec::cpu(), true, false, nb, 64, true,
+                                  &masks, 1.5F, &box_none);
             REQUIRE(none.latency == kadane.latency);
             require_same_before(kadane.candidates, none.candidates, UINT64_MAX);
         }
@@ -1134,9 +1227,13 @@ TEST_CASE("BlockNoiseRing drop() restores ring and catch-all after a failed "
 }
 
 DMT_SIZED_TEST_CASE(
-    "FDMTBoxcar skewed path: a rejected masked call leaves the stream "
-    "unchanged",
+    "FDMTBoxcar skewed path: a rejected or failed masked call leaves the "
+    "stream unchanged",
     "[fdmt_cpu][cpu][skew][boxcar][mask]") {
+    // The ring keeps two blocks' tables on the skewed path. A call rejected
+    // before its commit, or failing after it (the transform throws), must
+    // not leave its entry behind (it would displace the previous block's
+    // tables for lagged rows).
     constexpr SizeType kBlocks = 4;
     const auto plan =
         make_plan(kCryopafLband, full ? 4096 : 2048, full ? 400.0F : 250.0F, 1);
@@ -1144,13 +1241,16 @@ DMT_SIZED_TEST_CASE(
     const auto clean = run_boxcar_stream(plan, Exec::cpu(), true, false,
                                          kBlocks, 0, true, &masks);
     REQUIRE(clean.latency > 0);
-    for (const SizeType fail_at : {SizeType{1}, SizeType{3}}) {
-        DYNAMIC_SECTION("fail before block " << fail_at) {
-            const auto failed = run_boxcar_stream(
-                plan, Exec::cpu(), true, false, kBlocks, 0, true, &masks,
-                1.5F, nullptr, nullptr, false, fail_at);
-            require_same_before(failed.candidates, clean.candidates, UINT64_MAX,
-                                0.0F);
+    for (const bool after_commit : {false, true}) {
+        for (const SizeType fail_at : {SizeType{1}, SizeType{3}}) {
+            DYNAMIC_SECTION("fail before block " << fail_at << " after commit "
+                                                 << after_commit) {
+                const auto failed = run_boxcar_stream(
+                    plan, Exec::cpu(), true, false, kBlocks, 0, true, &masks,
+                    1.5F, nullptr, nullptr, false, fail_at, after_commit);
+                require_same_before(failed.candidates, clean.candidates,
+                                    UINT64_MAX, 0.0F);
+            }
         }
     }
 }
@@ -1158,23 +1258,31 @@ DMT_SIZED_TEST_CASE(
 DMT_SIZED_TEST_CASE(
     "FDMTBoxcar skewed path: per-call masks with the width screen",
     "[fdmt_cpu][cpu][skew][boxcar][mask]") {
+    // Every width up to 24 turns the width screen on, and 4096-sample
+    // chunks give each row call several scoring tiles. A lagged row then
+    // has consecutive tiles that each mix the tables of several blocks;
+    // the screen must take each tile's own minimum thresholds. (At depth 3
+    // a 4096-sample chunk takes the tree at any budget, so that depth runs
+    // the minimum budget's own chunk.)
     constexpr SizeType kBlocks = 4;
     constexpr float kWtsp      = 1.0F;
     for (const SizeType depth : {SizeType{1}, SizeType{3}}) {
         DYNAMIC_SECTION("depth " << depth) {
             const auto plan =
-                make_plan(kCryopafLband, 8192, full ? 400.0F : 250.0F, depth);
+                make_plan(kCryopafLband, 8192, full ? 400.0F : 150.0F, depth);
             REQUIRE_FALSE(
                 algorithms::detail::boxcar_screen_groups(
                     plans::generate_box_width_trials(24, kWtsp), false)
                     .empty());
-            const auto masks = changing_masks(plan.get_nchans(), kBlocks);
-            const auto skew  = run_boxcar_stream(plan, Exec::cpu(), true, false,
-                                                 kBlocks, 0, true, &masks,
-                                                 kWtsp);
-            const auto tree  = run_boxcar_stream(plan, Exec::cpu(), false,
-                                                 false, kBlocks, 4096, true,
-                                                 &masks, kWtsp);
+            const auto masks     = changing_masks(plan.get_nchans(), kBlocks);
+            const SizeType chunk = depth == 1 ? 4096 : 0;
+            const auto skew =
+                run_boxcar_stream(plan, Exec::cpu(), true, false, kBlocks,
+                                  chunk, true, &masks, kWtsp);
+            const auto tree =
+                run_boxcar_stream(plan, Exec::cpu(), false, false, kBlocks,
+                                  4096, true, &masks, kWtsp);
+            REQUIRE(skew.path.find("skewed") != std::string::npos);
             REQUIRE(skew.latency > 0);
             REQUIRE(tree.latency == 0);
             require_same_before(skew.candidates, tree.candidates, UINT64_MAX);
@@ -1231,10 +1339,10 @@ TEST_CASE("FDMTBoxcar (gpu) windowed top: per-call masks match the CPU tree",
         DYNAMIC_SECTION("depth " << depth) {
             const auto plan  = make_plan(kCryopafLband, 8192, 1000.0F, depth);
             const auto masks = changing_masks(plan.get_nchans(), kBlocks);
-            const auto gpu   = run_boxcar_stream(
-                plan, test::gpu_exec(), true, false, kBlocks, 0, true, &masks);
-            const auto cpu = run_boxcar_stream(
-                plan, Exec::cpu(), false, false, kBlocks, 1024, true, &masks);
+            const auto gpu = run_boxcar_stream(plan, test::gpu_exec(), true,
+                                               false, kBlocks, 0, true, &masks);
+            const auto cpu = run_boxcar_stream(plan, Exec::cpu(), false, false,
+                                               kBlocks, 1024, true, &masks);
             INFO("gpu path: " << gpu.path);
             REQUIRE(gpu.latency > 0);
             REQUIRE(cpu.latency == 0);
@@ -1244,22 +1352,28 @@ TEST_CASE("FDMTBoxcar (gpu) windowed top: per-call masks match the CPU tree",
     }
 }
 
-TEST_CASE("FDMTBoxcar (gpu) windowed top: a rejected masked call leaves the "
-          "stream unchanged",
+TEST_CASE("FDMTBoxcar (gpu) windowed top: a rejected or failed masked call "
+          "leaves the stream unchanged",
           "[fdmt_cuda][cuda][gpu][skew][boxcar][mask]") {
+    // After the commit, the engine's run_search() restores the previous
+    // block tables (undo_commit) before FDMTBoxcar drops the entry.
     constexpr SizeType kBlocks = 5;
     const auto plan            = make_plan(kCryopafLband, 4096, 1000.0F, 1);
     const auto masks           = changing_masks(plan.get_nchans(), kBlocks);
-    const auto clean           = run_boxcar_stream(
-        plan, test::gpu_exec(), true, false, kBlocks, 0, true, &masks);
+    const auto clean = run_boxcar_stream(plan, test::gpu_exec(), true, false,
+                                         kBlocks, 0, true, &masks);
     REQUIRE(clean.latency > 0);
-    for (const SizeType fail_at : {SizeType{1}, SizeType{3}}) {
-        DYNAMIC_SECTION("fail before block " << fail_at) {
-            const auto failed = run_boxcar_stream(
-                plan, test::gpu_exec(), true, false, kBlocks, 0, true, &masks,
-                1.5F, nullptr, nullptr, false, fail_at);
-            require_same_before(failed.candidates, clean.candidates, UINT64_MAX,
-                                0.0F);
+    for (const bool after_commit : {false, true}) {
+        for (const SizeType fail_at : {SizeType{1}, SizeType{3}, kBlocks}) {
+            DYNAMIC_SECTION("fail before block " << fail_at << " after commit "
+                                                 << after_commit) {
+                const auto failed =
+                    run_boxcar_stream(plan, test::gpu_exec(), true, false,
+                                      kBlocks, 0, true, &masks, 1.5F, nullptr,
+                                      nullptr, false, fail_at, after_commit);
+                require_same_before(failed.candidates, clean.candidates,
+                                    UINT64_MAX, 0.0F);
+            }
         }
     }
 }
@@ -1271,9 +1385,9 @@ TEST_CASE("FDMTBoxcar (gpu) windowed top: kKeepBrightest keeps the "
     const auto plan            = make_plan(kCryopafLband, 4096, 1000.0F, 1);
     const auto open            = search_config(false);
     std::vector<std::vector<RawCandidate>> all;
-    const auto clean = run_boxcar_stream(plan, test::gpu_exec(), true, false,
-                                         kBlocks, 0, false, nullptr, 1.5F,
-                                         &open, &all);
+    const auto clean =
+        run_boxcar_stream(plan, test::gpu_exec(), true, false, kBlocks, 0,
+                          false, nullptr, 1.5F, &open, &all);
     REQUIRE(clean.latency > 0);
     for (const auto& [q, k] :
          {std::pair<SizeType, SizeType>{2, 500}, {1, 100}}) {
@@ -1305,12 +1419,12 @@ TEST_CASE("FDMTBoxcar (gpu) windowed top: per-call masks with the width "
         DYNAMIC_SECTION("depth " << depth) {
             const auto plan  = make_plan(kCryopafLband, 8192, 1500.0F, depth);
             const auto masks = changing_masks(plan.get_nchans(), kBlocks);
-            const auto gpu   = run_boxcar_stream(plan, test::gpu_exec(), true,
-                                                 false, kBlocks, 0, true,
-                                                 &masks, kWtsp);
-            const auto cpu   = run_boxcar_stream(plan, Exec::cpu(), false,
-                                                 false, kBlocks, 4096, true,
-                                                 &masks, kWtsp);
+            const auto gpu =
+                run_boxcar_stream(plan, test::gpu_exec(), true, false, kBlocks,
+                                  0, true, &masks, kWtsp);
+            const auto cpu =
+                run_boxcar_stream(plan, Exec::cpu(), false, false, kBlocks,
+                                  4096, true, &masks, kWtsp);
             INFO("gpu path: " << gpu.path);
             REQUIRE(gpu.latency > 0);
             REQUIRE(cpu.latency == 0);

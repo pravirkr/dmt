@@ -411,6 +411,21 @@ struct BlockTables {
     const uint64_t* support = nullptr;
 };
 
+// Entry `e` (and table `k`) of a BlockTables kernel argument, chosen by
+// selects: indexing a kernel parameter at run time makes the kernel copy it
+// to local memory, read back on every sample of the bookkeeping.
+template <typename P>
+DMT_D __forceinline__ P block_pick(const P (&a)[2], int e) {
+    return e != 0 ? a[1] : a[0];
+}
+
+template <typename P>
+DMT_D __forceinline__ P block_pick(const P (&a)[2][2], int e, int k) {
+    const P p0 = k != 0 ? a[0][1] : a[0][0];
+    const P p1 = k != 0 ? a[1][1] : a[1][0];
+    return e != 0 ? p1 : p0;
+}
+
 // The entry of stream sample `s` (the older one for samples before the
 // newer's first).
 DMT_D inline int block_entry(const BlockTables& bt, uint64_t s) {
@@ -423,7 +438,10 @@ DMT_D inline int block_table(const BlockTables& bt,
                              uint64_t s,
                              uint32_t width,
                              uint64_t support) {
-    return bt.transition[e] && s < bt.first[e] + support + width - 1 ? 1 : 0;
+    return block_pick(bt.transition, e) &&
+                   s < block_pick(bt.first, e) + support + width - 1
+               ? 1
+               : 0;
 }
 
 // Lagged row slice (skewed-window subband search) and drain() stop guard.
@@ -507,13 +525,18 @@ make_row_writer(const BoxcarRow& row,
     }
 }
 
+// The per-call tables in play for one row (several across a mask change).
+// Indexed at run time, so a kernel keeps them in local memory: they live
+// apart from RowNoise, whose scalars the per-sample bookkeeping reads and
+// which must stay in registers.
 struct BlockNoiseArrays {
     const float* in_play[4][2];
     const uint64_t* in_play_i[4];
-    int n_play           = 0;
-    bool mixed           = false;
-    uint64_t row_support = 0;
+    int n_play = 0;
 };
+
+template <bool kBlockNoise>
+using RowNoisePlay = std::conditional_t<kBlockNoise, BlockNoiseArrays, NoKeep>;
 
 template <typename T, bool kBlockNoise> struct RowNoise {
     const float* plane_thr     = nullptr;
@@ -522,12 +545,13 @@ template <typename T, bool kBlockNoise> struct RowNoise {
     const float* inv_row       = nullptr;
     const float* thr_float     = nullptr;
     const uint64_t* thr_int    = nullptr;
-    std::conditional_t<kBlockNoise, BlockNoiseArrays, NoKeep> bn{};
-    bool custom = false;
+    uint64_t row_support       = 0;
+    bool mixed                 = false;
+    bool custom                = false;
 
     DMT_D __forceinline__ bool is_mixed() const {
         if constexpr (kBlockNoise) {
-            return bn.mixed;
+            return mixed;
         } else {
             return false;
         }
@@ -535,7 +559,7 @@ template <typename T, bool kBlockNoise> struct RowNoise {
 
     DMT_D __forceinline__ uint64_t support() const {
         if constexpr (kBlockNoise) {
-            return bn.row_support;
+            return row_support;
         } else {
             return 0;
         }
@@ -549,37 +573,45 @@ template <typename T, bool kBlockNoise> struct RowNoise {
         }
     }
 
-    DMT_D __forceinline__ uint64_t min_ithr_at(SizeType f) const {
+    DMT_D __forceinline__ uint64_t
+    min_ithr_at(SizeType f, const RowNoisePlay<kBlockNoise>& play) const {
         if constexpr (kBlockNoise) {
-            if (bn.mixed) {
-                uint64_t th = bn.in_play_i[0][f];
-                for (int j = 1; j < bn.n_play; ++j) {
-                    th = th < bn.in_play_i[j][f] ? th : bn.in_play_i[j][f];
+            if (mixed) {
+                uint64_t th = play.in_play_i[0][f];
+                for (int j = 1; j < play.n_play; ++j) {
+                    th = th < play.in_play_i[j][f] ? th : play.in_play_i[j][f];
                 }
                 return th;
             }
+        } else {
+            (void)play;
         }
         return thr_int[f];
     }
 
-    DMT_D __forceinline__ float min_fthr_at(SizeType f) const {
+    DMT_D __forceinline__ float
+    min_fthr_at(SizeType f, const RowNoisePlay<kBlockNoise>& play) const {
         if constexpr (kBlockNoise) {
-            if (bn.mixed) {
-                float th = bn.in_play[0][0][f];
-                for (int j = 1; j < bn.n_play; ++j) {
-                    th = th < bn.in_play[j][0][f] ? th : bn.in_play[j][0][f];
+            if (mixed) {
+                float th = play.in_play[0][0][f];
+                for (int j = 1; j < play.n_play; ++j) {
+                    th =
+                        th < play.in_play[j][0][f] ? th : play.in_play[j][0][f];
                 }
                 return th;
             }
+        } else {
+            (void)play;
         }
         return thr_float[f];
     }
 
-    DMT_D __forceinline__ T min_thr_at(SizeType f) const {
+    DMT_D __forceinline__ T
+    min_thr_at(SizeType f, const RowNoisePlay<kBlockNoise>& play) const {
         if constexpr (std::is_integral_v<T>) {
-            return min_ithr_at(f);
+            return min_ithr_at(f, play);
         } else {
-            return min_fthr_at(f);
+            return min_fthr_at(f, play);
         }
     }
 };
@@ -598,7 +630,8 @@ resolve_row_noise(const FDMTSearchInput& input,
                   const float* thresholds,
                   const float* inv_sigma,
                   const uint64_t* integer_thresholds,
-                  const BlockTables& block_tables) {
+                  const BlockTables& block_tables,
+                  RowNoisePlay<kBlockNoise>& play) {
     RowNoise<T, kBlockNoise> noise;
     noise.plane_thr = thresholds + (row_index * nfilters);
     noise.plane_inv = inv_sigma + (row_index * nfilters);
@@ -610,70 +643,71 @@ resolve_row_noise(const FDMTSearchInput& input,
     noise.thr_int = noise.plane_ithr;
     if constexpr (kBlockNoise) {
         if (block_tables.count > 0) {
-            noise.bn.row_support = block_tables.support[row_index];
-            const uint64_t s0    = input.sample_begin;
-            const uint64_t s1    = s0 + input.nsamps - 1;
-            const int e0         = block_entry(block_tables, s0);
-            const int e1         = block_entry(block_tables, s1);
-            const auto add       = [&](int e, int k) {
-                const float* t     = block_tables.thr[e][k];
-                const float* v     = block_tables.inv[e][k];
-                const uint64_t* it = block_tables.ithr[e][k];
-                t  = t != nullptr ? t + (row_index * nfilters)
-                                  : noise.plane_thr;
-                v  = v != nullptr ? v + (row_index * nfilters)
-                                  : noise.plane_inv;
+            noise.row_support = block_tables.support[row_index];
+            const uint64_t s0 = input.sample_begin;
+            const uint64_t s1 = s0 + input.nsamps - 1;
+            const int e0      = block_entry(block_tables, s0);
+            const int e1      = block_entry(block_tables, s1);
+            const auto add    = [&](int e, int k) {
+                const float* t     = block_pick(block_tables.thr, e, k);
+                const float* v     = block_pick(block_tables.inv, e, k);
+                const uint64_t* it = block_pick(block_tables.ithr, e, k);
+                t = t != nullptr ? t + (row_index * nfilters) : noise.plane_thr;
+                v = v != nullptr ? v + (row_index * nfilters) : noise.plane_inv;
                 it = it != nullptr ? it + (row_index * nfilters)
                                    : noise.plane_ithr;
-                for (int j = 0; j < noise.bn.n_play; ++j) {
-                    if (noise.bn.in_play[j][0] == t) {
+                for (int j = 0; j < play.n_play; ++j) {
+                    if (play.in_play[j][0] == t) {
                         return;
                     }
                 }
-                noise.bn.in_play[noise.bn.n_play][0] = t;
-                noise.bn.in_play[noise.bn.n_play][1] = v;
-                noise.bn.in_play_i[noise.bn.n_play]  = it;
-                ++noise.bn.n_play;
+                play.in_play[play.n_play][0] = t;
+                play.in_play[play.n_play][1] = v;
+                play.in_play_i[play.n_play]  = it;
+                ++play.n_play;
             };
             for (int e = e0; e <= e1; ++e) {
-                const uint64_t first = block_tables.first[e];
+                const uint64_t first = block_pick(block_tables.first, e);
                 const uint64_t lo    = e == e0 ? s0 : first;
-                const uint64_t hi = e < e1 ? block_tables.first[e + 1] - 1 : s1;
-                if (!block_tables.transition[e]) {
+                const uint64_t hi =
+                    e < e1 ? block_pick(block_tables.first, e + 1) - 1 : s1;
+                if (!block_pick(block_tables.transition, e)) {
                     add(e, 0);
                     continue;
                 }
                 // Transition [1] before first + support + w - 1 (as high as
                 // max_width - 1), steady [0] from widths[0] - 1 onward.
-                if (lo < first + noise.bn.row_support + max_width - 1) {
+                if (lo < first + noise.row_support + max_width - 1) {
                     add(e, 1);
                 }
-                if (hi + 1 >= first + noise.bn.row_support + widths[0]) {
+                if (hi + 1 >= first + noise.row_support + widths[0]) {
                     add(e, 0);
                 }
             }
-            if (noise.bn.n_play == 1) {
-                noise.thr_float = noise.bn.in_play[0][0];
-                noise.inv_row   = noise.bn.in_play[0][1];
-                noise.thr_int   = noise.bn.in_play_i[0];
+            if (play.n_play == 1) {
+                noise.thr_float = play.in_play[0][0];
+                noise.inv_row   = play.in_play[0][1];
+                noise.thr_int   = play.in_play_i[0];
             } else {
-                noise.bn.mixed = true;
+                noise.mixed = true;
             }
         }
-        noise.custom = noise.bn.mixed || noise.thr_float != noise.plane_thr;
+        noise.custom = noise.mixed || noise.thr_float != noise.plane_thr;
     }
     return noise;
 }
 
 template <typename T, int kBlockThreads, bool kBlockNoise>
-DMT_D __forceinline__ void stage_row_tables(T* s_thr,
-                                            uint32_t* s_widths,
-                                            const uint32_t* widths,
-                                            SizeType nfilters,
-                                            const RowNoise<T, kBlockNoise>& noise) {
+DMT_D __forceinline__ void
+stage_row_tables(T* s_thr,
+                 uint32_t* s_widths,
+                 const uint32_t* widths,
+                 SizeType nfilters,
+                 const RowNoise<T, kBlockNoise>& noise,
+                 const RowNoisePlay<kBlockNoise>& play) {
     const int tid = static_cast<int>(threadIdx.x);
     for (SizeType f = tid; f < nfilters; f += kBlockThreads) {
-        s_thr[f]    = noise.min_thr_at(f);
+        s_thr[f]    = noise.min_thr_at(f, play);
         s_widths[f] = widths[f];
     }
 }
@@ -693,14 +727,14 @@ DMT_D __forceinline__ bool any_open_peaks(const BoxcarPeak* peaks,
 }
 
 template <typename T, typename C, int kBlockThreads>
-DMT_D __forceinline__ void bootstrap_carry_ring(
-    BoxcarShared<T, kBlockThreads>& shared,
-    T* ring,
-    uint32_t mask,
-    const C* carry,
-    SizeType max_width,
-    uint32_t lookback,
-    uint64_t sample_begin) {
+DMT_D __forceinline__ void
+bootstrap_carry_ring(BoxcarShared<T, kBlockThreads>& shared,
+                     T* ring,
+                     uint32_t mask,
+                     const C* carry,
+                     SizeType max_width,
+                     uint32_t lookback,
+                     uint64_t sample_begin) {
     constexpr int kBlockTile = kBlockThreads * kItems;
     const int tid            = static_cast<int>(threadIdx.x);
     if (sample_begin == 0) {
@@ -723,11 +757,10 @@ DMT_D __forceinline__ void bootstrap_carry_ring(
         for (int j = 0; j < kItems; ++j) {
             const uint32_t t    = p + (tid * kItems) + j;
             const uint32_t back = t < lookback ? lookback - t : 0U;
-            x[j]                = t < lookback && sample_begin >= back
-                                      ? carry[carry0 >= back
-                                                  ? carry0 - back
-                                                  : carry0 + width32 - back]
-                                      : T{0};
+            x[j] = t < lookback && sample_begin >= back
+                       ? carry[carry0 >= back ? carry0 - back
+                                              : carry0 + width32 - back]
+                       : T{0};
         }
         prefix_tile<T, kBlockThreads>(shared, ring, mask, x, p, base);
     }
@@ -767,28 +800,28 @@ template <typename T,
           bool kKeep,
           typename Writer,
           typename Pending>
-DMT_D __forceinline__ void score_tile_bookkeeping(
-    BoxcarShared<T, kBlockThreads>& shared,
-    const T* ring,
-    uint32_t mask,
-    uint32_t position,
-    int n,
-    uint64_t start,
-    const BoxcarRow& row,
-    SizeType row_index,
-    const uint32_t* wtab,
-    const T* ttab,
-    SizeType nfilters,
-    const RowNoise<T, kBlockNoise>& noise,
-    const BlockTables& block_tables,
-    const double* means,
-    double unit,
-    PeakFindingMode mode,
-    bool skip_cold,
-    bool use_trapezoid,
-    BoxcarPeak* peaks,
-    const Writer& out,
-    Pending& pending) {
+DMT_D __forceinline__ void
+score_tile_bookkeeping(BoxcarShared<T, kBlockThreads>& shared,
+                       const T* ring,
+                       uint32_t mask,
+                       uint32_t position,
+                       int n,
+                       uint64_t start,
+                       const BoxcarRow& row,
+                       SizeType row_index,
+                       const uint32_t* wtab,
+                       const T* ttab,
+                       SizeType nfilters,
+                       const RowNoise<T, kBlockNoise>& noise,
+                       const BlockTables& block_tables,
+                       const double* means,
+                       double unit,
+                       PeakFindingMode mode,
+                       bool skip_cold,
+                       bool use_trapezoid,
+                       BoxcarPeak* peaks,
+                       const Writer& out,
+                       Pending& pending) {
     const int tid = static_cast<int>(threadIdx.x);
     float best[kItems];
     uint32_t best_filter[kItems];
@@ -803,30 +836,31 @@ DMT_D __forceinline__ void score_tile_bookkeeping(
         bool above[kItems];
         float snr[kItems];
         uint32_t filters[kItems];
-        const uint32_t width  = wtab[f];
-        const uint32_t w_edge = use_trapezoid ? trapezoid_edge_width(width) : 0U;
-        T threshold           = ttab[f];
-        float scale           = noise.inv_row[f];
-        bool f_hit            = false;
+        const uint32_t width = wtab[f];
+        const uint32_t w_edge =
+            use_trapezoid ? trapezoid_edge_width(width) : 0U;
+        T threshold = ttab[f];
+        float scale = noise.inv_row[f];
+        bool f_hit  = false;
         for (int j = 0; j < kItems; ++j) {
             const uint32_t local  = (tid * kItems) + j;
             const uint64_t sample = start + local;
             if constexpr (kBlockNoise) {
                 if (noise.is_mixed()) {
-                    const int e = block_entry(block_tables, sample);
-                    const int k = block_table(block_tables, e, sample, width,
-                                              noise.support());
-                    const float* v = block_tables.inv[e][k];
+                    const int e    = block_entry(block_tables, sample);
+                    const int k    = block_table(block_tables, e, sample, width,
+                                                 noise.support());
+                    const float* v = block_pick(block_tables.inv, e, k);
                     if constexpr (std::is_integral_v<T>) {
-                        const uint64_t* it = block_tables.ithr[e][k];
-                        threshold          = it != nullptr
-                                                 ? it[(row_index * nfilters) + f]
-                                                 : noise.plane_ithr[f];
+                        const uint64_t* it =
+                            block_pick(block_tables.ithr, e, k);
+                        threshold = it != nullptr
+                                        ? it[(row_index * nfilters) + f]
+                                        : noise.plane_ithr[f];
                     } else {
-                        const float* t = block_tables.thr[e][k];
-                        threshold      = t != nullptr
-                                             ? t[(row_index * nfilters) + f]
-                                             : noise.plane_thr[f];
+                        const float* t = block_pick(block_tables.thr, e, k);
+                        threshold = t != nullptr ? t[(row_index * nfilters) + f]
+                                                 : noise.plane_thr[f];
                     }
                     scale = v != nullptr ? v[(row_index * nfilters) + f]
                                          : noise.plane_inv[f];
@@ -841,8 +875,8 @@ DMT_D __forceinline__ void score_tile_bookkeeping(
             above[j] = local < static_cast<uint32_t>(n) &&
                        (!skip_cold || sample >= row.warmup + width - 1) &&
                        sum >= threshold;
-            f_hit  = f_hit || above[j];
-            snr[j] = 0;
+            f_hit    = f_hit || above[j];
+            snr[j]   = 0;
             if constexpr (std::is_integral_v<T>) {
                 // In per-width and all modes, integer threshold crossings stay
                 // integer until a candidate is emitted. Across-width comparison
@@ -851,10 +885,10 @@ DMT_D __forceinline__ void score_tile_bookkeeping(
                 if (above[j] &&
                     (kBlockNoise ||
                      mode == PeakFindingMode::kContiguousPeakAcrossWidths)) {
-                    snr[j] = static_cast<float>(
-                        (static_cast<double>(sum) -
-                         means[(row_index * nfilters) + f]) *
-                        (scale * unit));
+                    snr[j] =
+                        static_cast<float>((static_cast<double>(sum) -
+                                            means[(row_index * nfilters) + f]) *
+                                           (scale * unit));
                 }
             } else {
                 snr[j] = above[j] ? sum * scale : 0.0F;
@@ -907,10 +941,8 @@ DMT_D __forceinline__ void score_tile_bookkeeping(
 }
 
 template <typename T, int kBlockThreads>
-DMT_D __forceinline__ void recenter_prefix_ring(T* ring,
-                                                uint32_t mask,
-                                                uint32_t end,
-                                                uint32_t lookback) {
+DMT_D __forceinline__ void
+recenter_prefix_ring(T* ring, uint32_t mask, uint32_t end, uint32_t lookback) {
     const int tid  = static_cast<int>(threadIdx.x);
     const T origin = ring[(end - lookback) & mask];
     __syncthreads();
@@ -1063,11 +1095,10 @@ private:
 
     template <typename T>
     [[nodiscard]] SizeType shared_need(int threads, bool screen) const {
-        return block_shared_need<T>(threads, screen, []<int K>(
-                                                         std::integral_constant<
-                                                             int, K>) {
-            return sizeof(BoxcarShared<T, K>);
-        });
+        return block_shared_need<T>(threads, screen,
+                                    []<int K>(std::integral_constant<int, K>) {
+                                        return sizeof(BoxcarShared<T, K>);
+                                    });
     }
 
     // Shared block-size policy for prefix and float Kadane: float Kadane's

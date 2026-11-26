@@ -53,11 +53,13 @@ struct Exec {
     }
     [[nodiscard]] static constexpr Exec cuda(int device   = 0,
                                              int nthreads = 1) noexcept {
-        return {.backend = Backend::kCUDA, .nthreads = nthreads, .device = device};
+        return {
+            .backend = Backend::kCUDA, .nthreads = nthreads, .device = device};
     }
     [[nodiscard]] static constexpr Exec hip(int device   = 0,
                                             int nthreads = 1) noexcept {
-        return {.backend = Backend::kHIP, .nthreads = nthreads, .device = device};
+        return {
+            .backend = Backend::kHIP, .nthreads = nthreads, .device = device};
     }
 };
 

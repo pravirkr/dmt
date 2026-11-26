@@ -58,11 +58,11 @@ inline std::vector<Case> cases() {
 inline std::unique_ptr<algorithms::detail::DDMTEngine>
 make_forced_sdmt_gpu(const Case& c, const Exec& exec, bool defer) {
 #ifdef DMT_ENABLE_GPU
-    auto eng = algorithms::detail::make_sdmt_gpu(
-        c.plan, {.nbeams            = c.nbeams,
-                 .exec              = exec,
-                 .defer_allocation  = defer,
-                 .force_shared_sums = true});
+    auto eng =
+        algorithms::detail::make_sdmt_gpu(c.plan, {.nbeams           = c.nbeams,
+                                                   .exec             = exec,
+                                                   .defer_allocation = defer,
+                                                   .force_shared_sums = true});
     eng->set_gulp_size(c.gulp);
     return eng;
 #else
@@ -156,8 +156,7 @@ void host_call(Engine& eng,
         eng.execute(wf, nsamps, dmt);
     } else {
         const std::vector<uint8_t> wf(
-            nbeams * nsamps *
-                bit_pack_utils::packed_row_bytes(nchans, nbits),
+            nbeams * nsamps * bit_pack_utils::packed_row_bytes(nchans, nbits),
             0);
         eng.execute_time_major(wf, nsamps, dmt);
     }
@@ -210,9 +209,10 @@ inline void check_host(const Exec& exec) {
 inline void check_sdmt_differs(const Exec& exec) {
     const Case c{"sdmt vs ddmt", plan_of(60.0F, 32), 1, 1000, 0};
     const auto d = estimate(false, c, exec);
-    const auto s = exec.backend == Backend::kCPU
-                       ? estimate(true, c, exec)
-                       : make_forced_sdmt_gpu(c, exec, true)->estimate(c.nsamps);
+    const auto s =
+        exec.backend == Backend::kCPU
+            ? estimate(true, c, exec)
+            : make_forced_sdmt_gpu(c, exec, true)->estimate(c.nsamps);
     CHECK(d.usage.plan != s.usage.plan);
     CHECK(d.usage.history == s.usage.history);
 }

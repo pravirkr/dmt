@@ -138,9 +138,10 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
         keep_q, detected_all, plane_slots, plane_cap, pending);
 
     const auto lookback = static_cast<uint32_t>(max_width - 1);
-    const auto noise    = resolve_row_noise<T, kBlockNoise>(
+    RowNoisePlay<kBlockNoise> play{};
+    const auto noise = resolve_row_noise<T, kBlockNoise>(
         input, row_index, nfilters, max_width, widths, thresholds, inv_sigma,
-        integer_thresholds, block_tables);
+        integer_thresholds, block_tables, play);
 
     T* s_thr             = ring + mask + 1;
     auto* s_widths       = reinterpret_cast<uint32_t*>(s_thr + nfilters);
@@ -159,12 +160,12 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     // gate on centred sums: at most the centred integer cutoff, as
     // init_kadane()).
     [[maybe_unused]] const auto min_ithr_at = [&](SizeType f) -> uint64_t {
-        return noise.min_ithr_at(f);
+        return noise.min_ithr_at(f, play);
     };
     [[maybe_unused]] const auto min_thr_at = [&](SizeType f) -> float {
-        float th = noise.min_fthr_at(f);
+        float th = noise.min_fthr_at(f, play);
         if constexpr (std::is_integral_v<T>) {
-            const uint64_t it = noise.min_ithr_at(f);
+            const uint64_t it = noise.min_ithr_at(f, play);
             if (it != std::numeric_limits<uint64_t>::max()) {
                 const double centred = (static_cast<double>(it) -
                                         means[(row_index * nfilters) + f]) *
@@ -380,7 +381,7 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
             if (!ring_ready) {
                 if (shared_tables && !tables_staged) {
                     stage_row_tables<T, kBlockThreads, kBlockNoise>(
-                        s_thr, s_widths, widths, nfilters, noise);
+                        s_thr, s_widths, widths, nfilters, noise, play);
                     tables_staged = true;
                 }
                 bootstrap_carry_ring<T, C, kBlockThreads>(
@@ -503,7 +504,7 @@ void FDMTBoxcarCudaEngine::configure_shared_kadane_block(SizeType limit) {
 
 template <typename T, typename SegT>
 bool FDMTBoxcarCudaEngine::try_configure_shared_kadane() {
-    const SizeType limit = shared_mem_limit();
+    const SizeType limit   = shared_mem_limit();
     const auto kadane_need = [&](int threads) {
         return block_shared_need<T>(
             threads, false, []<int K>(std::integral_constant<int, K>) {

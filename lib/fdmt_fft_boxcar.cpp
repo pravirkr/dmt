@@ -72,7 +72,7 @@ public:
         // depend on the segment, so fail at once when they alone are over.
         const SizeType discard = std::max(geom.skip, geom.support);
         const SizeType n_min   = fdmt_fft::min_segment_length(geom);
-        auto used = engine->memory_usage();
+        auto used              = engine->memory_usage();
         // Budgeted bytes only: on a GPU the host result storage
         // (max_candidates) is reported, not budgeted.
         const SizeType host_cands =

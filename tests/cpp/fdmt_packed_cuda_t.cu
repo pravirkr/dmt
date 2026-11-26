@@ -83,8 +83,8 @@ TEST_CASE("FDMT packed input matches float input and FDMT", "[fdmt_gpu][gpu]") {
                     DYNAMIC_SECTION("nchans=" << c.nchans << " nbits=" << nbits
                                               << " mode=" << mode
                                               << " smearing=" << smearing) {
-                        const auto wf = test::random_packed(c.nchans, c.nsamps, nbits,
-                                                      17 + nbits);
+                        const auto wf = test::random_packed(c.nchans, c.nsamps,
+                                                            nbits, 17 + nbits);
                         FDMT gpu_float(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
                                        c.dt_max, c.dt_min, 1, smearing, mode,
                                        test::gpu_exec());
@@ -153,7 +153,7 @@ TEST_CASE("FDMT packed multi-beam matches per-beam execution",
     const SizeType nsamps = 128;
     const SizeType nbeams = 3;
     const SizeType nbits  = 2;
-    const auto wf         = test::random_packed(nbeams * nchans, nsamps, nbits, 5);
+    const auto wf = test::random_packed(nbeams * nchans, nsamps, nbits, 5);
     FDMT multi(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, true, "full",
                test::gpu_exec(), nbeams);
     const auto got        = run_packed(multi, wf.packed, nbits);

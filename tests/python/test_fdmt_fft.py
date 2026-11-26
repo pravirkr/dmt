@@ -469,7 +469,7 @@ def test_fdmt_fft_finalize_preserves_nbeams() -> None:
     expected = eng.execute(wf)
     eng.reset_history()
     dmt_buf = np.empty_like(expected)
-    eng.reset(wf, dmt_buf)
+    eng.reset(wf, dmt=dmt_buf)
     got = eng.finalize()
     assert got.shape == expected.shape
     np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-5)

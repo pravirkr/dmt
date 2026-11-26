@@ -91,7 +91,9 @@ public:
      * @param use_box_smearing Whether to account for intra-channel smearing
      * (default: true).
      * @param mode Mode: "valid", "full", or "roll" (default: "valid").
-     * @param exec Backend and its resources (default: CPU, 1 thread).
+     * @param exec Backend and its resources (default: CPU, 1 thread). On a
+     * GPU, `Exec::cuda(device, nthreads)` sets the host worker threads that
+     * stage a host-memory result through pinned buffers (see above).
      * @param nbeams Number of batched beams (default: 1).
      * @param fractional_delays True by default, and by the nature of the
      * Fourier-domain tree: every merge shifts its head by a real-valued,

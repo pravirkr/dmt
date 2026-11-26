@@ -1,39 +1,29 @@
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
-
 import numpy as np
 
 from dmtlib import libdmt
 
 try:
     from ._dispersed_pulse import sweep_recovery
+    from ._reference_fdmt import (
+        DT_MAX,
+        NCHANS,
+        NSAMPS,
+        TRUE_F_MAX,
+        TRUE_F_MIN,
+        reference_fdmt,
+    )
 except ImportError:
     from _dispersed_pulse import sweep_recovery
-
-
-def _load_reference():
-    path = (
-        Path(__file__).resolve().parents[2]
-        / "bench"
-        / "scripts"
-        / "fdmt_correction_redundancy.py"
+    from _reference_fdmt import (
+        DT_MAX,
+        NCHANS,
+        NSAMPS,
+        TRUE_F_MAX,
+        TRUE_F_MIN,
+        reference_fdmt,
     )
-    spec = importlib.util.spec_from_file_location("_fdmt_correction_ref", path)
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-_ref = _load_reference()
-TRUE_F_MIN = _ref.TRUE_F_MIN
-TRUE_F_MAX = _ref.TRUE_F_MAX
-NCHANS = _ref.NCHANS
-DT_MAX = _ref.DT_MAX
-NSAMPS = _ref.NSAMPS
-reference_fdmt = _ref.reference_fdmt
 
 
 class TestCorrectionRedundancy:

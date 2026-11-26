@@ -44,9 +44,9 @@
 
 namespace dmt::algorithms::detail::fdmt_cpu {
 
-using detail::FDMTLargeArray;
 using detail::fdmt_stream_add;
 using detail::fdmt_stream_fence;
+using detail::FDMTLargeArray;
 
 /**
  * @brief One merge (or copy) of the engine's tree, from the plan's

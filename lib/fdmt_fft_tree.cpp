@@ -419,9 +419,9 @@ Segments choose_segments(const Geometry& geom,
     };
     std::vector<Cand> cands;
     const auto n_min = min_segment_length(geom);
-    for (SizeType n =
-             capped ? n_min
-                    : std::max(utils::next_fft_size(kMinSegment), n_min);
+    for (SizeType n = capped
+                          ? n_min
+                          : std::max(utils::next_fft_size(kMinSegment), n_min);
          n < n_single && (!capped || n <= max_len);
          n = utils::next_fft_size(n + 1)) {
         const auto hop  = n - discard - ahead;
