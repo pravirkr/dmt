@@ -100,6 +100,34 @@ cudaStreamSynchronize(stream);
 The public headers include no CUDA header, so CPU-only and GPU builds expose
 the same declarations.
 
+## Candidate search with `FDMTBoxcar`
+
+`FDMTBoxcar` fuses the FDMT with a boxcar search and returns candidates
+instead of the DM–time plane:
+
+```cpp
+const dmt::plans::FDMTPlan plan(1200.0F, 1600.0F, 256, 1024, 1e-3F, 150);
+const dmt::BoxcarConfig config{.max_boxcar = 64, .detect_thresh = 7.0F};
+dmt::algorithms::FDMTBoxcar search(plan, config, /*use_box_smearing=*/true,
+                                   dmt::Exec::cpu(4));
+
+std::vector<float> block(256 * 1024);       // (nchans, nsamps), unit noise
+for (/* each block */;;) {
+    const auto res = search.execute(block);  // views valid until the next call
+    for (const dmt::RawCandidate& c : res.candidates) {
+        // c.peak_sample, c.snr, c.dm, c.width, c.f_low_mhz, ...
+    }
+    break;
+}
+const auto last = search.drain();           // end of stream
+```
+
+`BoxcarConfig` is an aggregate: set the fields you need by name. A final
+block shorter than `nsamps` goes in as a whole block whose first `n` samples
+are data, with `search.drain(block, n)`; `FDMT::execute_tail()` does the same
+for the plain transform. Candidate times refer to the lower edge
+`f_low_mhz` of the candidate's own subband.
+
 ## Stepper
 
 To inspect intermediate subbands, for example stopping two levels before the

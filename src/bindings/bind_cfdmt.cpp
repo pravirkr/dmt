@@ -367,6 +367,8 @@ void bind_cfdmt(py::module_& mod) {
         )doc")
         .def(py::init([](const CohFDMTConfig& config, int nthreads,
                          std::string_view backend, int device) {
+                 // Pure C++ from here: other Python threads run meanwhile.
+                 const py::gil_scoped_release release;
                  return CohFDMT(config, make_exec(backend, nthreads, device));
              }),
              "config"_a, "nthreads"_a = 1, py::kw_only(), "backend"_a = "cpu",
@@ -398,8 +400,13 @@ void bind_cfdmt(py::module_& mod) {
             "estimate_memory",
             [](const CohFDMTConfig& config, int nthreads,
                std::string_view backend, int device) {
-                return coh_memory_dict(CohFDMT::estimate_memory(
-                    config, make_exec(backend, nthreads, device)));
+                const auto exec = make_exec(backend, nthreads, device);
+                plans::CohFDMTMemoryUsage usage;
+                {
+                    const py::gil_scoped_release release;
+                    usage = CohFDMT::estimate_memory(config, exec);
+                }
+                return coh_memory_dict(usage);
             },
             "config"_a, "nthreads"_a = 1, py::kw_only(), "backend"_a = "cpu",
             "device"_a = 0,
@@ -510,10 +517,15 @@ void bind_cfdmt(py::module_& mod) {
             }
             const auto nsub   = static_cast<SizeType>(voltages.shape(1));
             const auto nsamps = static_cast<SizeType>(voltages.shape(2));
-            auto bytes        = utils::pack_baseband(
-                std::span<const ComplexType>(voltages.data(), voltages.size()),
-                nsub, nsamps, format, scale, sub_begin, sub_count, t_begin,
-                t_count);
+            std::vector<uint8_t> bytes;
+            {
+                const py::gil_scoped_release release;
+                bytes =
+                    utils::pack_baseband(std::span<const ComplexType>(
+                                             voltages.data(), voltages.size()),
+                                         nsub, nsamps, format, scale, sub_begin,
+                                         sub_count, t_begin, t_count);
+            }
             return as_pyarray(std::move(bytes));
         },
         "voltages"_a.noconvert(), "format"_a = BasebandFormat{},

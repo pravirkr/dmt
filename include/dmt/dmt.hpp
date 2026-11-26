@@ -11,6 +11,9 @@
  * dmt::available_backends().
  * - Incoherent Fast Dispersion Measure Transform (FDMT): @ref
  * dmt::algorithms::FDMT
+ * - FDMT with a fused boxcar candidate search: @ref
+ * dmt::algorithms::FDMTBoxcar (and @ref dmt::algorithms::FDMTFFTBoxcar),
+ * configured by @ref dmt::BoxcarConfig and returning @ref dmt::RawCandidate
  * - Direct Dedispersion Transform (DDMT): @ref dmt::algorithms::DDMT
  * - Coherent Fast Dispersion Measure Transform (CFDMT): @ref
  * dmt::algorithms::CohFDMT
@@ -22,18 +25,22 @@
  * dmt::plans::DDMTPlan, @ref dmt::plans::CohFDMTPlan, @ref
  * dmt::plans::generate_dm_grid, @ref dmt::plans::generate_levin_dm_grid, @ref
  * dmt::plans::calculate_snr_loss
- * - Simulation utilities: @ref dmt::utils::generate_pure_frb
+ * - Simulation utilities: @ref dmt::utils::generate_pure_frb, @ref
+ * dmt::utils::simulate_baseband, @ref dmt::utils::pack_baseband
  */
 
 // Import common types and constants
-#include "common/backend.hpp"    // IWYU pragma: export
-#include "common/build_info.hpp" // IWYU pragma: export
-#include "common/dm_grids.hpp"   // IWYU pragma: export
-#include "common/fft_config.hpp" // IWYU pragma: export
-#include "common/logging.hpp"    // IWYU pragma: export
-#include "common/plans.hpp"      // IWYU pragma: export
-#include "common/types.hpp"      // IWYU pragma: export
-#include "utils/simulate.hpp"    // IWYU pragma: export
+#include "common/backend.hpp"      // IWYU pragma: export
+#include "common/baseband.hpp"     // IWYU pragma: export
+#include "common/boxcar_plans.hpp" // IWYU pragma: export
+#include "common/build_info.hpp"   // IWYU pragma: export
+#include "common/candidate.hpp"    // IWYU pragma: export
+#include "common/dm_grids.hpp"     // IWYU pragma: export
+#include "common/fft_config.hpp"   // IWYU pragma: export
+#include "common/logging.hpp"      // IWYU pragma: export
+#include "common/plans.hpp"        // IWYU pragma: export
+#include "common/types.hpp"        // IWYU pragma: export
+#include "utils/simulate.hpp"      // IWYU pragma: export
 
 // Include headers for each algorithm
 #include "algorithms/cfdmt.hpp"           // IWYU pragma: export

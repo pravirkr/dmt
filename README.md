@@ -123,7 +123,11 @@ pip install .          # or: uv pip install .
 ```
 
 The build picks up a GPU toolchain if it finds one (CUDA first, then ROCm).
-To require one, pass `CMAKE_ARGS="-DDMT_GPU=CUDA"` (or `HIP`).
+To require one, pass `CMAKE_ARGS="-DDMT_GPU=CUDA"` (or `HIP`). It targets
+the build machine (`-march=native`, its GPU); on a login node or in a
+container, name the targets instead, for example
+`CMAKE_ARGS="-DDMT_ENABLE_NATIVE_ARCH=OFF -DDMT_CPU_ARCH=x86-64-v3 -DDMT_GPU=CUDA -DDMT_GPU_CHECK_DEVICE=OFF -DDMT_CUDA_ARCHITECTURES='80;89;90'"`
+(see the installation guide).
 
 As a C++ library:
 

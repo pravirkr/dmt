@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -20,10 +21,28 @@ namespace dmt::algorithms {
 
 namespace {
 
+// The engines index delays and DM trials with int (kernel arguments and
+// tile tables): larger plans are rejected here instead of wrapping.
+void check_int_range(const plans::DDMTPlan& plan, bool shared_sums) {
+    const auto& pc = plan.get_container();
+    const SizeType max_delay =
+        pc.delay_table.empty() ? 0 : *std::ranges::max_element(pc.delay_table);
+    constexpr auto kIntMax =
+        static_cast<SizeType>(std::numeric_limits<int>::max());
+    if (max_delay > kIntMax || pc.dm_arr.size() > kIntMax) {
+        throw std::invalid_argument(fmt::format(
+            "{}: the plan's largest delay ({} samples) and DM trial count "
+            "({}) must fit an int ({})",
+            shared_sums ? "SDMT" : "DDMT", max_delay, pc.dm_arr.size(),
+            kIntMax));
+    }
+}
+
 std::unique_ptr<detail::DDMTEngine>
 make_ddmt_engine(const plans::DDMTPlan& plan,
                  const detail::DDMTEngineConfig& cfg,
                  bool shared_sums) {
+    check_int_range(plan, shared_sums);
     if (cfg.exec.backend == Backend::kCPU) {
         return shared_sums ? detail::make_sdmt_cpu(plan, cfg)
                            : detail::make_ddmt_cpu(plan, cfg);

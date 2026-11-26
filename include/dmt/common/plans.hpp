@@ -789,7 +789,11 @@ public:
     [[nodiscard]] SizeType get_ndm_fine() const noexcept;
     /// @brief Half-width Delta of the fine FDMT delay range, samples
     [[nodiscard]] SizeType get_fine_dt_max() const noexcept;
-    /// @brief Final DM of every output row (coarse-major) in pc cm^-3
+    /// @brief Final DM of every output row in pc cm^-3: get_ndm_coh() blocks
+    /// of get_ndm_fine() rows (coarse-major). Each block spans its coarse
+    /// trial's fine window and neighbouring windows overlap, so the grid
+    /// increases within a block and steps back at the next one (piecewise
+    /// monotonic, rectangular by design).
     [[nodiscard]] const std::vector<float>& get_dm_grid_final() const noexcept;
     /// @brief Total output rows (ndm_coh * ndm_fine)
     [[nodiscard]] SizeType get_ndm() const noexcept;

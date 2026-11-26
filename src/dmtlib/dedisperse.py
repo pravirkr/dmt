@@ -111,6 +111,7 @@ def dedisperse(
     use_box_smearing: bool = False,
     nthreads: int = 1,
     backend: str = "cpu",
+    device: int = 0,
 ) -> Dedispersed:
     """Dedisperse a whole waterfall, returning only fully supported samples.
 
@@ -138,8 +139,9 @@ def dedisperse(
         FDMT engines only. ``False`` (the default here, unlike the engine
         classes) keeps white input white, for periodicity searches. ``True``
         applies the single-pulse box filter, which colours the noise.
-    nthreads, backend
-        Passed to the engine.
+    nthreads, backend, device
+        Passed to the engine (``device``: the GPU ordinal of a GPU
+        ``backend``; one device, ignored on the CPU).
 
     Returns
     -------
@@ -153,7 +155,7 @@ def dedisperse(
         raise ValueError(msg)
     nchans, nsamps = wf.shape
     dm_req = np.atleast_1d(np.asarray(dms, dtype=np.float32))
-    kw = {"nthreads": nthreads, "backend": backend}
+    kw = {"nthreads": nthreads, "backend": backend, "device": device}
     if engine in _TREE:
         if f_ref is not None and f_ref != f_min:
             msg = (
