@@ -221,8 +221,8 @@ box length, about `nchans` (no longer the number of channel samples summed).
   Both run at the speed of FFTW and the FDMT; the chirp, detection and
   alignment are fused into the per-channel inverse-FFT pass.
 - **GPU front end.** On the GPU, the block's front end (unpack, forward cuFFT, channel powers)
-  runs in chunks of subbands sized to a quarter of the L2 cache. Each chunk's
-  passes then stay on chip, which made long multi-pass transforms (30720
+  runs in fixed 24 MiB chunks of subbands (a quarter of the L40S's L2, on any
+  device). Each chunk's passes then stay on chip, which made long multi-pass transforms (30720
   points) 1.7× faster on an L40S. The chunks also pace the host-array upload.
 - **GPU coherent stage.** The GPU coherent stage is one fused kernel per coarse trial: gather times
   chirp, an in-shared-memory inverse FFT, detection, normalisation and the

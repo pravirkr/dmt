@@ -1,8 +1,8 @@
 # Streaming FDMT on skewed windows
 
 A valid-mode FDMT that keeps no per-merge tree history above level 4:
-`lib/dmt/fdmt_skew.hpp` (`FDMTSkewCpu`, `compute_skew_windows`,
-`estimate_skew_memory`), tested by `tests/cpp/fdmt_skew_cpu_t.cpp` and
+`lib/dmt/fdmt_skew.hpp` (`FDMTSkewCpu`, `compute_skew_windows`), tested
+by `tests/cpp/fdmt_skew_cpu_t.cpp` and
 measured by `bench/fdmt_skew_cpu_b.cpp`, `bench/fdmt_skew_mem_b.cpp` and
 the `parkes_uwl` boxcar suite. Both `FDMT` and `FDMTBoxcar` automatically
 select this path on the CPU (and its device counterpart in
@@ -199,8 +199,9 @@ float and packed, CPU and GPU.
 `FDMT` and `FDMTBoxcar` choose their path and chunk within
 `max_memory_bytes` (10 GiB by default):
 
-- **CPU:** from `estimate_skew_memory()` (0.4 s on `parkes_uwl`), with a
-  tenth of headroom for the merge tables; the allocation is then checked.
+- **CPU:** each candidate (chunk, leaf) engine is sized without allocating
+  it (its tables are planned, its buffers deferred), with no headroom, and
+  the first that fits is allocated.
   Float input takes the tree path when it fits. Packed input (an
   `FDMTBoxcar` with input bits) and an automatic chunk takes the skewed
   chunks 4096 and 2048 first, then the tree, then the shorter chunks: on

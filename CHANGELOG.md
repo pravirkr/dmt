@@ -118,6 +118,28 @@ All notable changes to `dmt` are listed here. The format follows
   (`KADANE`, lossless multi-bucket Kadane tile gate + exact Stage-2 scoring),
   `kPrefix` (`PREFIX`, prefix-sum / sparse range-minimum screen), and `kNone`
   (`NONE`, unscreened exact scoring).
+- **Pinned host memory in the memory reports**: `FDMTMemoryUsage::pinned`
+  and `DDMTFFTMemoryUsage::pinned` (Python `memory_usage["pinned"]`) give the
+  pinned host buffers a GPU instance holds for host-memory calls, and
+  `FDMTMemoryEstimate::host_pinned` and `DDMTFFTMemoryEstimate::host_pinned`
+  what the first such call adds (`FDMT`, `FDMTFFT`, `DDMTFFT`; `CohFDMT`
+  reports it in `host_pinned` of its estimate). Not part of `total()`; 0 on
+  the CPU. `DDMT` and `SDMT` already had both.
+- **`Exec::cuda(device, nthreads)` and `Exec::hip(device, nthreads)`**
+  (`nthreads` default 1): on a GPU backend `nthreads` is the number of host
+  worker threads that stage host-memory results through pinned buffers
+  (`FDMT`, `FDMTFFT`, `DDMTFFT`, `CohFDMT`: up to 4, once the output plane
+  reaches 2 x min(nthreads, 4) x 8 MiB). Python: the engines' `nthreads=`
+  argument now means the same on a GPU backend. 0.8.0 always staged with
+  up to 4 threads (`DDMT` up to 16), so at the default host-output GPU calls
+  on large planes are slower than 0.8.0 (up to 42% for `meerkat_lband` on an
+  L40S); pass `nthreads=4` for the 0.8.0 speed.
+- **`out=` on host `FDMTFFT.execute` and `FDMTFFT.execute_time_major`**
+  (Python, keyword-only): writes the result into a caller-owned C-contiguous
+  `float32` array of the output shape, as `FDMT.execute` does.
+- `dmt::build_info()` (Python `dmtlib.build_info()`) reports the
+  configuration's own compiler flags: `-ffast-math` in `cxx_flags` and the
+  GPU flags (`-use_fast_math` for CUDA) in `gpu`.
 
 ### Changed
 
@@ -250,6 +272,12 @@ All notable changes to `dmt` are listed here. The format follows
   device's free memory: `DDMTFFT` keeps the CPU engine's segment length
   (same segments on both backends), and the `CohFDMT` cuFFT path (channel
   FFT lengths the fused kernel can't take) uses a fixed 1 GiB work buffer.
+  The GPU `CohFDMT` front end (unpack, channel FFT, channel powers) runs in
+  fixed 24 MiB chunks instead of a quarter of the device's L2 cache (the
+  same 24 MiB on an L40S).
+  Likewise the GPU `FDMT` automatic chunk (and so `FDMTBoxcar`'s path list
+  and every GPU `estimate_memory()`) uses a fixed 96 MiB cache target, the
+  L40S's L2, instead of the device's L2 size.
   `FDMTFFT` and `FDMTFFTBoxcar` construction sizes the engines it tries and
   allocates only the one it keeps.
 - The memory usage and estimate structs (`FDMTMemoryUsage`,
@@ -275,6 +303,44 @@ All notable changes to `dmt` are listed here. The format follows
 - `dmtlib.calculate_snr_loss` uses the model of `generate_dm_grid` (now in
   C++ as `plans::calculate_snr_loss`). `pulse_width` is in seconds (default
   0), and it, `chan_dm` and the new `kill_mask` are keyword-only.
+- **Python: `nbits=` and `nsamps=` are keyword-only on the packed
+  overloads.** Packed `FDMT` and `FDMTFFT` `execute`, `execute_time_major`
+  and `reset` take `nbits=` by keyword only, and packed `DDMT`, `SDMT` and
+  `DDMTFFT` `execute` and `execute_time_major` take `nsamps=` by keyword
+  only, on host and device input. `FDMT.reset` and `FDMTFFT.reset` take `dmt=` by keyword only on
+  every overload (float and packed, host and device). A positional call
+  raises `TypeError`.
+- **Plain float GPU `FDMT` allocates its full tree-history ring at
+  construction**, inside `max_memory_bytes` and in `get_memory_usage()` and
+  `estimate_memory()`. It held a smaller ring and grew it, outside the
+  budget, on the first `save_history()` / `load_history()` or the first call
+  its direct levels could not take. Device memory at construction grows by
+  the difference (L40S, 32768-sample blocks to DM 2000: `cryopaf_lband` +61
+  MiB to 237 MiB, `cryopaf_low` +105 MiB to 594 MiB, `meerkat_lband` +236
+  MiB to 530 MiB; `parkes_uwl` unchanged); a budget just above the old
+  usage can now raise `ValueError` (C++ `std::invalid_argument`). Paths,
+  chunks and results are unchanged.
+- The Python bindings release the GIL around host transforms (`execute`,
+  `execute_time_major`, the steppers, `compute_fdmt*`, host
+  `save_history` / `load_history`), so other Python threads run meanwhile.
+  One instance is still not safe for concurrent calls from several threads.
+- `dmtlib.simulate.generate_pure_frb` wraps `libdmt.generate_pure_frb` (the
+  Numba version is gone) and takes `dt` as a float on both, so a fractional
+  sweep works the same in either. The C++ function works in single
+  precision: values differ from the former Numba version by float rounding,
+  most at the sweep's first and last samples (up to about a quarter of the
+  amplitude for thousands of channels at sample offsets above 1000).
+- The DDMT-FFT engines (CPU and GPU) keep a cache of the geometries of
+  recent call lengths and evict the least recently used one instead of
+  clearing the whole cache, so streams cycling through a few block lengths
+  stop rebuilding them.
+- `DMT_HD`, `DMT_D` and `DMT_H` are no longer defined by
+  `dmt/common/types.hpp` (they were internal; define your own in code that
+  used them).
+- Host `FDMT`, `DDMT` and `DDMTFFT` `load_history` (Python) follow the
+  strict-input rule: a history of the wrong dtype or a non-contiguous one
+  raises `ValueError` instead of being copied, as `FDMTFFT.load_history`
+  already did.
 
 ### Removed
 
@@ -309,6 +375,21 @@ All notable changes to `dmt` are listed here. The format follows
 - The `FDMT` docs no longer say that `execute()` never allocates: on a GPU
   the first host-memory call allocates device copies of the input block and
   output plane outside `max_memory_bytes`.
+- `CohFDMTPlan` with an automatic `nbin` whose overlap needs more than 2^20
+  bins now raises `std::invalid_argument` (Python `ValueError`) instead of
+  building a plan with too few bins.
+- `DDMTPlan.generate_levin_dm_grid_piecewise` applies the floating-point
+  rounding fix-up of each segment's step that `piecewise_wrap` uses, so the
+  two agree where a step rounds across an integer.
+- CPU `FDMTFFT::memory_usage()` counts the buffers allocated on first use
+  (time-major input, stepper and view buffers).
+- Saved histories with a NaN or infinite header field are rejected on every
+  path (plain tree, CPU and GPU skewed window) under `-ffast-math`.
+- The GPU `FDMT` stepper (`execute_levels` / `continue_levels`) on the
+  skewed-window path raises `std::invalid_argument` (Python `ValueError`)
+  instead of failing with a CUDA error (illegal address, which ended the
+  process's CUDA context). The skewed path has no stepper on either
+  backend.
 
 ## [0.8.0] - 2026-11-11
 

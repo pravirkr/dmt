@@ -2,10 +2,10 @@
 
 // Published benchmark suite (dmt_bench_suite): one data configuration shared
 // by every algorithm and backend, so FDMT, FDMT-FFT (fractional merge
-// delays), DDMT, SDMT and DDMT-FFT (NUFFT) land on the same plots. DMT_BENCH_CONFIG selects cryopaf_low (512 channels),
-// cryopaf_lband (1152 channels), parkes_uwl (6656 channels) or
-// meerkat_lband (4096 channels). Only block
-// length, DM range and input bit width are swept. See bench/README.md.
+// delays), DDMT, SDMT and DDMT-FFT (NUFFT) land on the same plots.
+// DMT_BENCH_CONFIG selects cryopaf_low (512 channels), cryopaf_lband (1152
+// channels), parkes_uwl (6656 channels) or meerkat_lband (4096 channels). Only
+// block length, DM range and input bit width are swept. See bench/README.md.
 
 #include <algorithm>
 #include <cmath>
@@ -327,7 +327,9 @@ inline SizeType packed_bytes(SizeType nsamps, SizeType nbits) {
 }
 
 /// Estimated working-set bytes of one engine at point `p` (input, output and
-/// the engine's own estimate_memory()), used only for the skip decision.
+/// the engine's own estimate_memory()), used only for the skip decision. An
+/// engine whose estimate rejects the configuration (std::invalid_argument)
+/// counts as over any budget, so the point is skipped like the others.
 inline double estimate_bytes(Algo algo,
                              const plans::FDMTPlan& plan,
                              const Point& p,
@@ -336,51 +338,50 @@ inline double estimate_bytes(Algo algo,
         (p.nbits == 32)
             ? static_cast<double>(kNchans * p.nsamps) * sizeof(float)
             : static_cast<double>(packed_bytes(p.nsamps, p.nbits));
-    switch (algo) {
-    case Algo::kFDMT: {
-        const double out =
-            static_cast<double>(plan.get_dmt_size()) * sizeof(float);
-        try {
+    try {
+        switch (algo) {
+        case Algo::kFDMT: {
+            const double out =
+                static_cast<double>(plan.get_dmt_size()) * sizeof(float);
             const auto est = algorithms::FDMT::estimate_memory(
                 plan, true, exec, 1, algorithms::kFDMTAutoFuse, true);
             return input + out + static_cast<double>(est.usage.total());
-        } catch (const std::invalid_argument&) {
-            return std::numeric_limits<double>::infinity();
         }
-    }
-    case Algo::kFDMTFFTFrac: {
-        const double out =
-            static_cast<double>(plan.get_dmt_size()) * sizeof(float);
-        const auto est =
-            algorithms::FDMTFFT::estimate_memory(plan, true, exec, 1, true);
-        return input + out + static_cast<double>(est.usage.total());
-    }
-    case Algo::kDDMT:
-    case Algo::kSDMT: {
-        const auto dms = dm_grid(p);
-        const plans::DDMTPlan dplan(kFMin, kFMax, kNchans, kTsamp, dms,
-                                    p.nbits);
-        const double out =
-            static_cast<double>(dms.size() * p.nsamps) * sizeof(float);
-        const auto est = (algo == Algo::kDDMT)
-                             ? algorithms::DDMT::estimate_memory(dplan,
-                                                                 p.nsamps, exec)
-                             : algorithms::SDMT::estimate_memory(
-                                   dplan, p.nsamps, exec);
-        return input + out + static_cast<double>(est.usage.total());
-    }
-    case Algo::kDDMTFFT: {
-        const auto dms = dm_grid(p);
-        const plans::DDMTPlan dplan(kFMin, kFMax, kNchans, kTsamp, dms,
-                                    p.nbits);
-        const double out =
-            static_cast<double>(dms.size() * p.nsamps) * sizeof(float);
-        const auto est = algorithms::DDMTFFT::estimate_memory(
-            dplan, p.nsamps, exec, 1,
-            algorithms::DDMTFFTOptions{
-                .method = algorithms::DDMTFFTMethod::kNUFFT});
-        return input + out + static_cast<double>(est.usage.total());
-    }
+        case Algo::kFDMTFFTFrac: {
+            const double out =
+                static_cast<double>(plan.get_dmt_size()) * sizeof(float);
+            const auto est =
+                algorithms::FDMTFFT::estimate_memory(plan, true, exec, 1, true);
+            return input + out + static_cast<double>(est.usage.total());
+        }
+        case Algo::kDDMT:
+        case Algo::kSDMT: {
+            const auto dms = dm_grid(p);
+            const plans::DDMTPlan dplan(kFMin, kFMax, kNchans, kTsamp, dms,
+                                        p.nbits);
+            const double out =
+                static_cast<double>(dms.size() * p.nsamps) * sizeof(float);
+            const auto est =
+                (algo == Algo::kDDMT)
+                    ? algorithms::DDMT::estimate_memory(dplan, p.nsamps, exec)
+                    : algorithms::SDMT::estimate_memory(dplan, p.nsamps, exec);
+            return input + out + static_cast<double>(est.usage.total());
+        }
+        case Algo::kDDMTFFT: {
+            const auto dms = dm_grid(p);
+            const plans::DDMTPlan dplan(kFMin, kFMax, kNchans, kTsamp, dms,
+                                        p.nbits);
+            const double out =
+                static_cast<double>(dms.size() * p.nsamps) * sizeof(float);
+            const auto est = algorithms::DDMTFFT::estimate_memory(
+                dplan, p.nsamps, exec, 1,
+                algorithms::DDMTFFTOptions{
+                    .method = algorithms::DDMTFFTMethod::kNUFFT});
+            return input + out + static_cast<double>(est.usage.total());
+        }
+        }
+    } catch (const std::invalid_argument&) {
+        return std::numeric_limits<double>::infinity();
     }
     return 0.0;
 }

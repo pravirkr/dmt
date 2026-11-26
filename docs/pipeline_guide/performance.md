@@ -520,9 +520,10 @@ history traffic, a few per cent at a few thousand samples.
 - **Default** (`chunk_nsamps=None` in Python, `0` in C++): the longest power
   of two ≥ 2048 whose two state halves (all beams) fit 2 GiB, capped at
   `nsamps`. On a GPU the engine first tries the longest power of two ≥ 256
-  whose state halves fit the device's L2 cache, so each merge reads the level
-  below from L2 instead of DRAM; it falls back to the 2 GiB rule when even 256
-  samples do not fit. On the L40S (96 MiB L2) this picks 512 for `cryopaf_low`
+  whose state halves fit a fixed 96 MiB cache target (the L40S's L2, so the
+  choice does not depend on the device), so each merge reads the level below
+  from L2 instead of DRAM; it falls back to the 2 GiB rule when even 256
+  samples do not fit. On the L40S this picks 512 for `cryopaf_low`
   and 1024 for `cryopaf_lband`, 1.05× and 1.13× faster than the 2 GiB
   rule's 8192 and 16384 (21.8 against 22.9 ms, 11.6 against 13.2 ms; the
   gap was larger before the direct levels removed most tree merges). Read the value used with `fdmt.chunk_nsamps` (C++

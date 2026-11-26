@@ -89,9 +89,7 @@ def _fdmt_packed(out: dict, backend: str, rng: np.random.Generator) -> None:
                 int_tree=int_tree,
                 backend=backend,
             )
-            out[f"fdmt/packed{nbits}/i{int(int_tree)}"] = f.execute(
-                packed, nbits=nbits
-            )
+            out[f"fdmt/packed{nbits}/i{int(int_tree)}"] = f.execute(packed, nbits=nbits)
 
 
 def _fdmt_stepper(out: dict, backend: str, data: np.ndarray) -> None:
