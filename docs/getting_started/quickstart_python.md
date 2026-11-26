@@ -54,11 +54,13 @@ for block in stream:                        # contiguous (256, 1024) float32 blo
 | input | call |
 | :--- | :--- |
 | float32 `(nchans, nsamps)` or `(nbeams, nchans, nsamps)` | `execute(waterfall)` |
-| packed `uint8` `(nchans, row_bytes)` or `(nbeams, nchans, row_bytes)` | `execute(packed, nbits)` |
+| packed `uint8` `(nchans, row_bytes)` or `(nbeams, nchans, row_bytes)` | `execute(packed, nbits=...)` |
 
 - **Output.** float32, `(n_dm, n_times)` or `(nbeams, n_dm, n_times)`, with
   `n_dm = plan.dmt_ndms` and `n_times = plan.dmt_nsamps`.
-- **Arrays** must be C-contiguous; other float dtypes are cast (a copy).
+- **Arrays** must be C-contiguous with exact dtype (`float32`, or `uint8` for
+  packed input); other dtypes or non-contiguous views raise `ValueError` rather
+  than silently copying or casting.
 - **Packed input.** `nbits` ∈ {1, 2, 4, 8, 16}, samples LSB-first within a
   byte, `row_bytes = ceil(nsamps * nbits / 8)`. Pass digitiser output as is:
   it is faster than converting to float, with the same result up to the
@@ -73,7 +75,7 @@ for block in stream:                        # contiguous (256, 1024) float32 blo
 ```python
 nbits = 2
 packed = np.random.randint(0, 256, size=(256, 1024 * nbits // 8), dtype=np.uint8)
-dmt_plane = fdmt.execute(packed, nbits)
+dmt_plane = fdmt.execute(packed, nbits=nbits)
 ```
 
 (channel-order)=

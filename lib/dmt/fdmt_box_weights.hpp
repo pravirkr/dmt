@@ -1,9 +1,14 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <span>
+#include <vector>
 
 #include "dmt/common/types.hpp"
+
+#include "dmt/device_macros.hpp"
 
 // Level-0 box means of the FDMT (use_box_smearing = true), shared by the
 // plan (noise variance, int_tree bounds), the CPU and GPU engines and
@@ -133,6 +138,55 @@ constexpr SizeType box_round_max(SizeType maxval, SizeType box_max) noexcept {
 /// Whether box_round_max() fits uint32_t (else the product needs 64 bits).
 constexpr bool box_round_fits_u32(SizeType maxval, SizeType box_max) noexcept {
     return box_round_max(maxval, box_max) <= SizeType{0xFFFFFFFF};
+}
+
+/// Host level-0 box-weight and packed-rounding tables for an FDMT plan.
+struct FDMTBoxTables {
+    std::vector<float> w_f32;
+    std::vector<FDMTBoxRound> round;
+    float int_unit = 1.0F;
+};
+
+/// Builds the float dyadic weights, rounding recipes, and integer state unit
+/// from a plan's box weights. When `exact_int` is true (packed exact-integer
+/// search), rounding recipes keep the raw dyadic integer weights unrounded
+/// and `int_unit` is 1.
+inline FDMTBoxTables make_fdmt_box_tables(std::span<const uint32_t> weights,
+                                          SizeType frac_bits,
+                                          SizeType mean_bits,
+                                          bool exact_int) {
+    FDMTBoxTables out;
+    const SizeType box_max = weights.size();
+    const float w_unit     = std::ldexp(1.0F, -static_cast<int>(frac_bits));
+    out.int_unit =
+        exact_int ? 1.0F : std::ldexp(1.0F, -static_cast<int>(mean_bits));
+    out.w_f32.resize(box_max);
+    out.round.resize(box_max);
+    for (SizeType s = 0; s < box_max; ++s) {
+        out.w_f32[s] = static_cast<float>(weights[s]) * w_unit;
+        out.round[s] = exact_int ? FDMTBoxRound{.mul    = weights[s],
+                                                .add    = 0U,
+                                                .rshift = 0U,
+                                                .lshift = 0U}
+                                 : box_round(s + 1, mean_bits);
+    }
+    return out;
+}
+
+/// Leaf weights for direct FDMT plans: integer dyadic weights (exact in float)
+/// for packed integer search, otherwise the float box weights.
+inline std::vector<float>
+make_fdmt_direct_box_weights(std::span<const uint32_t> int_weights,
+                             std::span<const float> float_weights,
+                             bool exact_int) {
+    if (!exact_int) {
+        return {float_weights.begin(), float_weights.end()};
+    }
+    std::vector<float> out(float_weights.size());
+    for (SizeType i = 0; i < out.size(); ++i) {
+        out[i] = static_cast<float>(int_weights[i]);
+    }
+    return out;
 }
 
 } // namespace dmt::algorithms::detail

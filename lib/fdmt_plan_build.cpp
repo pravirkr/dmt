@@ -487,13 +487,9 @@ void FDMTPlan::Impl::select_search_rows() {
             std::vector<uint32_t> rows;
             rows.reserve(want.size());
             for (const auto dt : want) {
-                auto it = std::ranges::lower_bound(g, dt);
-                if (it == g.end()) {
-                    --it;
-                } else if (it != g.begin() && (dt - *(it - 1)) <= (*it - dt)) {
-                    --it;
-                }
-                rows.push_back(static_cast<uint32_t>(it - g.begin()));
+                rows.push_back(
+                    static_cast<uint32_t>(utils::find_nearest_sorted_idx(
+                        std::span<const IndexType>(g), dt)));
             }
             std::ranges::sort(rows);
             const auto [first, last] = std::ranges::unique(rows);
@@ -616,7 +612,7 @@ void FDMTPlan::Impl::make_level0_boxes() {
     // chan_dm only, not on the delay grid.
     const auto& grids0 = m_container.grids[0];
     // k = 1 / 2.41e-4 (kDispConst, in double).
-    const double k_ts = (1.0 / 2.41e-4) / static_cast<double>(m_tsamp);
+    const double k_ts = kDispConstD / static_cast<double>(m_tsamp);
     std::vector<double> l_lo(m_nchans);
     std::vector<double> l_hi(m_nchans);
     IndexType lead = 0;

@@ -302,7 +302,7 @@ def benchmark_packed(
                 0, 256, size=(nchans, (nsamps * nbits + 7) // 8), dtype=np.uint8
             )
             for int_tree, engine in engines.items():
-                t = _median_time(lambda: engine.execute(packed, nbits), reps)
+                t = _median_time(lambda: engine.execute(packed, nbits=nbits), reps)
                 tag = f"{nbits}b{'+int' if int_tree else ''}"
                 row.append(f"{tag} {t_float / t:4.2f}x")
         print(f"threads={nthreads:2d}: " + "  ".join(row))

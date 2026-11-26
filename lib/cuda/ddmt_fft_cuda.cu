@@ -85,7 +85,7 @@ constexpr int kSpreadChunk = 1024; // channels staged per spread pass
 // Largest NUFFT sub-run: its fine grid (~2.2 x trials complex floats) must
 // fit the shared memory of one block.
 constexpr SizeType kMaxSubRun = 4096;
-constexpr SizeType kMaxWidth  = 16; // NUFFT kernel width bound (nufft_cpu)
+constexpr SizeType kMaxWidth  = 8;  // NUFFT kernel width bound (nufft_cpu)
 constexpr int kTile           = 32; // deconvolution transpose tile
 constexpr int kTileRows       = 8;
 // The CPU engine's channel-spectra cap (ddmt_fft_cpu.cpp): same segments.
@@ -383,24 +383,6 @@ __global__ void kernel_nufft_deconv(const float2* __restrict__ grids,
     }
 }
 
-__global__ void kernel_trim(const float* __restrict__ time,
-                            float* __restrict__ out,
-                            int64_t ndm,
-                            int64_t n_fft,
-                            int64_t start,
-                            int64_t n_out,
-                            int64_t p0,
-                            int64_t cnt) {
-    const auto i =
-        (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
-    if (i >= cnt) {
-        return;
-    }
-    for (int64_t d = blockIdx.y; d < ndm; d += gridDim.y) {
-        out[(d * n_out) + p0 + i] = time[(d * n_fft) + start + i];
-    }
-}
-
 // New history: combined positions [start, start + new_len) of every row.
 __global__ void kernel_update_history(const float* __restrict__ hist,
                                       const float* __restrict__ block,
@@ -504,19 +486,21 @@ public:
                       const detail::DDMTFFTEngineConfig& cfg)
         : m_plan(plan),
           m_device_id(cfg.exec.device),
+          m_nthreads(std::max(1, cfg.exec.nthreads)),
           m_nbeams(cfg.nbeams),
           m_opts(cfg.options),
           m_model(plan, cfg.options.guard),
           m_nchans(plan.get_nchans()),
           m_ndm(m_model.dm.size()),
           m_nact(m_model.active.size()),
-          m_ctx(m_model.context()) {
+          m_ctx(m_model.context()),
+          m_host(cfg.exec.device, cfg.exec.nthreads) {
         gpu_utils::set_device(m_device_id);
         // Estimate-only: every buffer is sized, none allocated.
         const gpu_utils::DeferScope defer(cfg.defer_allocation ? &m_deferred
                                                                : nullptr);
         setup_methods();
-        m_seg_n = segment_cap();
+        m_seg_n = segment_cap(cfg.max_segment);
         for (auto& h : m_hist) {
             h.reserve_zeroed(history_state_size());
         }
@@ -558,12 +542,6 @@ public:
     [[nodiscard]] SizeType max_delay() const noexcept override {
         return m_model.max_delay;
     }
-    // Stored only, as on the CPU: a gulp of a host call would change the
-    // transform boundaries, and with them the (guard-level) result bits.
-    void set_gulp_size(SizeType gulp_size) override { m_gulp = gulp_size; }
-    [[nodiscard]] SizeType get_gulp_size() const noexcept override {
-        return m_gulp == 0 ? 65536 : m_gulp;
-    }
     [[nodiscard]] std::string_view method_used() const noexcept override {
         return detail::ddmt_fft_method_used(m_nruns_model, m_brute_rows.size());
     }
@@ -590,7 +568,8 @@ public:
                 .transform = transform,
                 .workspace = 0,
                 .staging   = m_in_d.bytes() + m_packed_d.bytes() +
-                             m_unpacked_d.bytes() + m_out_d.bytes()};
+                             m_unpacked_d.bytes() + m_out_d.bytes(),
+                .pinned    = m_host.pinned_bytes()};
     }
 
     [[nodiscard]] DDMTFFTMemoryEstimate estimate(SizeType nsamps) override {
@@ -618,6 +597,7 @@ public:
         const auto rows = m_nbeams * m_nchans;
         const auto out  = m_nbeams * m_ndm * nsamps * sizeof(float);
         DDMTFFTMemoryEstimate e{.usage = memory_usage()};
+        e.host_pinned = detail::host_staging_pinned_bytes(out, m_nthreads);
         if (m_plan.get_nbits() == 32) {
             e.host_staging = (rows * nsamps * sizeof(float)) + out;
         } else {
@@ -767,6 +747,7 @@ protected:
 private:
     const plans::DDMTPlan& m_plan; // owned by the DDMTFFT facade
     int m_device_id;
+    int m_nthreads;
     SizeType m_nbeams;
     DDMTFFTOptions m_opts;
     ddmt_fft::DelayModel m_model;
@@ -775,7 +756,6 @@ private:
     SizeType m_nact;
     SizeType m_ctx;
     SizeType m_seg_n{};
-    SizeType m_gulp{0};
     SizeType m_hist_len{0};
     bool m_hist_zero{false}; // history must be zeroed before next use
     mutable gpu_utils::DeviceWorkFence m_device_work;
@@ -806,6 +786,7 @@ private:
     DevBuf<float> m_in_d;
     DevBuf<float> m_out_d;
     std::map<SizeType, GpuGeometry> m_geos;
+    std::vector<SizeType> m_geo_lru;
 
     [[nodiscard]] float* hist() const noexcept {
         return m_hist[m_hist_cur].data();
@@ -886,9 +867,6 @@ private:
 
     template <typename F> static void dispatch_width(int w, const F& f) {
         switch (w) {
-        case 2:
-            f(std::integral_constant<int, 2>{});
-            break;
         case 3:
             f(std::integral_constant<int, 3>{});
             break;
@@ -914,12 +892,12 @@ private:
     }
 
     // Longest transform: the CPU engine's (same segments, same result
-    // bits), capped only by the testing hook.
-    [[nodiscard]] SizeType segment_cap() const {
+    // bits), capped by max_segment when set.
+    [[nodiscard]] SizeType segment_cap(SizeType max_segment) const {
         auto cap =
             ddmt_fft::max_segment_length(m_ctx, m_nact, kMaxSpectraBytes);
-        if (const auto hook = detail::fft_segment_cap(); hook > 0) {
-            cap = std::min(cap, hook);
+        if (max_segment > 0) {
+            cap = std::min(cap, max_segment);
         }
         return cap;
     }
@@ -984,52 +962,71 @@ private:
     GpuGeometry& geometry(SizeType n) {
         // A few transform lengths (warm-up, steady state, odd blocks); a
         // stream of ever-changing block sizes must not grow the plan cache.
+        // Evict only the least recently used entry so an occasional odd block
+        // does not destroy every cached cuFFT plan.
         constexpr SizeType kMaxGeometries = 4;
-        if (!m_geos.contains(n) && m_geos.size() >= kMaxGeometries) {
-            m_geos.clear();
+        if (const auto it = m_geos.find(n); it != m_geos.end()) {
+            if (const auto lru =
+                    std::find(m_geo_lru.begin(), m_geo_lru.end(), n);
+                lru != m_geo_lru.end()) {
+                std::rotate(lru, lru + 1, m_geo_lru.end());
+            }
+        } else {
+            if (m_geos.size() >= kMaxGeometries && !m_geo_lru.empty()) {
+                m_geos.erase(m_geo_lru.front());
+                m_geo_lru.erase(m_geo_lru.begin());
+            }
+            m_geo_lru.push_back(n);
         }
         auto& g = m_geos[n];
         if (!g.r2c) {
-            g.n_fft  = n;
-            g.n_bins = (n / 2) + 1;
-            g.r2c    = std::make_unique<utils::CUFFTManager>(
-                utils::FFTKind::kR2C, n, m_nact, m_device_id);
-            g.c2r = std::make_unique<utils::CUFFTManager>(
-                utils::FFTKind::kC2R, n, m_ndm, m_device_id);
-            std::vector<unsigned long long> xr(m_nact);
-            std::vector<unsigned long long> sr(m_nact);
-            for (const auto& run : m_runs) {
-                const auto nf = run->plan->fine_grid();
-                if (!g.nu.contains(nf)) {
-                    g.nu[nf] = std::make_unique<utils::CUFFTManager>(
-                        utils::FFTKind::kC2CBackward, nf, g.n_bins,
-                        m_device_id);
-                }
-                // x = k ddm r / N and the centring + dm0 phase k shift r / N
-                // (turns per bin), as the CPU's prepare_points().
-                const double shift =
-                    run->run.dm0 +
-                    (static_cast<double>(run->plan->half()) * run->run.ddm);
-                for (SizeType a = 0; a < m_nact; ++a) {
-                    const double r = m_model.rate[m_model.active[a]];
-                    xr[a]          = phase_fixed(-(run->run.ddm * r), n);
-                    sr[a]          = phase_fixed(-(shift * r), n);
-                }
-                g.xr.emplace_back().upload(xr);
-                g.sr.emplace_back().upload(sr);
-            }
-            if (!m_brute_rows.empty()) {
-                // +tau / N per (brute trial, active channel), exact.
-                const auto nb = m_brute_rows.size();
-                std::vector<unsigned long long> s(nb * m_nact);
-                for (SizeType i = 0; i < nb; ++i) {
-                    for (SizeType a = 0; a < m_nact; ++a) {
-                        s[(i * m_nact) + a] = phase_fixed(
-                            -m_model.tau(m_brute_rows[i], m_model.active[a]),
-                            n);
+            try {
+                g.n_fft  = n;
+                g.n_bins = (n / 2) + 1;
+                g.r2c    = std::make_unique<utils::CUFFTManager>(
+                    utils::FFTKind::kR2C, n, m_nact, m_device_id);
+                g.c2r = std::make_unique<utils::CUFFTManager>(
+                    utils::FFTKind::kC2R, n, m_ndm, m_device_id);
+                std::vector<unsigned long long> xr(m_nact);
+                std::vector<unsigned long long> sr(m_nact);
+                for (const auto& run : m_runs) {
+                    const auto nf = run->plan->fine_grid();
+                    if (!g.nu.contains(nf)) {
+                        g.nu[nf] = std::make_unique<utils::CUFFTManager>(
+                            utils::FFTKind::kC2CBackward, nf, g.n_bins,
+                            m_device_id);
                     }
+                    // x = k ddm r / N and the centring + dm0 phase k shift r /
+                    // N (turns per bin), as the CPU's prepare_points().
+                    const double shift =
+                        run->run.dm0 +
+                        (static_cast<double>(run->plan->half()) * run->run.ddm);
+                    for (SizeType a = 0; a < m_nact; ++a) {
+                        const double r = m_model.rate[m_model.active[a]];
+                        xr[a]          = phase_fixed(-(run->run.ddm * r), n);
+                        sr[a]          = phase_fixed(-(shift * r), n);
+                    }
+                    g.xr.emplace_back().upload(xr);
+                    g.sr.emplace_back().upload(sr);
                 }
-                g.brute.upload(s);
+                if (!m_brute_rows.empty()) {
+                    // +tau / N per (brute trial, active channel), exact.
+                    const auto nb = m_brute_rows.size();
+                    std::vector<unsigned long long> s(nb * m_nact);
+                    for (SizeType i = 0; i < nb; ++i) {
+                        for (SizeType a = 0; a < m_nact; ++a) {
+                            s[(i * m_nact) + a] =
+                                phase_fixed(-m_model.tau(m_brute_rows[i],
+                                                         m_model.active[a]),
+                                            n);
+                        }
+                    }
+                    g.brute.upload(s);
+                }
+            } catch (...) {
+                m_geos.erase(n);
+                std::erase(m_geo_lru, n);
+                throw;
             }
         }
         m_rows_d.reserve(std::max(m_nact, m_ndm) * n);
@@ -1219,12 +1216,11 @@ private:
             st);
         const dim3 tgrid(blocks_for(static_cast<int64_t>(cnt)),
                          grid_y(static_cast<int64_t>(m_ndm)));
-        kernel_trim<<<tgrid, kBlock, 0, st>>>(
+        fourier_gpu::kernel_trim<<<tgrid, kBlock, 0, st>>>(
             m_rows_d.data(), out, static_cast<int64_t>(m_ndm),
-            static_cast<int64_t>(g.n_fft),
-            static_cast<int64_t>(m_model.out_start()),
-            static_cast<int64_t>(n_out), static_cast<int64_t>(p0),
-            static_cast<int64_t>(cnt));
+            static_cast<int64_t>(g.n_fft), static_cast<int64_t>(n_out),
+            static_cast<int64_t>(p0), static_cast<int64_t>(cnt),
+            static_cast<int64_t>(m_model.out_start()));
     }
 
     void update_history(const float* data, SizeType n_new, cudaStream_t st) {

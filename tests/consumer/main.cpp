@@ -20,7 +20,7 @@ int main() {
     dmt::algorithms::FDMT fdmt(f_min, f_max, nchans, nsamps, tsamp, dt_max,
                                /*dt_min=*/0, /*dt_step=*/1,
                                /*use_box_smearing=*/true, /*mode=*/"full",
-                               dmt::Exec::cpu(/*nthreads=*/2));
+                               dmt::Exec::cpu(/*nthreads=*/1));
     const auto& plan = fdmt.get_plan();
 
     const size_t t0 = 300;
@@ -42,8 +42,8 @@ int main() {
     }
     std::cout << "; " << plan.get_dmt_ndms() << " DM trials; peak at DM index "
               << i_dm << ", sample " << t << '\n';
-    if (i_dm != 0) {
-        std::cerr << "expected the peak at DM index 0\n";
+    if (i_dm != 0 || t != t0) {
+        std::cerr << "expected the peak at DM index 0, sample " << t0 << '\n';
         return 1;
     }
     return 0;

@@ -1,7 +1,7 @@
 // dmt::dispersion_delay against dmtlib.dispersion_delay (values from Python).
 
-#include <cmath>
-#include <limits>
+#include <bit>
+#include <cstdint>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -9,7 +9,10 @@
 #include "dmt/common/types.hpp"
 
 TEST_CASE("dispersion_delay matches dmtlib.dispersion_delay", "[types]") {
-    constexpr double kInf = std::numeric_limits<double>::infinity();
+    // Built from bits so -ffast-math does not warn on
+    // std::numeric_limits::infinity().
+    constexpr double kInf =
+        std::bit_cast<double>(uint64_t{0x7FF0000000000000ULL});
     struct Case {
         double dm, f_lo, f_hi, seconds;
     };

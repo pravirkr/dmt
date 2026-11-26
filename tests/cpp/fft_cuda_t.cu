@@ -53,9 +53,12 @@ TEST_CASE("CUFFTManager forward matches FFTWManager", "[fft][gpu][parity]") {
     gpu.execute(d2_span);
     cudaDeviceSynchronize();
     thrust::host_vector<ComplexTypeGPU> g1 = d1;
+    thrust::host_vector<ComplexTypeGPU> g2 = d2;
     for (SizeType i = 0; i < n; ++i) {
         CHECK(g1[i].real() == Catch::Approx(cpu1[i].real()).margin(1e-3F));
         CHECK(g1[i].imag() == Catch::Approx(cpu1[i].imag()).margin(1e-3F));
+        CHECK(g2[i].real() == Catch::Approx(cpu2[i].real()).margin(1e-3F));
+        CHECK(g2[i].imag() == Catch::Approx(cpu2[i].imag()).margin(1e-3F));
     }
 }
 

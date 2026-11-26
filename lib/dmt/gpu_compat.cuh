@@ -60,13 +60,13 @@ namespace cuda = ::thrust::hip;
 #define cudaEventDisableTiming hipEventDisableTiming
 #define cudaStreamNonBlocking hipStreamNonBlocking
 #define cudaHostAllocDefault hipHostMallocDefault
+#define cudaHostAllocMapped hipHostMallocMapped
 #define cudaDevAttrMaxSharedMemoryPerBlockOptin                                \
     hipDeviceAttributeSharedMemPerBlockOptin
 #define cudaDevAttrMaxSharedMemoryPerMultiprocessor                            \
     hipDeviceAttributeMaxSharedMemoryPerMultiprocessor
 #define cudaFuncAttributeMaxDynamicSharedMemorySize                            \
     hipFuncAttributeMaxDynamicSharedMemorySize
-#define cudaDevAttrL2CacheSize hipDeviceAttributeL2CacheSize
 #define cudaDevAttrMultiProcessorCount hipDeviceAttributeMultiprocessorCount
 
 // Runtime: functions
@@ -82,6 +82,7 @@ namespace cuda = ::thrust::hip;
 #define cudaMalloc hipMalloc
 #define cudaFree hipFree
 #define cudaHostAlloc hipHostMalloc
+#define cudaHostGetDevicePointer hipHostGetDevicePointer
 #define cudaFreeHost hipHostFree
 #define cudaMemcpy hipMemcpy
 #define cudaMemcpyAsync hipMemcpyAsync

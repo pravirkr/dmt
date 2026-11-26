@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -24,18 +25,6 @@ using algorithms::DDMT;
 using algorithms::DDMTMemoryEstimate;
 using algorithms::DDMTMemoryUsage;
 using algorithms::SDMT;
-
-// GPU SDMT engines built in scope run the shared-sum kernel wherever its
-// programs fit (small plans otherwise run the DDMT kernel and upload no
-// shared-sum tables).
-struct AlwaysShared {
-    AlwaysShared() { algorithms::detail::set_sdmt_gpu_always_shared(true); }
-    ~AlwaysShared() { algorithms::detail::set_sdmt_gpu_always_shared(false); }
-    AlwaysShared(const AlwaysShared&)            = delete;
-    AlwaysShared& operator=(const AlwaysShared&) = delete;
-    AlwaysShared(AlwaysShared&&)                 = delete;
-    AlwaysShared& operator=(AlwaysShared&&)      = delete;
-};
 
 struct Case {
     std::string name;
@@ -62,6 +51,33 @@ inline std::vector<Case> cases() {
         {"8-bit masked gulp 4096", plan_of(20.0F, 8, mask), 1, 1000, 4096},
         {"2-bit auto chunks", plan_of(20.0F, 2), 1, 60000, 0},
     };
+}
+
+// GPU SDMT engine with force_shared_sums = true (small plans otherwise run
+// the DDMT kernel and upload no shared-sum tables).
+inline std::unique_ptr<algorithms::detail::DDMTEngine>
+make_forced_sdmt_gpu(const Case& c, const Exec& exec, bool defer) {
+#ifdef DMT_ENABLE_GPU
+    auto eng =
+        algorithms::detail::make_sdmt_gpu(c.plan, {.nbeams           = c.nbeams,
+                                                   .exec             = exec,
+                                                   .defer_allocation = defer,
+                                                   .force_shared_sums = true});
+    eng->set_gulp_size(c.gulp);
+    return eng;
+#else
+    (void)c;
+    (void)exec;
+    (void)defer;
+    throw std::invalid_argument("SDMT GPU not enabled");
+#endif
+}
+
+inline DDMTMemoryUsage usage_of(const DDMT& eng) {
+    return eng.get_memory_usage();
+}
+inline DDMTMemoryUsage usage_of(const algorithms::detail::DDMTEngine& eng) {
+    return eng.memory_usage();
 }
 
 inline std::unique_ptr<DDMT> make(bool sdmt, const Case& c, const Exec& exec) {
@@ -97,8 +113,8 @@ inline void check_usage(const DDMTMemoryUsage& want,
 
 /// From a cold start until one call past warm-up, the usage after every
 /// call equals the estimate plus `staging` and `pinned`.
-template <typename F>
-void check_stream(DDMT& eng,
+template <typename Engine, typename F>
+void check_stream(Engine& eng,
                   SizeType nsamps,
                   const DDMTMemoryEstimate& e,
                   SizeType staging,
@@ -108,7 +124,7 @@ void check_stream(DDMT& eng,
     for (int i = 0; i < 100 && !warm; ++i) {
         warm = eng.get_output_nsamps(nsamps) == nsamps;
         call(eng.get_output_nsamps(nsamps));
-        check_usage(e.usage, staging, pinned, eng.get_memory_usage());
+        check_usage(e.usage, staging, pinned, usage_of(eng));
     }
     REQUIRE(warm);
 }
@@ -116,12 +132,17 @@ void check_stream(DDMT& eng,
 enum class HostCall : std::uint8_t { kChannelMajor, kTimeMajor };
 
 /// A host-memory call of `nsamps` zero samples.
-inline void host_call(DDMT& eng, SizeType nsamps, SizeType out, HostCall kind) {
-    const auto& plan  = eng.get_plan();
+template <typename Engine>
+void host_call(Engine& eng,
+               const plans::DDMTPlan& plan,
+               SizeType nbeams,
+               SizeType nsamps,
+               SizeType out,
+               HostCall kind) {
     const auto nbits  = plan.get_nbits();
     const auto nchans = plan.get_nchans();
-    const auto rows   = eng.get_nbeams() * nchans;
-    const auto nout   = eng.get_nbeams() * plan.get_dm_arr().size() * out;
+    const auto rows   = nbeams * nchans;
+    const auto nout   = nbeams * plan.get_dm_arr().size() * out;
     if (nbits == 32) {
         const std::vector<float> wf(rows * nsamps, 0.0F);
         std::vector<float> dmt(nout);
@@ -135,8 +156,7 @@ inline void host_call(DDMT& eng, SizeType nsamps, SizeType out, HostCall kind) {
         eng.execute(wf, nsamps, dmt);
     } else {
         const std::vector<uint8_t> wf(
-            eng.get_nbeams() * nsamps *
-                bit_pack_utils::packed_row_bytes(nchans, nbits),
+            nbeams * nsamps * bit_pack_utils::packed_row_bytes(nchans, nbits),
             0);
         eng.execute_time_major(wf, nsamps, dmt);
     }
@@ -145,30 +165,40 @@ inline void host_call(DDMT& eng, SizeType nsamps, SizeType out, HostCall kind) {
 /// Every case, DDMT and SDMT, through host-memory calls: channel-major and,
 /// for packed plans, time-major (each on a fresh instance).
 inline void check_host(const Exec& exec) {
+    const auto check_one = [&](const Case& c, const DDMTMemoryEstimate& e,
+                               auto make_eng) {
+        {
+            auto eng = make_eng();
+            check_stream(*eng, c.nsamps, e, e.host_staging, e.host_pinned,
+                         [&](SizeType out) {
+                             host_call(*eng, c.plan, c.nbeams, c.nsamps, out,
+                                       HostCall::kChannelMajor);
+                         });
+        }
+        if (c.plan.get_nbits() != 32) {
+            auto eng = make_eng();
+            check_stream(*eng, c.nsamps, e, e.time_major_staging,
+                         e.time_major_pinned, [&](SizeType out) {
+                             host_call(*eng, c.plan, c.nbeams, c.nsamps, out,
+                                       HostCall::kTimeMajor);
+                         });
+        } else {
+            CHECK(e.time_major_staging == 0);
+            CHECK(e.time_major_pinned == 0);
+            CHECK(e.device_time_major_staging == 0);
+        }
+    };
     for (const bool sdmt : {false, true}) {
         for (const auto& c : cases()) {
             INFO((sdmt ? "SDMT " : "DDMT ") << c.name);
-            const AlwaysShared shared;
-            const auto e = estimate(sdmt, c, exec);
-            {
-                auto eng = make(sdmt, c, exec);
-                check_stream(*eng, c.nsamps, e, e.host_staging, e.host_pinned,
-                             [&](SizeType out) {
-                                 host_call(*eng, c.nsamps, out,
-                                           HostCall::kChannelMajor);
-                             });
-            }
-            if (c.plan.get_nbits() != 32) {
-                auto eng = make(sdmt, c, exec);
-                check_stream(*eng, c.nsamps, e, e.time_major_staging,
-                             e.time_major_pinned, [&](SizeType out) {
-                                 host_call(*eng, c.nsamps, out,
-                                           HostCall::kTimeMajor);
-                             });
+            if (sdmt && exec.backend != Backend::kCPU) {
+                const auto e =
+                    make_forced_sdmt_gpu(c, exec, true)->estimate(c.nsamps);
+                check_one(c, e,
+                          [&] { return make_forced_sdmt_gpu(c, exec, false); });
             } else {
-                CHECK(e.time_major_staging == 0);
-                CHECK(e.time_major_pinned == 0);
-                CHECK(e.device_time_major_staging == 0);
+                const auto e = estimate(sdmt, c, exec);
+                check_one(c, e, [&] { return make(sdmt, c, exec); });
             }
         }
     }
@@ -177,10 +207,12 @@ inline void check_host(const Exec& exec) {
 /// SDMT's estimate counts its own programs: on the same plan its plan
 /// tables differ from DDMT's.
 inline void check_sdmt_differs(const Exec& exec) {
-    const AlwaysShared shared;
     const Case c{"sdmt vs ddmt", plan_of(60.0F, 32), 1, 1000, 0};
     const auto d = estimate(false, c, exec);
-    const auto s = estimate(true, c, exec);
+    const auto s =
+        exec.backend == Backend::kCPU
+            ? estimate(true, c, exec)
+            : make_forced_sdmt_gpu(c, exec, true)->estimate(c.nsamps);
     CHECK(d.usage.plan != s.usage.plan);
     CHECK(d.usage.history == s.usage.history);
 }

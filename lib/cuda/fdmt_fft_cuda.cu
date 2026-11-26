@@ -327,29 +327,7 @@ __global__ void kernel_level0_state(const float2* __restrict__ spec,
     }
 }
 
-// dst row r, samples [o0, o0 + cnt) = time row r from sample skip; with
-// zero_tail, samples past the transform are zero (stepper views).
-__global__ void kernel_trim(const float* __restrict__ time,
-                            float* __restrict__ dst,
-                            int64_t nrows,
-                            int64_t n_fft,
-                            int64_t dst_len,
-                            int64_t o0,
-                            int64_t cnt,
-                            int64_t skip) {
-    const auto t =
-        (static_cast<int64_t>(blockIdx.x) * blockDim.x) + threadIdx.x;
-    if (t >= cnt) {
-        return;
-    }
-    for (int64_t row = blockIdx.y; row < nrows; row += gridDim.y) {
-        const auto s = skip + t;
-        dst[(row * dst_len) + o0 + t] =
-            s < n_fft ? time[(row * n_fft) + s] : 0.0F;
-    }
-}
-
-// Copies `rows` spectrum rows (dist nb) and fixes their Hermitian edges.
+// Copies `nrows` spectrum rows (stride nb).
 __global__ void kernel_copy_rows(const float2* __restrict__ src,
                                  float2* __restrict__ dst,
                                  int64_t nrows,
@@ -471,7 +449,8 @@ public:
           m_mode(cfg.mode),
           m_frac(cfg.fractional_delays),
           m_max_segment(cfg.max_segment),
-          m_plan(&plan) {
+          m_plan(&plan),
+          m_host(cfg.exec.device, cfg.exec.nthreads) {
         if (m_nbeams == 0) {
             throw std::invalid_argument("FDMTFFT: nbeams must be positive");
         }
@@ -642,6 +621,7 @@ public:
                          m_step_in_d.bytes() + m_view_spec.bytes() +
                          m_view_time.bytes() + m_view_d.bytes() + fft_work,
             .output    = 0,
+            .pinned    = m_host.pinned_bytes(),
         };
     }
 
@@ -1126,12 +1106,11 @@ private:
                        m_seg.n_fft, m_seg.nseg, m_geom.n_fft, m_frac, split);
     }
 
-    // Segment length cap: the testing hook and the configured cap (the
-    // FDMTFFTBoxcar memory budget). Memory follows the arguments alone: a
-    // configuration the device cannot hold fails in allocate().
-    [[nodiscard]] SizeType segment_cap() const {
-        return detail::combine_segment_caps(detail::fft_segment_cap(),
-                                            m_max_segment);
+    // Segment length cap: the configured cap (set by FDMTFFTBoxcar's memory
+    // budget). Memory follows the arguments alone: a configuration the device
+    // cannot hold fails in allocate().
+    [[nodiscard]] SizeType segment_cap() const noexcept {
+        return m_max_segment;
     }
 
     [[nodiscard]] std::unique_ptr<utils::CUFFTManager>
@@ -1306,30 +1285,6 @@ private:
 
     // ---- pipeline ----
 
-    template <typename F>
-    void dispatch_nbits(SizeType nbits, const F& f) const {
-        switch (nbits) {
-        case 1:
-            f(std::integral_constant<int, 1>{});
-            break;
-        case 2:
-            f(std::integral_constant<int, 2>{});
-            break;
-        case 4:
-            f(std::integral_constant<int, 4>{});
-            break;
-        case 8:
-            f(std::integral_constant<int, 8>{});
-            break;
-        case 16:
-            f(std::integral_constant<int, 16>{});
-            break;
-        default:
-            f(std::integral_constant<int, 32>{});
-            break;
-        }
-    }
-
     // Window rows of one segment (p0: its first virtual-input sample).
     void fill(const Input& in,
               const Geo& g,
@@ -1342,14 +1297,18 @@ private:
                         grid_y(nrows));
         const float* hist =
             m_hist_len > 0 ? m_hist[m_hist_cur].data() : nullptr;
-        dispatch_nbits(in.nbits, [&](auto nb) {
-            kernel_fill<decltype(nb)::value><<<grid, kBlock, 0, s>>>(
-                in.data, static_cast<int64_t>(in.row_len), hist,
-                m_has_kill ? m_keep.data() : nullptr, win, nrows,
-                static_cast<int>(m_nchans), static_cast<int64_t>(m_nsamps),
-                static_cast<int64_t>(g.n_fft), static_cast<int64_t>(p0),
-                static_cast<int64_t>(zeros), static_cast<int64_t>(m_hist_len));
-        });
+        bit_pack_utils::dispatch_nbits(
+            in.nbits,
+            [&]<unsigned NB>() {
+                kernel_fill<static_cast<int>(NB)><<<grid, kBlock, 0, s>>>(
+                    in.data, static_cast<int64_t>(in.row_len), hist,
+                    m_has_kill ? m_keep.data() : nullptr, win, nrows,
+                    static_cast<int>(m_nchans), static_cast<int64_t>(m_nsamps),
+                    static_cast<int64_t>(g.n_fft), static_cast<int64_t>(p0),
+                    static_cast<int64_t>(zeros),
+                    static_cast<int64_t>(m_hist_len));
+            },
+            "FDMTFFT (gpu)");
     }
 
     void update_history(const Input& in, cudaStream_t s) {
@@ -1359,13 +1318,18 @@ private:
         const auto nrows = static_cast<int64_t>(m_nbeams * m_nchans);
         const dim3 grid(blocks_for(static_cast<int64_t>(m_hist_len)),
                         grid_y(nrows));
-        dispatch_nbits(in.nbits, [&](auto nb) {
-            kernel_update_history<decltype(nb)::value><<<grid, kBlock, 0, s>>>(
-                in.data, static_cast<int64_t>(in.row_len),
-                m_hist[m_hist_cur].data(), m_hist[m_hist_cur ^ 1].data(), nrows,
-                static_cast<int64_t>(m_nsamps),
-                static_cast<int64_t>(m_hist_len));
-        });
+        bit_pack_utils::dispatch_nbits(
+            in.nbits,
+            [&]<unsigned NB>() {
+                kernel_update_history<static_cast<int>(NB)>
+                    <<<grid, kBlock, 0, s>>>(
+                        in.data, static_cast<int64_t>(in.row_len),
+                        m_hist[m_hist_cur].data(),
+                        m_hist[m_hist_cur ^ 1].data(), nrows,
+                        static_cast<int64_t>(m_nsamps),
+                        static_cast<int64_t>(m_hist_len));
+            },
+            "FDMTFFT (gpu)");
         m_hist_cur ^= 1;
     }
 
@@ -1413,7 +1377,7 @@ private:
         inverse_rows(g, out_spec, time, s);
         const auto rows = static_cast<int64_t>(m_nbeams * m_ndms);
         const dim3 grid(blocks_for(static_cast<int64_t>(cnt)), grid_y(rows));
-        kernel_trim<<<grid, kBlock, 0, s>>>(
+        fourier_gpu::kernel_trim<<<grid, kBlock, 0, s>>>(
             time, dst, rows, static_cast<int64_t>(g.n_fft),
             static_cast<int64_t>(m_nsamps_out), static_cast<int64_t>(o0),
             static_cast<int64_t>(cnt), static_cast<int64_t>(skip));
@@ -1581,28 +1545,37 @@ private:
     }
 
     // Beam 0 of the current level in the time domain, in batches of
-    // kViewBatch rows through a small C2R plan.
+    // kViewBatch rows through one small C2R plan. The plan is sized once,
+    // for the widest level (at most kViewBatch rows), and a partial last
+    // batch runs it whole: the rows past the tail hold stale or zeroed
+    // spectra and are never trimmed into the view. Re-planning per level or
+    // per partial batch cost ~3 ms per level view on an L40S.
     void materialize_view() const {
         if (m_view_valid) {
             return;
         }
         gpu_utils::set_device(m_device_id);
-        const auto& g   = *m_step_geo;
-        const auto s    = m_step_stream;
-        const auto rows = m_plan->get_container().state_shape[m_level].ncoords;
-        const auto nsv  = view_nsamps();
+        const auto& g    = *m_step_geo;
+        const auto s     = m_step_stream;
+        const auto rows  = m_plan->get_container().state_shape[m_level].ncoords;
+        const auto nsv   = view_nsamps();
+        const auto batch = std::min(kViewBatch, m_max_coords);
         if (!m_view_c2r) {
             m_view_c2r = std::make_unique<utils::CUFFTManager>(
-                utils::FFTKind::kC2R, g.n_fft, kViewBatch, m_device_id, g.n_fft,
+                utils::FFTKind::kC2R, g.n_fft, batch, m_device_id, g.n_fft,
                 g.nb);
-            m_view_spec.reserve(kViewBatch * g.nb);
-            m_view_time.reserve(kViewBatch * g.n_fft);
+            m_view_spec.reserve(batch * g.nb);
+            m_view_time.reserve(batch * g.n_fft);
+            // Defined values in the rows a partial batch leaves untouched.
+            gpu_utils::check_gpu_call(
+                cudaMemsetAsync(m_view_spec.data(), 0, m_view_spec.bytes(), s),
+                "FDMTFFT (cuda): view");
         }
         m_view_d.reserve(m_max_coords * std::max(nsv, m_nsamps_out));
         const auto skip = m_geom.skip;
         const auto cnt  = nsv;
-        for (SizeType r0 = 0; r0 < rows; r0 += kViewBatch) {
-            const auto n = std::min(kViewBatch, rows - r0);
+        for (SizeType r0 = 0; r0 < rows; r0 += batch) {
+            const auto n = std::min(batch, rows - r0);
             const dim3 grid(blocks_for(static_cast<int64_t>(g.nb)),
                             grid_y(static_cast<int64_t>(n)));
             kernel_copy_rows<<<grid, kBlock, 0, s>>>(
@@ -1611,15 +1584,14 @@ private:
             fourier_gpu::hermitian_edges(m_view_spec.data(), n, g.nb, g.n_bins,
                                          g.n_fft, s);
             m_view_c2r->execute(
-                cuda::std::span<float>(m_view_time.data(),
-                                       kViewBatch * g.n_fft),
+                cuda::std::span<float>(m_view_time.data(), batch * g.n_fft),
                 cuda::std::span<ComplexTypeGPU>(
                     reinterpret_cast<ComplexTypeGPU*>(m_view_spec.data()),
-                    kViewBatch * g.nb),
+                    batch * g.nb),
                 s);
             const dim3 tgrid(blocks_for(static_cast<int64_t>(cnt)),
                              grid_y(static_cast<int64_t>(n)));
-            kernel_trim<<<tgrid, kBlock, 0, s>>>(
+            fourier_gpu::kernel_trim<<<tgrid, kBlock, 0, s>>>(
                 m_view_time.data(), m_view_d.data() + (r0 * nsv),
                 static_cast<int64_t>(n), static_cast<int64_t>(g.n_fft),
                 static_cast<int64_t>(nsv), 0, static_cast<int64_t>(cnt),

@@ -1,8 +1,8 @@
 # Streaming FDMT on skewed windows
 
 A valid-mode FDMT that keeps no per-merge tree history above level 4:
-`lib/dmt/fdmt_skew.hpp` (`FDMTSkewCpu`, `compute_skew_windows`,
-`estimate_skew_memory`), tested by `tests/cpp/fdmt_skew_cpu_t.cpp` and
+`lib/dmt/fdmt_skew.hpp` (`FDMTSkewCpu`, `compute_skew_windows`), tested
+by `tests/cpp/fdmt_skew_cpu_t.cpp` and
 measured by `bench/fdmt_skew_cpu_b.cpp`, `bench/fdmt_skew_mem_b.cpp` and
 the `parkes_uwl` boxcar suite. Both `FDMT` and `FDMTBoxcar` automatically
 select this path on the CPU (and its device counterpart in
@@ -111,9 +111,8 @@ rounding (measured: within $1.5 \times 10^{-7}$ of the output scale on the
 
 ## Window spreads
 
-`dmt_tests "[.skew_report]"` prints these for the four benchmark presets
-(DM 0–2000 on the piecewise Levin grid). Largest and mean spread per level,
-in samples:
+Largest and mean spread per level, in samples, for the benchmark presets
+(DM 0–2000 on the piecewise Levin grid):
 
 | level | `cryopaf_lband` (Δt 8877) | `meerkat_lband` (Δt 13 876) | `parkes_uwl` (Δt 253 891) |
 | ---: | ---: | ---: | ---: |
@@ -199,8 +198,9 @@ float and packed, CPU and GPU.
 `FDMT` and `FDMTBoxcar` choose their path and chunk within
 `max_memory_bytes` (10 GiB by default):
 
-- **CPU:** from `estimate_skew_memory()` (0.4 s on `parkes_uwl`), with a
-  tenth of headroom for the merge tables; the allocation is then checked.
+- **CPU:** each candidate (chunk, leaf) engine is sized without allocating
+  it (its tables are planned, its buffers deferred), with no headroom, and
+  the first that fits is allocated.
   Float input takes the tree path when it fits. Packed input (an
   `FDMTBoxcar` with input bits) and an automatic chunk takes the skewed
   chunks 4096 and 2048 first, then the tree, then the shorter chunks: on
@@ -229,9 +229,10 @@ float and packed, CPU and GPU.
 - **GPU:** by building engines (deferred: sized, not allocated) and
   measuring them. A subband search (`FDMTBoxcar`, `subband_depth > 0`)
   takes the first that fits of (`detail::gpu_search_list`,
-  `lib/dmt/gpu_search_list.hpp`): direct at the plan's L2-cache chunk when
-  it has one; direct from chunk 4096 down to `max_boxcar / 8` (at least
-  256); skewed from 4096 down to 256; shorter direct chunks. A simple rule,
+  `lib/dmt/gpu_search_list.hpp`): direct at the plan's 96 MiB cache-target
+  chunk when it has one; direct from chunk 4096 down to `max_boxcar / 8` (at
+  least 256); skewed from 4096 down to 256; shorter direct chunks. A simple
+  rule,
   not an optimum: on the UWL plans measured it takes the fastest
   configuration that fits at 10 GiB and stays within about 30% of it at any
   budget (narrow windows where a larger budget first fits a short direct
@@ -247,7 +248,7 @@ float and packed, CPU and GPU.
   one engine rejects a run whose shortest chunk does not fit, else a
   bisection finds its longest fitting chunk (one to about five engines in
   all). Full-band searches and plain `FDMT` keep the automatic chunk
-  (L2-resident state, else 1024: fastest there) and halve it while over
+  (96 MiB cache target, else 1024: fastest there) and halve it while over
   budget.
 - **FDMTBoxcar** gives the FDMT the budget minus its own carry, peak,
   candidate and threshold buffers, and halves an automatic chunk again if
@@ -289,8 +290,8 @@ boxcar suite (`bench/results/parkes_uwl/plots/summary.md`):
 | :--- | ---: | ---: |
 | full band, uint8 | 0.36 s per block (5.8× real time) | 4.17 s (0.50×) |
 | full band, float32 | 0.36 s (5.8×) | 5.25 s (0.40×) |
-| depth 4, uint8 | 1.16 s (1.81×) | 14.3 s (0.15×) |
-| depth 4, float32 | 1.59 s (1.32×) | 20.1 s (0.10×) |
+| depth 4, uint8 | 1.17 s (1.80×) | 6.21 s (0.34×) |
+| depth 4, float32 | 2.34 s (0.90×) | 9.89 s (0.21×) |
 
 (The CPU full-band rows are not in the suite; they come from a standalone
 FDMTBoxcar loop over 5 blocks on the same machine and threads. The float32 row

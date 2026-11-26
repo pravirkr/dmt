@@ -1,7 +1,7 @@
 """Side-by-side BoxcarScreenMode A/B benchmark and candidate parity harness.
 
 Compares ``FDMTBoxcar`` across ``BoxcarScreenMode`` settings (``auto``,
-``prefix``, ``kadane``, ``kadane_surrogate``, ``none``) against a bare ``FDMT``
+``prefix``, ``kadane``, ``none``) against a bare ``FDMT``
 transform baseline on CPU or GPU (``cuda`` / ``hip``), reporting steady-state
 block wall time, boxcar-only overhead above bare FDMT, engine memory usage, and
 candidate count / peak S/N agreement on an injected dispersed pulse.
@@ -95,7 +95,6 @@ MODE_MAP: dict[str, BoxcarScreenMode] = {
     "auto": BoxcarScreenMode.AUTO,
     "prefix": BoxcarScreenMode.PREFIX,
     "kadane": BoxcarScreenMode.KADANE,
-    "kadane_surrogate": BoxcarScreenMode.KADANE_SURROGATE,
     "none": BoxcarScreenMode.NONE,
 }
 
@@ -126,7 +125,7 @@ class ModeMeasurement:
     mem_mib: float
     ncands: int
     peak_snr: float
-    exact_match: bool | None
+    exact_match: bool
 
 
 def _sorted_cands(cands: np.ndarray) -> np.ndarray:
@@ -289,13 +288,11 @@ def run_regime(
         assert first_cands is not None  # noqa: S101
         med_ms = statistics.median(times_ms)
         peak_snr = float(first_cands["snr"].max()) if len(first_cands) else 0.0
-        exact_ok: bool | None = None
-        if mname in ("prefix", "kadane", "none", "auto"):
-            if ref_cands is None:
-                ref_cands = first_cands
-                exact_ok = True
-            else:
-                exact_ok = _same_candidates(first_cands, ref_cands)
+        if ref_cands is None:
+            ref_cands = first_cands
+            exact_ok = True
+        else:
+            exact_ok = _same_candidates(first_cands, ref_cands)
         results[mname] = ModeMeasurement(
             ms=med_ms,
             overhead_ms=med_ms - fdmt_ms,
@@ -338,10 +335,9 @@ def parse_args() -> argparse.Namespace:
         "--modes",
         dest="screen_modes",
         nargs="+",
-        default=["prefix", "kadane", "kadane_surrogate"],
+        default=["prefix", "kadane"],
         choices=list(MODE_MAP),
-        help="BoxcarScreenMode values to run side by side "
-        "(auto, prefix, kadane, kadane_surrogate, none)",
+        help="BoxcarScreenMode values to run side by side (auto, prefix, kadane, none)",
     )
     ap.add_argument(
         "--repeats",
@@ -359,25 +355,18 @@ def parse_args() -> argparse.Namespace:
 def _format_parity(
     reg: Regime, modes: list[str], meas: dict[str, ModeMeasurement]
 ) -> str:
-    parts: list[str] = []
-    ref_mode = next(
-        (m for m in modes if m in ("prefix", "kadane", "none", "auto")), None
-    )
-    if ref_mode is not None:
-        r = meas[ref_mode]
-        tag = "pfx" if ref_mode == "prefix" else ref_mode
-        parts.append(f"{tag}:{r.ncands}@{r.peak_snr:.1f}")
-    for m in modes:
-        if m == ref_mode:
-            continue
+    if not modes:
+        return ""
+    ref_mode = modes[0]
+    r = meas[ref_mode]
+    tag = "pfx" if ref_mode == "prefix" else ref_mode
+    parts = [f"{tag}:{r.ncands}@{r.peak_snr:.1f}"]
+    for m in modes[1:]:
         cur = meas[m]
-        if cur.exact_match is not None:
-            parts.append(f"{m}:{'EXACT' if cur.exact_match else 'MISMATCH'}")
-            if not cur.exact_match:
-                msg = f"Exact candidate mismatch in {reg.label} for {m}"
-                raise RuntimeError(msg)
-        else:
-            parts.append(f"sur:{cur.ncands}@{cur.peak_snr:.1f}")
+        parts.append(f"{m}:{'EXACT' if cur.exact_match else 'MISMATCH'}")
+        if not cur.exact_match:
+            msg = f"Exact candidate mismatch in {reg.label} for {m}"
+            raise RuntimeError(msg)
     return ", ".join(parts)
 
 

@@ -220,8 +220,7 @@ const plans::DDMTPlan& DDMTFFT::get_plan() const noexcept {
 SizeType DDMTFFT::get_nbeams() const noexcept { return m_impl->m_cfg.nbeams; }
 Backend DDMTFFT::backend() const noexcept { return m_impl->m_cfg.exec.backend; }
 int DDMTFFT::nthreads() const noexcept {
-    return backend() == Backend::kCPU ? std::max(1, m_impl->m_cfg.exec.nthreads)
-                                      : 1;
+    return std::max(1, m_impl->m_cfg.exec.nthreads);
 }
 int DDMTFFT::device() const noexcept {
     return backend() == Backend::kCPU ? -1 : m_impl->m_cfg.exec.device;
@@ -280,12 +279,6 @@ SizeType DDMTFFT::get_output_nsamps(SizeType input_nsamps) const noexcept {
     return m_impl->m_engine->get_output_nsamps(input_nsamps);
 }
 void DDMTFFT::reset_history() noexcept { m_impl->m_engine->reset_history(); }
-void DDMTFFT::set_gulp_size(SizeType gulp_size) {
-    m_impl->m_engine->set_gulp_size(gulp_size);
-}
-SizeType DDMTFFT::get_gulp_size() const noexcept {
-    return m_impl->m_engine->get_gulp_size();
-}
 SizeType DDMTFFT::history_state_size() const noexcept {
     return m_impl->m_engine->history_state_size();
 }

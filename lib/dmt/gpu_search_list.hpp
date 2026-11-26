@@ -16,7 +16,7 @@ namespace dmt::algorithms::detail {
 /// One configuration of a GPU subband search: the FDMT path and chunk.
 struct GPUSearchEntry {
     SizeType chunk;
-    FDMTEngineConfig::GPUPath path;
+    FDMTPath path;
     friend bool operator==(const GPUSearchEntry&,
                            const GPUSearchEntry&) = default;
 };
@@ -45,15 +45,15 @@ inline SizeType gpu_direct_min_chunk(SizeType max_boxcar) {
  * an FDMTBoxcar with subband_depth > 0 and an automatic chunk takes the
  * first that fits max_memory_bytes. A simple rule, not an optimum (the
  * crossovers move with the plan, max_boxcar and DM range):
- * 1. direct at `cache_chunk` (the chunk whose two state halves fit the L2,
- *    fdmt_gpu_cache_chunk(); 0: none): small plans, as before this list;
+ * 1. direct at `cache_chunk` (the chunk whose two state halves fit the cache
+ * target, fdmt_gpu_cache_chunk(); 0: none): small plans, as before this list;
  * 2. direct, 4096 down to gpu_direct_min_chunk(max_boxcar);
  * 3. skewed, 4096 down to 256 (longer chunks are faster on either path);
  * 4. direct below that, down to 256.
  */
 inline std::vector<GPUSearchEntry> gpu_search_list(SizeType cache_chunk,
                                                    SizeType max_boxcar) {
-    using P             = FDMTEngineConfig::GPUPath;
+    using P             = FDMTPath;
     const SizeType tmin = gpu_direct_min_chunk(max_boxcar);
     std::vector<GPUSearchEntry> list;
     if (cache_chunk != 0) {
@@ -104,7 +104,7 @@ GPUSearchChoice choose_gpu_search(const std::vector<GPUSearchEntry>& list,
                                   SizeType nsamps,
                                   Measure&& measure,
                                   bool search = true) {
-    using P = FDMTEngineConfig::GPUPath;
+    using P = FDMTPath;
     GPUSearchChoice out;
     std::map<std::pair<SizeType, P>, std::optional<SizeType>> built;
     const auto capped = [&](SizeType i) {

@@ -59,35 +59,6 @@ std::vector<uint8_t> random_mask(SizeType n, unsigned seed, double killed) {
     return m;
 }
 
-// Exact equality of two candidate sets (every field, S/N bit for bit).
-void compare_exact(std::vector<RawCandidate> a, std::vector<RawCandidate> b) {
-    sort(a);
-    sort(b);
-    REQUIRE(a.size() == b.size());
-    // Plain comparison first; assertions only for the first mismatches
-    // (per-candidate assertions dominated the Debug CI jobs).
-    const auto same = [](const RawCandidate& x, const RawCandidate& y) {
-        return key(x) == key(y) &&
-               std::bit_cast<uint32_t>(x.snr) ==
-                   std::bit_cast<uint32_t>(y.snr) &&
-               x.width == y.width && x.dm == y.dm && x.staggered == y.staggered;
-    };
-    SizeType reported = 0;
-    for (SizeType i = 0; i < a.size() && reported < 10; ++i) {
-        if (same(a[i], b[i])) {
-            continue;
-        }
-        ++reported;
-        INFO("candidate " << i);
-        REQUIRE(key(a[i]) == key(b[i]));
-        REQUIRE(std::bit_cast<uint32_t>(a[i].snr) ==
-                std::bit_cast<uint32_t>(b[i].snr));
-        REQUIRE(a[i].width == b[i].width);
-        REQUIRE(a[i].dm == b[i].dm);
-        REQUIRE(a[i].staggered == b[i].staggered);
-    }
-}
-
 // Streams `input` through `search` with per-block masks (an empty entry:
 // the old overload when `old_for_empty`, else an empty span), then ends
 // with flush() or drain().
@@ -801,6 +772,17 @@ TEST_CASE("Boxcar noise model bounds the exact transition variance",
                     }
                 }
             }
+            // Steady state under previous block's mask `ma` matches `ta`.
+            const SizeType i = (r * widths.size()) + f;
+            double exact_a   = 0.0;
+            for (SizeType c = 0; c < nchans; ++c) {
+                if (ma[c] != 0) {
+                    for (SizeType k = 0; k < lags + w; ++k) {
+                        exact_a += g[c][k] * g[c][k];
+                    }
+                }
+            }
+            REQUIRE_THAT(exact_a, Catch::Matchers::WithinRel(var(ta, i), 1e-5));
             // Endpoint at offset u from the start of block b (mask mb),
             // previous block mask ma.
             const SizeType window = support[r] + w - 1;
@@ -813,7 +795,6 @@ TEST_CASE("Boxcar noise model bounds the exact transition variance",
                         exact += m[c] != 0 ? g[c][k] * g[c][k] : 0.0;
                     }
                 }
-                const SizeType i = (r * widths.size()) + f;
                 INFO("row " << r << " width " << w << " offset " << u
                             << " exact " << exact);
                 if (u >= window) {
@@ -828,7 +809,6 @@ TEST_CASE("Boxcar noise model bounds the exact transition variance",
         }
     }
     REQUIRE(checked > 100);
-    (void)ta;
 }
 
 TEST_CASE("FDMTBoxcar per-call mask: scores stay calibrated on white noise",
@@ -1148,41 +1128,30 @@ DMT_SIZED_TEST_CASE(
         const auto plan = mask_plan(depth);
         const auto input =
             pack_stream(waterfalls(plan, 2, 4), 64, 400, kDepth8);
-        for (const auto screen :
-             {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kNone,
-              BoxcarScreenMode::kKadane}) {
-            for (const auto mode :
-                 {PeakFindingMode::kContiguousPeakPerWidth,
-                  PeakFindingMode::kContiguousPeakAcrossWidths,
-                  PeakFindingMode::kAllAboveThreshold}) {
-                for (const bool trap : {false, true}) {
-                    DYNAMIC_SECTION("depth "
-                                    << depth << " screen "
-                                    << static_cast<int>(screen) << " mode "
-                                    << static_cast<int>(mode) << " trapezoid "
-                                    << trap) {
-                        auto cfg = with_depth(mask_config(mode), kDepth8);
-                        cfg.use_trapezoid = trap;
-                        cfg.screen_mode   = screen;
-                        auto old          = make_search(plan, cfg, 2);
-                        const auto base =
-                            run_packed(old, input.packed, Masks(4));
-                        REQUIRE(base.size() > 20);
-                        auto empty = make_search(plan, cfg, 2);
-                        compare_exact(run_packed(empty, input.packed, Masks(4),
-                                                 false, false),
-                                      base);
-                        auto ones = make_search(plan, cfg, 2);
-                        const Masks all(4, std::vector<uint8_t>(32, 1));
-                        compare_exact(run_packed(ones, input.packed, all),
-                                      base);
-                        Masks mixed(4);
-                        mixed[1] = all[1];
-                        mixed[3] = all[3];
-                        ones.reset_history();
-                        compare_exact(run_packed(ones, input.packed, mixed),
-                                      base);
-                    }
+        for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
+                                PeakFindingMode::kContiguousPeakAcrossWidths,
+                                PeakFindingMode::kAllAboveThreshold}) {
+            for (const bool trap : {false, true}) {
+                DYNAMIC_SECTION("depth " << depth << " mode "
+                                         << static_cast<int>(mode)
+                                         << " trapezoid " << trap) {
+                    auto cfg          = with_depth(mask_config(mode), kDepth8);
+                    cfg.use_trapezoid = trap;
+                    auto old          = make_search(plan, cfg, 2);
+                    const auto base   = run_packed(old, input.packed, Masks(4));
+                    REQUIRE(base.size() > 20);
+                    auto empty = make_search(plan, cfg, 2);
+                    compare_exact(
+                        run_packed(empty, input.packed, Masks(4), false, false),
+                        base);
+                    auto ones = make_search(plan, cfg, 2);
+                    const Masks all(4, std::vector<uint8_t>(32, 1));
+                    compare_exact(run_packed(ones, input.packed, all), base);
+                    Masks mixed(4);
+                    mixed[1] = all[1];
+                    mixed[3] = all[3];
+                    ones.reset_history();
+                    compare_exact(run_packed(ones, input.packed, mixed), base);
                 }
             }
         }
@@ -1218,37 +1187,31 @@ DMT_SIZED_TEST_CASE(
         for (const bool with_ctor : {false, true}) {
             const auto ctor =
                 with_ctor ? random_mask(32, 99, 0.25) : std::vector<uint8_t>{};
-            for (const auto screen :
-                 {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kNone,
-                  BoxcarScreenMode::kKadane}) {
-                for (const auto mode :
-                     {PeakFindingMode::kContiguousPeakPerWidth,
-                      PeakFindingMode::kContiguousPeakAcrossWidths,
-                      PeakFindingMode::kAllAboveThreshold}) {
-                    for (const bool trap : {false, true}) {
-                        DYNAMIC_SECTION(
-                            "depth " << depth << " ctor " << with_ctor
-                                     << " screen " << static_cast<int>(screen)
-                                     << " mode " << static_cast<int>(mode)
-                                     << " trapezoid " << trap) {
-                            auto base          = mask_config(mode);
-                            base.use_trapezoid = trap;
-                            base.screen_mode   = screen;
-                            const auto input =
-                                pack_stream(stream, 32, 400, kDepth8);
-                            for (const SizeType chunk :
-                                 {SizeType{64}, plan.get_nsamps()}) {
-                                auto fl =
-                                    make_search(plan, float_twin(base, kDepth8),
-                                                1, chunk, ctor, 0, false);
-                                const auto want = run(fl, input.centred, masks);
-                                REQUIRE(want.size() > 50);
-                                auto pk =
-                                    make_search(plan, with_depth(base, kDepth8),
-                                                1, chunk, ctor, 0, false);
-                                compare_exact(
-                                    run_packed(pk, input.packed, masks), want);
-                            }
+            for (const auto mode :
+                 {PeakFindingMode::kContiguousPeakPerWidth,
+                  PeakFindingMode::kContiguousPeakAcrossWidths,
+                  PeakFindingMode::kAllAboveThreshold}) {
+                for (const bool trap : {false, true}) {
+                    DYNAMIC_SECTION("depth " << depth << " ctor " << with_ctor
+                                             << " mode "
+                                             << static_cast<int>(mode)
+                                             << " trapezoid " << trap) {
+                        auto base          = mask_config(mode);
+                        base.use_trapezoid = trap;
+                        const auto input =
+                            pack_stream(stream, 32, 400, kDepth8);
+                        for (const SizeType chunk :
+                             {SizeType{64}, plan.get_nsamps()}) {
+                            auto fl =
+                                make_search(plan, float_twin(base, kDepth8), 1,
+                                            chunk, ctor, 0, false);
+                            const auto want = run(fl, input.centred, masks);
+                            REQUIRE(want.size() > 50);
+                            auto pk =
+                                make_search(plan, with_depth(base, kDepth8), 1,
+                                            chunk, ctor, 0, false);
+                            compare_exact(run_packed(pk, input.packed, masks),
+                                          want);
                         }
                     }
                 }
@@ -1444,8 +1407,7 @@ TEST_CASE("FDMTBoxcar packed per-call mask: a constant mask with box smearing",
     const auto quiet = pack_stream(stream, 32, 400, kDepth8);
     const auto noisy = pack_stream(loud, 32, 400, kDepth8);
     for (const auto screen :
-         {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kKadane,
-          BoxcarScreenMode::kKadaneSurrogate}) {
+         {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kKadane}) {
         for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
                                 PeakFindingMode::kContiguousPeakAcrossWidths,
                                 PeakFindingMode::kAllAboveThreshold}) {

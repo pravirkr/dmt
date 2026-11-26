@@ -148,7 +148,7 @@ out_u8 = ddmt_u8.execute(waterfall_u8, nsamps=nsamps)
 print(f"input {waterfall_u8.dtype} {waterfall_u8.shape} -> output {out_u8.dtype} {out_u8.shape}")
 ```
 
-FDMT takes the same layout through `execute(packed, nbits)`. Its tree stays in
+FDMT takes the same layout through `execute(packed, nbits=...)`. Its tree stays in
 narrow integers where the value range allows, which makes 1-bit FDMT about
 2–3× faster than float input.
 

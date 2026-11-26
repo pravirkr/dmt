@@ -5,6 +5,8 @@
 #include "dmt/common/backend.hpp"
 #include "dmt/common/types.hpp"
 
+#include "dmt/device_macros.hpp"
+
 namespace dmt::algorithms::detail {
 
 /**

@@ -426,7 +426,7 @@ void FDMTBoxcarCpuEngine::lazy_score_tile(
     if constexpr (!std::is_integral_v<T> || kNoise) {
         if (precomputed_tables != nullptr) {
             tables_ptr = precomputed_tables;
-        } else if (m_noise_on) {
+        } else if (m_noise_ring.enabled()) {
             (void)tile_tables(plane, dm, row_idx, start, n, tid, local_tables);
         }
     }
@@ -547,7 +547,7 @@ void FDMTBoxcarCpuEngine::consume_kadane(SizeType row_lo,
                     std::array<TileTables, kBatch> lane_tables{};
                     const int32_t* icut_ptr = m_kadane_plan.icut.data() + r_off;
                     SizeType icut_stride    = rs;
-                    if (m_noise_on) {
+                    if (m_noise_ring.enabled()) {
                         int32_t* thr_icuts = m_thread_icuts.data() +
                                              (tid * kadane::kMaxGateBuckets *
                                               kadane::kMaxBatchRows);
@@ -616,7 +616,7 @@ void FDMTBoxcarCpuEngine::consume_kadane(SizeType row_lo,
                         const bool hit =
                             ((hit_mask >> static_cast<uint32_t>(l)) & 1U) != 0U;
                         if (hit || m_open[idx] != 0U) {
-                            if (m_noise_on) {
+                            if (m_noise_ring.enabled()) {
                                 lazy_score_tile<uint64_t, uint32_t, true>(
                                     r, beam, lane_in[q0 + l], t0, n,
                                     &lane_tables[l]);
@@ -645,7 +645,7 @@ void FDMTBoxcarCpuEngine::consume_kadane(SizeType row_lo,
                     std::array<TileTables, kBatch> lane_tables{};
                     const float* cut_ptr = m_kadane_plan.cut.data() + r_off;
                     SizeType cut_stride  = rs;
-                    if (m_noise_on) {
+                    if (m_noise_ring.enabled()) {
                         float* thr_cuts = m_thread_cuts.data() +
                                           (tid * kadane::kMaxGateBuckets *
                                            kadane::kMaxBatchRows);
@@ -764,8 +764,9 @@ void FDMTBoxcarCpuEngine::consume_kadane(SizeType row_lo,
                             if (m_config.input_nbits == 32) {
                                 lazy_score_tile<float, float>(
                                     r, beam, lane_in[q0 + l], t0, n,
-                                    m_noise_on ? &lane_tables[l] : nullptr);
-                            } else if (m_noise_on) {
+                                    m_noise_ring.enabled() ? &lane_tables[l]
+                                                           : nullptr);
+                            } else if (m_noise_ring.enabled()) {
                                 if (m_carry32) {
                                     lazy_score_tile<uint64_t, uint32_t, true>(
                                         r, beam, lane_in[q0 + l], t0, n,

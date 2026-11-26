@@ -12,8 +12,6 @@
 #include "dmt/algorithms/fdmt.hpp"
 #include "dmt/common/backend.hpp"
 
-#include "dmt/bit_pack_utils.hpp"
-
 #include "test_helpers.hpp"
 #include "test_random.hpp"
 
@@ -64,39 +62,6 @@ std::vector<uint32_t> random_ints(SizeType n, uint32_t max, unsigned seed) {
 
 std::vector<float> as_floats(const std::vector<uint32_t>& v) {
     return {v.begin(), v.end()};
-}
-
-// Rows of `nsamps` samples packed at `nbits`.
-std::vector<uint8_t> pack_rows(const std::vector<uint32_t>& v,
-                               SizeType rows,
-                               SizeType nsamps,
-                               SizeType nbits) {
-    const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
-    std::vector<uint8_t> out(rows * row_bytes, 0);
-    for (SizeType r = 0; r < rows; ++r) {
-        auto* row = out.data() + (r * row_bytes);
-        for (SizeType s = 0; s < nsamps; ++s) {
-            const auto val = v[(r * nsamps) + s];
-            switch (nbits) {
-            case 1:
-                bit_pack_utils::write_packed_sample<1>(row, s, val);
-                break;
-            case 2:
-                bit_pack_utils::write_packed_sample<2>(row, s, val);
-                break;
-            case 4:
-                bit_pack_utils::write_packed_sample<4>(row, s, val);
-                break;
-            case 8:
-                bit_pack_utils::write_packed_sample<8>(row, s, val);
-                break;
-            default:
-                bit_pack_utils::write_packed_sample<16>(row, s, val);
-                break;
-            }
-        }
-    }
-    return out;
 }
 
 // Each beam's get_dmt_size() values (beams are dmt_size apart: compact
@@ -155,8 +120,7 @@ TEST_CASE("parity: FDMT on every GPU backend matches the CPU bitwise",
                                     const auto max_val =
                                         nbits == 0
                                             ? 7U
-                                            : bit_pack_utils::max_sample_value(
-                                                  nbits);
+                                            : test::max_sample_value(nbits);
                                     // Three consecutive blocks: valid mode
                                     // streams history across them.
                                     for (unsigned blk = 0; blk < 3; ++blk) {
@@ -170,7 +134,7 @@ TEST_CASE("parity: FDMT on every GPU backend matches the CPU bitwise",
                                             cpu.execute(wf, out_cpu);
                                             gpu.execute(wf, out_gpu);
                                         } else {
-                                            const auto wf = pack_rows(
+                                            const auto wf = test::pack_rows(
                                                 ints, nbeams * kNchans, kNsamps,
                                                 nbits);
                                             cpu.execute(wf, nbits, out_cpu);
@@ -366,9 +330,7 @@ TEST_CASE("parity: DDMT on every GPU backend matches the CPU bitwise",
                                  2.0F, 0.0F, exec_of(backend), nbits, kill,
                                  nbeams);
                         const auto max_val =
-                            nbits == 32
-                                ? 9U
-                                : bit_pack_utils::max_sample_value(nbits);
+                            nbits == 32 ? 9U : test::max_sample_value(nbits);
                         const auto dm_count =
                             cpu.get_plan().get_dm_arr().size();
                         // Warm-up blocks shorter than the delay, then normal
@@ -387,7 +349,7 @@ TEST_CASE("parity: DDMT on every GPU backend matches the CPU bitwise",
                                 gpu.execute(wf, og);
                                 test::require_exact(og, oc);
                             } else {
-                                const auto wf = pack_rows(
+                                const auto wf = test::pack_rows(
                                     ints, nbeams * kDdmtNchans, nsamps, nbits);
                                 std::vector<int32_t> oc(nbeams * dm_count *
                                                         nout);
@@ -397,21 +359,32 @@ TEST_CASE("parity: DDMT on every GPU backend matches the CPU bitwise",
                                 REQUIRE(og == oc);
                             }
                         }
-                        // The history round-trips through save/load.
+                        // The history round-trips through save/reset/load.
+                        const auto max_delay = *std::ranges::max_element(
+                            cpu.get_plan().get_container().delay_table);
+                        const SizeType probe = max_delay + 32;
                         if (nbits == 32) {
                             std::vector<float> hc(cpu.history_state_size());
                             std::vector<float> hg(gpu.history_state_size());
                             cpu.save_history(hc);
                             gpu.save_history(hg);
                             REQUIRE(hg == hc);
+                            gpu.reset_history();
+                            CHECK(gpu.get_output_nsamps(probe) ==
+                                  probe - max_delay);
                             gpu.load_history(hg);
+                            CHECK(gpu.get_output_nsamps(probe) == probe);
                         } else {
                             std::vector<uint8_t> hc(cpu.history_state_size());
                             std::vector<uint8_t> hg(gpu.history_state_size());
                             cpu.save_history(hc);
                             gpu.save_history(hg);
                             REQUIRE(hg == hc);
+                            gpu.reset_history();
+                            CHECK(gpu.get_output_nsamps(probe) ==
+                                  probe - max_delay);
                             gpu.load_history(hg);
+                            CHECK(gpu.get_output_nsamps(probe) == probe);
                         }
                     }
                 }
@@ -437,10 +410,9 @@ TEST_CASE("parity: DDMT GPU time-major and multi-gulp inputs match the CPU",
                          exec_of(backend), nbits);
                 constexpr SizeType nsamps = 900;
                 // (nsamps, nchans): channels of one sample packed together.
-                const auto ints =
-                    random_ints(nsamps * nchans,
-                                bit_pack_utils::max_sample_value(nbits), 5);
-                const auto fb       = pack_rows(ints, nsamps, nchans, nbits);
+                const auto ints = random_ints(nsamps * nchans,
+                                              test::max_sample_value(nbits), 5);
+                const auto fb   = test::pack_rows(ints, nsamps, nchans, nbits);
                 const auto dm_count = cpu.get_plan().get_dm_arr().size();
                 // Stateless: nsamps - max_delay, as for a fresh stream.
                 const auto nout = cpu.get_output_nsamps(nsamps);
@@ -451,20 +423,25 @@ TEST_CASE("parity: DDMT GPU time-major and multi-gulp inputs match the CPU",
                 REQUIRE(og == oc);
             }
         }
-        DYNAMIC_SECTION(to_string(backend) << " multi-gulp float") {
-            DDMT cpu(1000.0F, 1500.0F, 8, 0.001F, 20.0F, 5.0F, 0.0F,
-                     Exec::cpu(1));
-            DDMT gpu(1000.0F, 1500.0F, 8, 0.001F, 20.0F, 5.0F, 0.0F,
-                     exec_of(backend));
-            constexpr SizeType nsamps = 150000; // > 2 gulps of 65536 outputs
-            const auto wf       = as_floats(random_ints(8 * nsamps, 3, 11));
-            const auto dm_count = cpu.get_plan().get_dm_arr().size();
-            const auto nout     = cpu.get_output_nsamps(nsamps);
-            std::vector<float> oc(dm_count * nout);
-            std::vector<float> og(oc.size(), -1.0F);
-            cpu.execute(wf, oc);
-            gpu.execute(wf, og);
-            test::require_exact(og, oc);
+        for (const SizeType nbeams : {SizeType{1}, SizeType{2}}) {
+            DYNAMIC_SECTION(to_string(backend)
+                            << " multi-gulp float nbeams=" << nbeams) {
+                DDMT cpu(1000.0F, 1500.0F, 8, 0.001F, 20.0F, 5.0F, 0.0F,
+                         Exec::cpu(1), 32, {}, nbeams);
+                DDMT gpu(1000.0F, 1500.0F, 8, 0.001F, 20.0F, 5.0F, 0.0F,
+                         exec_of(backend), 32, {}, nbeams);
+                constexpr SizeType nsamps =
+                    150000; // > 2 gulps of 65536 outputs
+                const auto wf =
+                    as_floats(random_ints(nbeams * 8 * nsamps, 3, 11));
+                const auto dm_count = cpu.get_plan().get_dm_arr().size();
+                const auto nout     = cpu.get_output_nsamps(nsamps);
+                std::vector<float> oc(nbeams * dm_count * nout);
+                std::vector<float> og(oc.size(), -1.0F);
+                cpu.execute(wf, oc);
+                gpu.execute(wf, og);
+                test::require_exact(og, oc);
+            }
         }
     }
 }

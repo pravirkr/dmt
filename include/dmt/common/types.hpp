@@ -2,8 +2,7 @@
 
 /**
  * @file types.hpp
- * @brief Common type definitions, astrophysical dispersion constants, and
- * memory utilities.
+ * @brief Common type definitions and astrophysical dispersion constants.
  */
 
 #include <bit>
@@ -28,6 +27,7 @@ inline constexpr float kDispConstMT =
     1 / 2.41e-4; // TEMPO2, Manchester&Taylor (1972)
 inline constexpr float kDispConstSI = 4.1488064e3; // SI value, Kulkarni (2020)
 inline constexpr float kDispConst   = kDispConstMT;
+inline constexpr double kDispConstD = 1.0 / 2.41e-4;
 
 /**
  * @brief Dispersion delay in seconds of `f_lo_mhz` behind `f_hi_mhz`.
@@ -40,7 +40,6 @@ inline constexpr float kDispConst   = kDispConstMT;
  */
 [[nodiscard]] constexpr double
 dispersion_delay(double dm, double f_lo_mhz, double f_hi_mhz) noexcept {
-    constexpr double kConst = 1.0 / 2.41e-4;
     // An infinite f_hi_mhz is recognised by its bits: under -ffast-math
     // (-ffinite-math-only) arithmetic on an infinity is undefined.
     constexpr uint64_t kAbs = 0x7FFFFFFFFFFFFFFFULL;
@@ -48,39 +47,8 @@ dispersion_delay(double dm, double f_lo_mhz, double f_hi_mhz) noexcept {
     const double inv_hi     = (std::bit_cast<uint64_t>(f_hi_mhz) & kAbs) == kInf
                                   ? 0.0
                                   : 1.0 / (f_hi_mhz * f_hi_mhz);
-    return kConst * dm * ((1.0 / (f_lo_mhz * f_lo_mhz)) - inv_hi);
+    return kDispConstD * dm * ((1.0 / (f_lo_mhz * f_lo_mhz)) - inv_hi);
 }
-
-/**
- * @brief POSIX aligned memory allocator for SIMD vectorization and cache
- * alignment.
- * @tparam T Value type to allocate.
- */
-template <typename T> struct AlignedAllocator {
-    static constexpr std::size_t kAlignment = alignof(std::max_align_t);
-
-    /**
-     * @brief Allocates aligned memory.
-     * @param n Number of elements to allocate.
-     * @return Pointer to aligned memory buffer.
-     * @throws std::bad_alloc if allocation fails.
-     */
-    T* allocate(std::size_t n) {
-        void* ptr = nullptr;
-        if (posix_memalign(&ptr, kAlignment, n * sizeof(T)) != 0) {
-            throw std::bad_alloc();
-        }
-        return reinterpret_cast<T*>(ptr);
-    }
-
-    /**
-     * @brief Deallocates aligned memory.
-     * @param ptr Pointer previously allocated with allocate().
-     */
-    void deallocate(T* ptr, std::size_t /*unused*/) noexcept { free(ptr); }
-};
-
-template <typename T> using AlignedVector = std::vector<T, AlignedAllocator<T>>;
 
 template <typename T>
 concept IntegralDataType = std::is_integral_v<T>;
@@ -89,16 +57,5 @@ concept IntegralDataType = std::is_integral_v<T>;
  * @brief FDMT mode for the FDMT tree.
  */
 enum class FDMTMode : uint8_t { kFull = 0, kValid = 1, kRoll = 2 };
-
-// Callable from both host and device when compiled with nvcc or hip-clang
-#if defined(__CUDACC__) || defined(__HIPCC__) || defined(__HIP__)
-#define DMT_HD __host__ __device__
-#define DMT_D __device__
-#define DMT_H __host__
-#else
-#define DMT_HD
-#define DMT_D
-#define DMT_H
-#endif
 
 } // namespace dmt

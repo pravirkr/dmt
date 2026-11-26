@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -18,8 +19,6 @@
 #include "dmt/algorithms/fdmt_fft.hpp"
 #include "dmt/algorithms/fdmt_fft_boxcar.hpp"
 
-#include "dmt/fdmt_variance.hpp"
-
 #include "test_random.hpp"
 
 namespace boxcar_test {
@@ -31,6 +30,35 @@ inline auto key(const RawCandidate& c) {
     return std::tuple(c.beam_idx, c.subband_level, c.subband_idx, c.dm_idx,
                       c.filter_idx, c.begin_sample, c.end_sample,
                       c.peak_sample);
+}
+/// Total order matching OverflowPolicy::kKeepBrightest (brightest first,
+/// deterministic tie-breaking).
+inline bool brighter(const RawCandidate& a, const RawCandidate& b) noexcept {
+    if (a.snr != b.snr) {
+        return a.snr > b.snr;
+    }
+    if (a.peak_sample != b.peak_sample) {
+        return a.peak_sample < b.peak_sample;
+    }
+    if (a.beam_idx != b.beam_idx) {
+        return a.beam_idx < b.beam_idx;
+    }
+    if (a.subband_level != b.subband_level) {
+        return a.subband_level < b.subband_level;
+    }
+    if (a.subband_idx != b.subband_idx) {
+        return a.subband_idx < b.subband_idx;
+    }
+    if (a.staggered != b.staggered) {
+        return a.staggered < b.staggered;
+    }
+    if (a.dm_idx != b.dm_idx) {
+        return a.dm_idx < b.dm_idx;
+    }
+    if (a.filter_idx != b.filter_idx) {
+        return a.filter_idx < b.filter_idx;
+    }
+    return a.begin_sample < b.begin_sample;
 }
 inline void sort(std::vector<RawCandidate>& candidates) {
     std::sort(candidates.begin(), candidates.end(),
@@ -80,6 +108,53 @@ inline void compare(std::vector<RawCandidate> actual,
                    Catch::Matchers::WithinRel(expected[i].snr, 2e-5F));
     }
 }
+
+inline bool same_candidate_exact(const RawCandidate& a,
+                                 const RawCandidate& b) noexcept {
+    return key(a) == key(b) && a.width == b.width &&
+           a.chan_begin == b.chan_begin && a.chan_end == b.chan_end &&
+           a.staggered == b.staggered &&
+           std::bit_cast<uint32_t>(a.dm) == std::bit_cast<uint32_t>(b.dm) &&
+           std::bit_cast<uint32_t>(a.f_low_mhz) ==
+               std::bit_cast<uint32_t>(b.f_low_mhz) &&
+           std::bit_cast<uint32_t>(a.f_high_mhz) ==
+               std::bit_cast<uint32_t>(b.f_high_mhz) &&
+           std::bit_cast<uint32_t>(a.snr) == std::bit_cast<uint32_t>(b.snr);
+}
+
+// Bit-exact equality of two candidate sets (every field, S/N and floats bit
+// for bit).
+inline void compare_exact(std::vector<RawCandidate> actual,
+                          std::vector<RawCandidate> expected) {
+    sort(actual);
+    sort(expected);
+    REQUIRE(actual.size() == expected.size());
+    constexpr SizeType kMaxReported = 10;
+    SizeType reported               = 0;
+    for (SizeType i = 0; i < actual.size() && reported < kMaxReported; ++i) {
+        if (same_candidate_exact(actual[i], expected[i])) {
+            continue;
+        }
+        ++reported;
+        INFO("candidate " << i << " peak " << actual[i].peak_sample << " / "
+                          << expected[i].peak_sample << " snr " << actual[i].snr
+                          << " / " << expected[i].snr);
+        REQUIRE(key(actual[i]) == key(expected[i]));
+        CHECK(actual[i].width == expected[i].width);
+        CHECK(actual[i].chan_begin == expected[i].chan_begin);
+        CHECK(actual[i].chan_end == expected[i].chan_end);
+        CHECK(actual[i].staggered == expected[i].staggered);
+        CHECK(std::bit_cast<uint32_t>(actual[i].dm) ==
+              std::bit_cast<uint32_t>(expected[i].dm));
+        CHECK(std::bit_cast<uint32_t>(actual[i].f_low_mhz) ==
+              std::bit_cast<uint32_t>(expected[i].f_low_mhz));
+        CHECK(std::bit_cast<uint32_t>(actual[i].f_high_mhz) ==
+              std::bit_cast<uint32_t>(expected[i].f_high_mhz));
+        CHECK(std::bit_cast<uint32_t>(actual[i].snr) ==
+              std::bit_cast<uint32_t>(expected[i].snr));
+    }
+    REQUIRE(reported == 0);
+}
 // For rows that are not exact in float (FDMT-FFT): float rounding may move
 // a point across the threshold, so run edges may differ and whole runs may
 // appear or vanish, but only at S/N within `rtol` of the threshold; and
@@ -93,8 +168,7 @@ inline void compare_near_threshold(std::vector<RawCandidate> actual,
         return std::tuple(c.beam_idx, c.subband_level, c.subband_idx, c.dm_idx,
                           c.filter_idx);
     };
-    // Total order: kKadaneSurrogate can emit two runs of one row with the
-    // same begin (passes closing at different ends).
+    // Total order on (row, begin_sample, end_sample, peak_sample).
     const auto order = [&](const auto& a, const auto& b) {
         return std::tuple(row(a), a.begin_sample, a.end_sample, a.peak_sample) <
                std::tuple(row(b), b.begin_sample, b.end_sample, b.peak_sample);
@@ -303,10 +377,10 @@ direct_windows(std::span<const plans::BoxcarPlanePlan> planes,
             std::vector<SizeType> edge_w(nwidths);
             for (SizeType f = 0; f < nwidths; ++f) {
                 box_w[f] = p.widths[f];
-                // Trapezoid {1, 2, 1}: the box plus its core.
-                edge_w[f] = config.use_trapezoid
-                                ? algorithms::detail::trapezoid_edge_width(
-                                      static_cast<uint32_t>(box_w[f]))
+                // Trapezoid {1, 2, 1}: the box plus its core (edge width
+                // floor((w + 1) / 4) for w >= 3).
+                edge_w[f] = (config.use_trapezoid && box_w[f] >= 3)
+                                ? ((box_w[f] + 1) / 4)
                                 : 0;
             }
             const float* const v   = values.data();
@@ -640,44 +714,6 @@ batched_reference(const plans::FDMTPlan& plan,
     return expected;
 }
 
-// FDMT-FFT rows from the existing transform (one beam), moved to input-stream
-// coordinates (output sample j of the stream is input sample j - latency),
-// then direct windows with FDMTFFTBoxcar's planes.
-inline std::vector<RawCandidate>
-fft_reference(const plans::FDMTPlan& plan,
-              const BoxcarConfig& config,
-              bool smear,
-              bool frac,
-              std::span<const uint8_t> kill,
-              Exec exec,
-              const std::vector<std::vector<float>>& input) {
-    using algorithms::FDMTFFT;
-    using algorithms::FDMTFFTBoxcar;
-    FDMTFFTBoxcar metadata(plan, config, smear, Exec::cpu(), 1, frac, kill);
-    const auto planes = metadata.get_search_plans();
-    REQUIRE(planes.size() == 1);
-    FDMTFFT fft(plan.get_f_min(), plan.get_f_max(), plan.get_nchans(),
-                plan.get_nsamps(), plan.get_tsamp(), plan.get_dt_grid_final(),
-                smear, "valid", exec, 1, frac, kill);
-    const SizeType latency = fft.get_output_latency();
-    REQUIRE(latency == metadata.get_output_latency());
-    const SizeType ndm = planes.front().dm_grid.size();
-    std::vector<std::vector<float>> rows(ndm);
-    std::vector<float> output(plan.get_dmt_size());
-    for (const auto& block : input) {
-        fft.execute(block, output);
-        for (SizeType d = 0; d < ndm; ++d) {
-            const auto* row = output.data() + d * plan.get_nsamps();
-            rows[d].insert(rows[d].end(), row, row + plan.get_nsamps());
-        }
-    }
-    for (auto& row : rows) {
-        row.erase(row.begin(),
-                  row.begin() + static_cast<std::ptrdiff_t>(
-                                    std::min(latency, row.size())));
-    }
-    return to_arrival(plan, direct_windows(planes, rows, config));
-}
 /// FDMTBoxcar::estimate_memory() cases: screens, packed input, keep stores,
 /// kill mask, beams, an explicit chunk, a budget-chosen chunk, subbands.
 struct EstimateCase {
@@ -689,7 +725,7 @@ struct EstimateCase {
     SizeType budget = algorithms::kFDMTDefaultMaxMemory;
     std::vector<uint8_t> kill{};
 };
-inline std::vector<EstimateCase> estimate_cases() {
+inline std::vector<EstimateCase> estimate_cases(Exec exec = Exec::cpu()) {
     const plans::FDMTPlan plan(1000.0F, 1500.0F, 128, 2048, 0.001F, 200);
     std::vector<EstimateCase> cases;
     BoxcarConfig cfg;
@@ -697,7 +733,7 @@ inline std::vector<EstimateCase> estimate_cases() {
     cases.push_back({"auto screen", plan, cfg, 1});
     for (const auto mode :
          {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kKadane,
-          BoxcarScreenMode::kKadaneSurrogate, BoxcarScreenMode::kNone}) {
+          BoxcarScreenMode::kNone}) {
         BoxcarConfig c = cfg;
         c.screen_mode  = mode;
         cases.push_back({"screen mode", plan, c, 2});
@@ -712,8 +748,6 @@ inline std::vector<EstimateCase> estimate_cases() {
     packed.input_mean   = 127;
     packed.noise_sigma  = 3;
     cases.push_back({"packed 8-bit", plan, packed, 2});
-    packed.screen_mode = BoxcarScreenMode::kKadaneSurrogate;
-    cases.push_back({"packed surrogate", plan, packed, 1});
     BoxcarConfig keep     = cfg;
     keep.overflow_policy  = OverflowPolicy::kKeepBrightest;
     keep.max_cands_per_dm = 4;
@@ -723,11 +757,14 @@ inline std::vector<EstimateCase> estimate_cases() {
     cases.push_back({"kill mask", plan, cfg, 2, 0,
                      algorithms::kFDMTDefaultMaxMemory, kill});
     cases.push_back({"explicit chunk", plan, cfg, 1, 256});
-    // A budget the whole block does not fit: a shorter chunk.
-    cases.push_back(
-        {"budget chunk",
-         plans::FDMTPlan(1100.0F, 1714.0F, 1152, 4096, 455.6e-6F, 2700), cfg, 1,
-         0, SizeType{70} << 20});
+    // A budget the whole block does not fit: a shorter chunk, derived from the
+    // engine's own minimum-memory estimate.
+    const plans::FDMTPlan budget_plan(1100.0F, 1714.0F, 1152, 4096, 455.6e-6F,
+                                      2700);
+    const SizeType min_budget =
+        FDMTBoxcar::estimate_minimum_memory(budget_plan, cfg, true, exec)
+            .max_memory_bytes;
+    cases.push_back({"budget chunk", budget_plan, cfg, 1, 0, min_budget});
     cases.push_back({"subbands",
                      plans::FDMTPlan(1000.0F, 1500.0F, 128, 2048, 0.001F, 200,
                                      0, 1, "valid", 1),

@@ -636,19 +636,28 @@ private:
 
 /**
  * @brief Memory a CohFDMT engine allocates at construction, in bytes (host
- * memory on the CPU backend, device memory on a GPU backend).
+ * memory on the CPU backend, device memory on a GPU backend, `pinned` and
+ * `host_pinned` apart).
  */
 struct CohFDMTMemoryUsage {
-    SizeType spectrum{0};  ///< Unpacked, forward-transformed input block
-    SizeType waterfall{0}; ///< One coarse trial's aligned waterfall
-    SizeType fdmt{0};      ///< Fine FDMT engine and its output buffer
-    SizeType workspace{0}; ///< Tables and scratch (CPU: per thread); on a GPU
-                           ///< also the cuFFT work areas and the device copies
-                           ///< of a host-memory call's input and result
-    SizeType output{0};    ///< Caller-provided result per execute() (not
-                           ///< owned by the engine)
+    SizeType spectrum{0};    ///< Unpacked, forward-transformed input block
+    SizeType waterfall{0};   ///< One coarse trial's aligned waterfall
+    SizeType fdmt{0};        ///< Fine FDMT engine and its output buffer
+    SizeType workspace{0};   ///< Tables and scratch (CPU: per thread); on a GPU
+                             ///< also the cuFFT work areas and the device
+                             ///< copies of a host-memory call's input and
+                             ///< result
+    SizeType output{0};      ///< Caller-provided result per execute() (not
+                             ///< owned by the engine)
+    SizeType pinned{0};      ///< GPU: pinned host buffers currently held for
+                             ///< host-memory calls (host memory, not in
+                             ///< total())
+    SizeType host_pinned{0}; ///< GPU: pinned host bytes a host-memory execute()
+                             ///< allocates when output reaches the staging
+                             ///< threshold (not in total(); 0 on CPU)
 
-    /// Total allocated by the engine (excludes `output`).
+    /// Total allocated where the instance runs (excludes `output`, `pinned`
+    /// and `host_pinned`).
     [[nodiscard]] constexpr SizeType total() const noexcept {
         return spectrum + waterfall + fdmt + workspace;
     }
@@ -864,8 +873,8 @@ struct LevinConfig {
     float dm_start{};    ///< Lowest DM trial in pc/cm^3 (must be >= 0)
     float dm_end{};      ///< Upper DM search bound in pc/cm^3
     float pulse_width{}; ///< Intrinsic pulse width in seconds
-    float tol{}; ///< Pulse broadening tolerance factor (e.g. 1.15 to 1.25, must
-                 ///< be > 1.0)
+    float tol{1.25F}; ///< Pulse broadening tolerance factor (e.g. 1.15 to 1.25,
+                      ///< must be > 1.0)
     /// Use the DDplan-style piecewise-uniform grid
     /// (DDMTPlan::generate_levin_dm_grid_piecewise()) instead of the
     /// continuously varying Levin grid: typically 1.2-1.4x the trials, and

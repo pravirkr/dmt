@@ -5,33 +5,26 @@
 #include "dmt/gpu_utils.cuh"
 
 #include "fdmt_boxcar_reference.hpp"
+#include "fdmt_fft_boxcar_estimates.hpp"
+#include "fdmt_fft_boxcar_reference.hpp"
+#include "test_helpers.hpp"
 
 using namespace boxcar_test;
 using algorithms::FDMTFFTBoxcar;
 
 namespace {
 
-struct SegmentCap {
-    explicit SegmentCap(SizeType n) {
-        algorithms::detail::set_fft_segment_cap(n);
-    }
-    ~SegmentCap() { algorithms::detail::set_fft_segment_cap(0); }
-    SegmentCap(const SegmentCap&)            = delete;
-    SegmentCap& operator=(const SegmentCap&) = delete;
-    SegmentCap(SegmentCap&&)                 = delete;
-    SegmentCap& operator=(SegmentCap&&)      = delete;
-};
-
-// Per-beam references from the GPU FDMTFFT itself (cuFFT rounding).
+// Per-beam references from the CPU FDMTFFT.
 std::vector<RawCandidate>
-gpu_reference(const plans::FDMTPlan& plan,
+cpu_reference(const plans::FDMTPlan& plan,
               const BoxcarConfig& cfg,
               bool smear,
               bool frac,
               std::span<const uint8_t> kill,
               SizeType beams,
-              const std::vector<std::vector<float>>& input) {
-    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+              const std::vector<std::vector<float>>& input,
+              SizeType max_segment = 0) {
+    const Exec exec = Exec::cpu();
     std::vector<RawCandidate> expected;
     const SizeType size = plan.get_nchans() * plan.get_nsamps();
     for (SizeType b = 0; b < beams; ++b) {
@@ -40,7 +33,8 @@ gpu_reference(const plans::FDMTPlan& plan,
             beam[k].assign(input[k].begin() + b * size,
                            input[k].begin() + (b + 1) * size);
         }
-        auto c = fft_reference(plan, cfg, smear, frac, kill, exec, beam);
+        auto c = fft_reference(plan, cfg, smear, frac, kill, exec, beam,
+                               max_segment);
         for (auto& x : c) {
             x.beam_idx = static_cast<uint32_t>(b);
         }
@@ -53,18 +47,17 @@ gpu_reference(const plans::FDMTPlan& plan,
 
 TEST_CASE("FDMTFFTBoxcar GPU host and device APIs match direct reference",
           "[gpu][parity][boxcar]") {
-    const plans::FDMTPlan plan(700, 1200, 7, 733, 0.001F,
+    const plans::FDMTPlan plan(700, 1200, 7, 751, 0.001F,
                                std::vector<IndexType>{0, 4, 17, 40, 97});
     const auto input = waterfalls(plan, 2, 4);
-    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
-    for (const SizeType cap : {SizeType{0}, SizeType{512}}) {
-        const SegmentCap segments(cap);
+    const Exec exec  = test::gpu_exec();
+    for (const bool segmented : {false, true}) {
         for (const bool frac : {true, false}) {
             for (const auto mode :
                  {PeakFindingMode::kContiguousPeakPerWidth,
                   PeakFindingMode::kContiguousPeakAcrossWidths,
                   PeakFindingMode::kAllAboveThreshold}) {
-                CAPTURE(cap, frac, mode);
+                CAPTURE(segmented, frac, mode);
                 BoxcarConfig cfg;
                 cfg.max_boxcar       = 37;
                 cfg.wtsp             = 1;
@@ -72,9 +65,24 @@ TEST_CASE("FDMTFFTBoxcar GPU host and device APIs match direct reference",
                 cfg.peak_mode        = mode;
                 cfg.max_candidates   = 500000;
                 cfg.max_cands_per_dm = 0;
+                SizeType budget      = algorithms::kFDMTDefaultMaxMemory;
+                if (segmented) {
+                    const auto open = FDMTFFTBoxcar::estimate_memory(
+                        plan, cfg, true, exec, 2, frac);
+                    budget = open.usage.budgeted() - 1;
+                }
+                FDMTFFTBoxcar search(plan, cfg, true, exec, 2, frac, {},
+                                     budget);
+                SizeType ref_cap = 0;
+                if (segmented) {
+                    CHECK(search.get_chunk_nsamps() < plan.get_nsamps());
+                    const auto geom = algorithms::fdmt_fft::make_geometry(
+                        plan, FDMTMode::kValid, frac, true);
+                    ref_cap = search.get_chunk_nsamps() +
+                              std::max(geom.skip, geom.support) + geom.guard;
+                }
                 const auto expected =
-                    gpu_reference(plan, cfg, true, frac, {}, 2, input);
-                FDMTFFTBoxcar search(plan, cfg, true, exec, 2, frac);
+                    cpu_reference(plan, cfg, true, frac, {}, 2, input, ref_cap);
                 std::vector<RawCandidate> actual;
                 for (const auto& block : input) {
                     append(actual, search.execute(block));
@@ -113,7 +121,7 @@ TEST_CASE("FDMTFFTBoxcar GPU kill mask and wide windows match the reference",
                                std::vector<IndexType>{0, 9, 33, 71});
     const auto input = waterfalls(plan, 1, 3);
     const std::vector<uint8_t> kill{1, 0, 1, 1, 0, 1, 1, 1};
-    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+    const Exec exec = test::gpu_exec();
     BoxcarConfig cfg;
     cfg.max_boxcar       = 1500;
     cfg.wtsp             = 1.5F;
@@ -127,7 +135,7 @@ TEST_CASE("FDMTFFTBoxcar GPU kill mask and wide windows match the reference",
     }
     append(actual, search.flush());
     compare_near_threshold(actual,
-                           gpu_reference(plan, cfg, true, true, kill, 1, input),
+                           cpu_reference(plan, cfg, true, true, kill, 1, input),
                            cfg.detect_thresh);
 }
 
@@ -146,7 +154,7 @@ TEST_CASE("FDMTFFTBoxcar GPU memory budget shortens the segments",
     cfg.detect_thresh    = 6.0F;
     cfg.max_candidates   = 200000;
     cfg.max_cands_per_dm = 0;
-    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+    const Exec exec      = test::gpu_exec();
     FDMTFFTBoxcar open(plan, cfg, true, exec);
     // Half of what the segments take: the input block reserved for host
     // calls (staging) does not shrink with them.
@@ -182,7 +190,7 @@ TEST_CASE("FDMTFFTBoxcar GPU budget does not count host candidates",
     BoxcarConfig cfg;
     cfg.max_boxcar     = 32;
     cfg.max_candidates = SizeType{1} << 22;
-    const Exec exec{algorithms::detail::kGPUBackend, 1, 0};
+    const Exec exec    = test::gpu_exec();
     const FDMTFFTBoxcar open(plan, cfg, true, exec);
     const auto usage          = open.get_memory_usage();
     const SizeType host_cands = cfg.max_candidates * sizeof(RawCandidate);
@@ -193,77 +201,7 @@ TEST_CASE("FDMTFFTBoxcar GPU budget does not count host candidates",
     CHECK(capped.get_memory_usage().budgeted() == usage.budgeted());
 }
 
-namespace {
-/// FDMTFFTBoxcar::estimate_memory() equals the built instance on `exec`.
-void check_fft_boxcar_estimates(const Exec& exec) {
-    const plans::FDMTPlan plan(1000.0F, 1500.0F, 64, 2048, 0.001F, 80);
-    BoxcarConfig cfg;
-    cfg.max_boxcar        = 32;
-    BoxcarConfig keep     = cfg;
-    keep.overflow_policy  = OverflowPolicy::kKeepBrightest;
-    keep.max_cands_per_dm = 4;
-    std::vector<uint8_t> kill(plan.get_nchans(), 1);
-    kill[7] = 0;
-    struct Case {
-        const char* name;
-        BoxcarConfig config;
-        SizeType beams;
-        std::vector<uint8_t> kill;
-    };
-    const std::vector<Case> cases{{"default", cfg, 1, {}},
-                                  {"keep brightest", keep, 2, {}},
-                                  {"kill mask", cfg, 2, kill}};
-    const auto check = [](const algorithms::FDMTBoxcarMemoryEstimate& e,
-                          const FDMTFFTBoxcar& f) {
-        const auto got = f.get_memory_usage();
-        CHECK(e.usage.plan == got.plan);
-        CHECK(e.usage.state == got.state);
-        CHECK(e.usage.history == got.history);
-        CHECK(e.usage.peaks == got.peaks);
-        CHECK(e.usage.workspace == got.workspace);
-        CHECK(e.usage.candidates == got.candidates);
-        CHECK(e.usage.staging == got.staging);
-        CHECK(e.usage.host == got.host);
-        CHECK(e.chunk_nsamps == f.get_chunk_nsamps());
-    };
-    for (const auto& c : cases) {
-        INFO(c.name);
-        const auto e = FDMTFFTBoxcar::estimate_memory(
-            plan, c.config, true, exec, c.beams, true, c.kill);
-        const FDMTFFTBoxcar f(plan, c.config, true, exec, c.beams, true,
-                              c.kill);
-        check(e, f);
-    }
-    // A budget the full segment does not fit: shorter segments (a long
-    // block, so the transform dominates the boxcar buffers).
-    const plans::FDMTPlan long_plan(1000.0F, 1500.0F, 256, 32768, 0.001F, 80);
-    BoxcarConfig small   = cfg;
-    small.max_candidates = 1024;
-    const auto full =
-        FDMTFFTBoxcar::estimate_memory(long_plan, small, true, exec, 4);
-    const SizeType budget = full.usage.budgeted() - 1;
-    const auto e = FDMTFFTBoxcar::estimate_memory(long_plan, small, true, exec,
-                                                  4, true, {}, budget);
-    check(e, FDMTFFTBoxcar(long_plan, small, true, exec, 4, true, {}, budget));
-    CHECK(e.chunk_nsamps < full.chunk_nsamps);
-    CHECK(e.usage.budgeted() <= budget);
-    CHECK_THROWS_AS(FDMTFFTBoxcar::estimate_memory(plan, cfg, true, exec, 1,
-                                                   true, {}, 1024),
-                    std::invalid_argument);
-    // 2^22 beams and 2^40 candidates (TBs on each side, beyond any host or
-    // device): sized, never allocated (an allocation would throw).
-    BoxcarConfig huge   = cfg;
-    huge.max_candidates = SizeType{1} << 40;
-    const plans::FDMTPlan big(1000.0F, 1500.0F, 256, 4096, 0.001F, 400);
-    const auto h = FDMTFFTBoxcar::estimate_memory(
-        big, huge, true, exec, SizeType{1} << 22, true, {}, SIZE_MAX / 2);
-    CHECK(h.usage.candidates >= huge.max_candidates * sizeof(RawCandidate));
-    CHECK(h.usage.state + h.usage.workspace + h.usage.history >
-          (SizeType{1} << 40));
-}
-} // namespace
-
 TEST_CASE("FDMTFFTBoxcar estimate_memory equals the constructed instance (gpu)",
           "[boxcar][gpu][budget]") {
-    check_fft_boxcar_estimates(Exec{algorithms::detail::kGPUBackend, 1, 0});
+    check_fft_boxcar_estimates(test::gpu_exec());
 }

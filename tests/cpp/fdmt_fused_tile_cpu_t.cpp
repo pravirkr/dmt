@@ -18,6 +18,7 @@
 #include "dmt/fdmt_history.hpp"
 #include "dmt/modes.hpp"
 
+#include "cpu/fdmt_cpu_engine.hpp"
 #include "test_random.hpp"
 
 // The CUDA backend's fused-level tile (lib/dmt/fdmt_fused_tile.hpp), run
@@ -561,6 +562,89 @@ TEST_CASE("CUDA fused tile chunked streaming (host emulation)",
                     }
                     REQUIRE_THAT(got, Catch::Matchers::Equals(want));
                 }
+            }
+        }
+    }
+}
+
+TEST_CASE("FDMT automatic fusion depth matches CPU engine budget constants",
+          "[fdmt_cpu][cpu]") {
+    using Engine = detail::fdmt_cpu::FDMTCpuEngine;
+    // Modes "full" and "roll": kFDMTAutoFuse picks the deepest depth whose
+    // two per-thread fusion buffers fit max(kFuseBudgetTotal / nthreads,
+    // kFuseBudgetPerThread).
+    const SizeType nchans  = 1024;
+    const SizeType nsamps  = 4096;
+    const auto fused_bytes = [&](const FDMT& f, SizeType nthreads) {
+        const auto rows = 3 * (((nsamps * sizeof(float)) + 63) / 64) * 64;
+        return (f.get_memory_usage().workspace / nthreads) - rows;
+    };
+    const SizeType budget = Engine::kFuseBudgetTotal;
+    FDMT fdmt(kFMin, kFMax, nchans, nsamps, kTsamp, 256, 0, 1, true, "full",
+              Exec::cpu(1));
+    const auto depth = fdmt.get_fuse_levels();
+    REQUIRE(depth >= 1);
+    CHECK(fused_bytes(fdmt, 1) <= budget);
+    if (depth < fdmt.get_plan().get_niters()) {
+        const auto deeper = FDMT::estimate_memory(fdmt.get_plan(), true,
+                                                  Exec::cpu(1), 1, depth + 1);
+        const auto rows   = 3 * (((nsamps * sizeof(float)) + 63) / 64) * 64;
+        CHECK(deeper.usage.workspace - rows > budget);
+    }
+}
+
+TEST_CASE("FDMT automatic fusion depth in valid mode matches tile constants",
+          "[fdmt_cpu][cpu]") {
+    using Engine              = detail::fdmt_cpu::FDMTCpuEngine;
+    constexpr double kBudget  = static_cast<double>(Engine::kFuseTileBudget);
+    constexpr SizeType kTile  = Engine::kFuseTiles.back();
+    constexpr SizeType kMinGr = Engine::kFuseGroupsPerThread;
+    const auto working_set    = [](const plans::FDMTPlan& plan, SizeType fuse,
+                                   SizeType tile) {
+        const auto& pc         = plan.get_container();
+        const SizeType ngroups = pc.state_shape[fuse].nchans;
+        double total           = 0.0;
+        for (SizeType g = 0; g < ngroups; ++g) {
+            SizeType rows = 0;
+            SizeType ring = 0;
+            for (SizeType l = 0; l <= fuse; ++l) {
+                const auto& grids    = pc.grids[l];
+                const SizeType width = SizeType{1} << (fuse - l);
+                const SizeType first = g * width;
+                const SizeType last = std::min(first + width, grids.size()) - 1;
+                const SizeType cb   = grids[first].coord_offset;
+                const SizeType ce = grids[last].coord_offset + grids[last].ndt;
+                if (l < fuse) {
+                    rows = std::max(rows, ce - cb);
+                }
+                for (SizeType k = cb; l > 0 && k < ce; ++k) {
+                    const auto& c = pc.coordinates[l][k];
+                    ring += (c.i_coord_head != SIZE_MAX) ? c.delay : 0;
+                }
+            }
+            total += static_cast<double>((2 * rows * tile) + ring) * 4.0;
+        }
+        return total / static_cast<double>(ngroups);
+    };
+    struct Case {
+        SizeType nchans;
+        SizeType nsamps;
+        IndexType dt_max;
+    };
+    const std::vector<Case> cases = {{1024, 4096, 256}, {256, 4096, 3000}};
+    for (const auto& c : cases) {
+        DYNAMIC_SECTION("nchans=" << c.nchans << " dt_max=" << c.dt_max) {
+            FDMT fdmt(kFMin, kFMax, c.nchans, c.nsamps, kTsamp, c.dt_max, 0, 1,
+                      true, "valid", Exec::cpu(1));
+            const auto& plan   = fdmt.get_plan();
+            const auto& shapes = plan.get_container().state_shape;
+            const auto depth   = fdmt.get_fuse_levels();
+            REQUIRE(depth >= 1);
+            CHECK(working_set(plan, depth, kTile) <= kBudget);
+            const auto next = depth + 1;
+            if (next <= plan.get_niters()) {
+                CHECK((working_set(plan, next, kTile) > kBudget ||
+                       shapes[next].nchans < kMinGr));
             }
         }
     }

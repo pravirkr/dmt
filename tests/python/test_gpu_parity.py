@@ -56,7 +56,7 @@ def _assert_coh_close(got: np.ndarray, want: np.ndarray) -> None:
 
 def test_coh_fdmt_gpu_matches_cpu(gpu_backend: str) -> None:
     cfg = dmtlib.CohFDMTConfig(400.0, 1.0, 16, 4.0e-6, 10.0, 11.0)
-    cpu = CohFDMT(cfg, 4)
+    cpu = CohFDMT(cfg, 1)
     gpu = on(gpu_backend, CohFDMT, cfg)
     assert gpu.backend == gpu_backend
     rng = np.random.default_rng(2)
@@ -90,7 +90,7 @@ def test_coh_fdmt_gpu_formats_match_cpu(
     )
     data = _coh_block(cfg, nbits)
     _assert_coh_close(
-        on(gpu_backend, CohFDMT, cfg).execute(data), CohFDMT(cfg, 4).execute(data)
+        on(gpu_backend, CohFDMT, cfg).execute(data), CohFDMT(cfg, 1).execute(data)
     )
 
 
@@ -102,7 +102,7 @@ def test_coh_fdmt_gpu_subband_groups_match_cpu(gpu_backend: str) -> None:
     data = _coh_block(base, 3)
     split = CohFDMT(grouped, 1).input_size(0)
     groups = [data[:split], data[split:]]
-    want = CohFDMT(base, 4).execute(data)
+    want = CohFDMT(base, 1).execute(data)
     _assert_coh_close(on(gpu_backend, CohFDMT, grouped).execute(groups), want)
 
 
@@ -135,7 +135,7 @@ def test_fdmt_gpu_packed_matches_cpu(
         gpu_backend, FDMT, 1000.0, 1500.0, nchans, nsamps, 0.001, 40, int_tree=int_tree
     )
     ref = cpu.execute(values.astype(np.float32))
-    np.testing.assert_array_equal(gpu.execute(packed, nbits), ref)
+    np.testing.assert_array_equal(gpu.execute(packed, nbits=nbits), ref)
 
 
 @pytest.mark.parametrize("mode", ["full", "roll", "valid"])
@@ -192,8 +192,8 @@ def test_fdmt_gpu_stepper_matches_cpu(packed: bool, gpu_backend: str) -> None:
         gpu_backend, FDMT, 1000.0, 1500.0, nchans, nsamps, 0.001, 32, int_tree=False
     )
     if packed:
-        cpu.reset(packed_wf, 2)
-        gpu.reset(packed_wf, 2)
+        cpu.reset(packed_wf, nbits=2)
+        gpu.reset(packed_wf, nbits=2)
     else:
         cpu.reset(waterfall)
         gpu.reset(waterfall)
@@ -285,7 +285,7 @@ def test_ddmt_gpu_packed_matches_cpu_exactly(gpu_backend: str) -> None:
     gpu = on(gpu_backend, DDMT, 1000.0, 1500.0, nchans, 0.001, 50.0, 1.0, nbits=8)
     # Integer accumulation: bit-identical.
     np.testing.assert_array_equal(
-        gpu.execute(packed, nsamps), cpu.execute(packed, nsamps)
+        gpu.execute(packed, nsamps=nsamps), cpu.execute(packed, nsamps=nsamps)
     )
 
 
@@ -319,7 +319,9 @@ def test_sdmt_gpu_packed_matches_ddmt_exactly(nbits: int, gpu_backend: str) -> N
     for part in (packed[:, : row_bytes // 2], packed[:, row_bytes // 2 :]):
         n = part.shape[1] * 8 // nbits
         part = np.ascontiguousarray(part)
-        np.testing.assert_array_equal(gpu.execute(part, n), cpu.execute(part, n))
+        np.testing.assert_array_equal(
+            gpu.execute(part, nsamps=n), cpu.execute(part, nsamps=n)
+        )
 
 
 @pytest.mark.parametrize("mode", ["valid", "full", "roll"])
@@ -345,8 +347,8 @@ def test_fdmt_fft_gpu_packed_kill_mask_history(gpu_backend: str) -> None:
     gpu = on(gpu_backend, FDMTFFT, *args, kill_mask=mask)
     packed = rng.integers(0, 256, size=(64, 1024), dtype=np.uint8)
     for _ in range(2):
-        a = cpu.execute(packed, 8)
-        b = gpu.execute(packed, 8)
+        a = cpu.execute(packed, nbits=8)
+        b = gpu.execute(packed, nbits=8)
         np.testing.assert_allclose(b, a, rtol=0, atol=2e-5 * np.abs(a).max())
     np.testing.assert_array_equal(gpu.save_history(), cpu.save_history())
 

@@ -68,8 +68,9 @@ inline constexpr SizeType kFDMTDefaultMaxMemory = SizeType{10} << 30;
 
 /**
  * @brief Memory an FDMT engine allocates, in bytes (host memory on the CPU
- * backend, device memory on a GPU backend). Apart from the GPU staging of
- * host-memory calls (in `workspace` once the first one allocates it),
+ * backend, device memory on a GPU backend, `pinned` apart). Apart from the GPU
+ * staging of host-memory calls (device buffers in `workspace` and page-locked
+ * host buffers in `pinned` once the first host call allocates them),
  * everything is allocated at construction; the caller provides the input
  * and the `output` bytes of output buffer per call.
  */
@@ -79,11 +80,14 @@ struct FDMTMemoryUsage {
     SizeType history{0};   ///< "valid"-mode streaming history
     SizeType workspace{0}; ///< CPU: per-thread fusion/unpack scratch;
                            ///< GPU: fused-kernel index tables, plus the
-                           ///< host-memory call staging once allocated
+                           ///< host-memory call device staging once allocated
     SizeType output{0};    ///< Caller-provided dmt buffer per execute() (not
                            ///< owned by the engine)
+    SizeType pinned{0};    ///< GPU: pinned host buffers held for host-memory
+                           ///< calls (host memory, not in total())
 
-    /// Total allocated by the engine (excludes `output`).
+    /// Total allocated where the instance runs (excludes `output` and
+    /// `pinned`).
     [[nodiscard]] constexpr SizeType total() const noexcept {
         return plan + state + history + workspace;
     }
@@ -104,6 +108,11 @@ struct FDMTMemoryEstimate {
     /// device-memory calls never allocate them (packed host input stages
     /// its packed bytes instead of the float block). 0 on the CPU.
     SizeType host_staging{0};
+    /// GPU backends: pinned host bytes the first host-memory execute() or
+    /// finalize() adds when the output plane reaches the staging threshold
+    /// (2 * min(max(1, nthreads), 4) * 8 MiB); 0 for smaller outputs,
+    /// device-memory calls, and the CPU.
+    SizeType host_pinned{0};
 };
 
 /**
@@ -131,7 +140,11 @@ struct FDMTMemoryEstimate {
  *   it through device buffers for the whole input block and output plane,
  *   allocated on the first host call outside max_memory_bytes (reported in
  *   get_memory_usage().workspace once allocated), and blocks until the
- *   result is on the host. Device memory (`DeviceSpan`) works on
+ *   result is on the host. When the output plane reaches the pinned-staging
+ *   threshold (2 * min(max(1, nthreads), 4) * 8 MiB), device-to-host copies
+ *   pipeline through that many pinned host bytes across up to min(nthreads, 4)
+ *   host worker threads (reported in get_memory_usage().pinned and
+ *   estimate_memory().host_pinned). Device memory (`DeviceSpan`) works on
  *   GPU backends only (the CPU backend throws std::invalid_argument) and is
  *   asynchronous on the given Stream.
  */
@@ -172,8 +185,10 @@ public:
      * - "roll": Roll FDMT transform using rotation of the input waterfall.
      * (default: "valid").
      * @param exec Backend and its resources (default: CPU, 1 thread), e.g.
-     * `Exec::cpu(8)` or `Exec::cuda(0)`. It takes the place of the old
-     * `nthreads` / `device_id` argument; an `int` does not convert to it.
+     * `Exec::cpu(8)` or `Exec::cuda(0)`. On a GPU, `Exec::cuda(device,
+     * nthreads)` sets the host worker threads that stage a host-memory
+     * result through pinned buffers (see above). It takes the place of the
+     * old `nthreads` / `device_id` argument; an `int` does not convert to it.
      * @throws std::invalid_argument if `exec.backend` is not in this build
      * (see available_backends()).
      * @param nbeams Number of independent beams to process together
@@ -237,9 +252,10 @@ public:
      * cross-block history traffic (a few per cent at a few thousand samples).
      * 0 (default) = automatic: the
      * longest power of two >= 2048 whose state fits 2 GiB, capped at nsamps
-     * (GPU: the longest power of two >= 256 whose state fits the device L2,
-     * when one does; see get_chunk_nsamps()); other values are rounded up to
-     * a multiple of 64. The stepper (reset()/advance()) needs chunk >= nsamps.
+     * (GPU: the longest power of two >= 256 whose state fits a fixed 96 MiB
+     * cache target, the L40S's L2, when one does; see get_chunk_nsamps());
+     * other values are rounded up to a multiple of 64. The stepper
+     * (reset()/advance()) needs chunk >= nsamps.
      * @param max_memory_bytes Budget for everything the instance allocates
      * (get_memory_usage().total(); default kFDMTDefaultMaxMemory, 10 GiB).
      * A fast streaming path that fits is taken (close to the fastest). A
@@ -343,8 +359,8 @@ public:
      * decisions and tables, with every working buffer sized but not
      * allocated (exact: the constructor allocates exactly these sizes).
      * Throws as the constructor would when nothing fits max_memory_bytes.
-     * A GPU backend needs the device (it reads its shared memory and L2
-     * sizes) but allocates no device memory; the CUDA context, created on
+     * A GPU backend needs the device (it reads its shared memory size) but
+     * allocates no device memory; the CUDA context, created on
      * first use, is not counted (nor in get_memory_usage()).
      * One overload per constructor, with the same arguments.
      */
@@ -426,7 +442,7 @@ public:
     /// @brief Backend this instance runs on.
     [[nodiscard]] Backend backend() const noexcept;
 
-    /// @brief OpenMP threads used (CPU backend); 1 on a GPU backend.
+    /// @brief OpenMP threads (CPU) or host-staging worker cap (GPU).
     [[nodiscard]] int nthreads() const noexcept;
 
     /// @brief Device ordinal used (GPU backend); -1 on the CPU backend.
@@ -568,9 +584,12 @@ public:
      * levels' cross-block history update, so this throws std::logic_error
      * instead. reset_history() abandons the unfinished block and the stream.
      * The stepper always runs level by level (never fused), on whole
-     * blocks: it needs get_chunk_nsamps() == nsamps.
+     * blocks: it needs get_chunk_nsamps() == nsamps. The skewed-window path
+     * (chosen when max_memory_bytes is below the tree path's) has no
+     * stepper on any backend; use execute(), or a budget that fits the
+     * tree path.
      * @throws std::logic_error if a "valid"-mode block is still unfinished,
-     * or if the engine runs blocks in chunks.
+     * if the engine runs blocks in chunks, or on the skewed-window path.
      */
     void reset(std::span<const float> waterfall, std::span<float> dmt);
 
@@ -829,7 +848,7 @@ private:
  * (nbeams*nchans*nsamps).
  * @param f_min Bottom edge frequency in MHz.
  * @param f_max Top edge frequency in MHz.
- * @param nchans Number of frequency channels (power of 2).
+ * @param nchans Number of frequency channels.
  * @param nsamps Number of time samples per block.
  * @param tsamp Sampling interval in seconds.
  * @param dt_max Maximum delay trial in samples.

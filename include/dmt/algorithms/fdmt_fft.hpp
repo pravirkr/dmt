@@ -68,8 +68,12 @@ namespace dmt::algorithms {
  *
  * Runs on the backend chosen by the `Exec` constructor argument. The output
  * is compact: nbeams * plan.get_dmt_size() floats. Host memory works on every
- * backend (a GPU backend stages it and blocks); device memory (`DeviceSpan`)
- * on GPU backends only, asynchronous on the given Stream.
+ * backend (a GPU backend stages input/output device buffers and, when the
+ * output plane reaches 2 * min(max(1, nthreads), 4) * 8 MiB, pipelines
+ * device-to-host copies through that many pinned host bytes across up to
+ * min(nthreads, 4) host worker threads, reported in get_memory_usage().pinned
+ * and estimate_memory().host_pinned, and blocks); device memory (`DeviceSpan`)
+ * works on GPU backends only, asynchronous on the given Stream.
  */
 class FDMTFFT {
 public:
@@ -78,7 +82,7 @@ public:
      *
      * @param f_min Bottom edge frequency in MHz.
      * @param f_max Top edge frequency in MHz.
-     * @param nchans Number of channels (power of 2).
+     * @param nchans Number of channels.
      * @param nsamps Number of time samples per block.
      * @param tsamp Sampling interval in seconds.
      * @param dt_max Maximum delay trial in samples.
@@ -87,7 +91,9 @@ public:
      * @param use_box_smearing Whether to account for intra-channel smearing
      * (default: true).
      * @param mode Mode: "valid", "full", or "roll" (default: "valid").
-     * @param exec Backend and its resources (default: CPU, 1 thread).
+     * @param exec Backend and its resources (default: CPU, 1 thread). On a
+     * GPU, `Exec::cuda(device, nthreads)` sets the host worker threads that
+     * stage a host-memory result through pinned buffers (see above).
      * @param nbeams Number of batched beams (default: 1).
      * @param fractional_delays True by default, and by the nature of the
      * Fourier-domain tree: every merge shifts its head by a real-valued,
@@ -235,7 +241,7 @@ public:
     [[nodiscard]] SizeType get_nbeams() const noexcept;
     /// @brief Backend this instance runs on.
     [[nodiscard]] Backend backend() const noexcept;
-    /// @brief OpenMP threads used (CPU backend); 1 on a GPU backend.
+    /// @brief OpenMP threads (CPU) or host-staging worker cap (GPU).
     [[nodiscard]] int nthreads() const noexcept;
     /// @brief Device ordinal used (GPU backend); -1 on the CPU backend.
     [[nodiscard]] int device() const noexcept;

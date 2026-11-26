@@ -36,15 +36,12 @@ using plans::DDMTPlan;
 /// The GPU engine under test: DDMT, or SDMT with its shared-sum kernel
 /// forced wherever its programs fit (the small test plans would otherwise
 /// often run the DDMT kernel).
-std::unique_ptr<DDMT>
+std::unique_ptr<algorithms::detail::DDMTEngine>
 make_gpu(bool sdmt, const DDMTPlan& plan, SizeType nbeams = 1) {
-    if (sdmt) {
-        algorithms::detail::set_sdmt_gpu_always_shared(true);
-        auto engine = std::make_unique<SDMT>(plan, test::gpu_exec(), nbeams);
-        algorithms::detail::set_sdmt_gpu_always_shared(false);
-        return engine;
-    }
-    return std::make_unique<DDMT>(plan, test::gpu_exec(), nbeams);
+    const algorithms::detail::DDMTEngineConfig cfg{
+        .nbeams = nbeams, .exec = test::gpu_exec(), .force_shared_sums = sdmt};
+    return sdmt ? algorithms::detail::make_sdmt_gpu(plan, cfg)
+                : algorithms::detail::make_ddmt_gpu(plan, cfg);
 }
 
 template <typename F> void with_nbits(SizeType nbits, F&& f) {
@@ -150,10 +147,12 @@ struct Output {
     std::vector<int32_t> i;
 };
 
-Output run_host(DDMT& ddmt, const Input& in) {
+template <typename Engine>
+Output
+run_host(Engine& ddmt, const DDMTPlan& plan, SizeType nbeams, const Input& in) {
     Output out;
-    const auto n = ddmt.get_nbeams() * ddmt.get_plan().get_dm_arr().size() *
-                   ddmt.get_output_nsamps(in.nsamps);
+    const auto n =
+        nbeams * plan.get_dm_arr().size() * ddmt.get_output_nsamps(in.nsamps);
     if (in.nbits == 32) {
         out.f.resize(n);
         ddmt.execute(in.f, out.f);
@@ -164,17 +163,22 @@ Output run_host(DDMT& ddmt, const Input& in) {
     return out;
 }
 
-Output run_device(DDMT& ddmt, const Input& in) {
+template <typename Engine>
+Output run_device(Engine& ddmt,
+                  const DDMTPlan& plan,
+                  SizeType nbeams,
+                  const Input& in) {
     Output out;
-    const auto n = ddmt.get_nbeams() * ddmt.get_plan().get_dm_arr().size() *
-                   ddmt.get_output_nsamps(in.nsamps);
+    const auto n =
+        nbeams * plan.get_dm_arr().size() * ddmt.get_output_nsamps(in.nsamps);
     if (in.nbits == 32) {
         const thrust::device_vector<float> d_in(in.f.begin(), in.f.end());
         thrust::device_vector<float> d_out(n);
         ddmt.execute(DeviceSpan<const float>(
                          thrust::raw_pointer_cast(d_in.data()), d_in.size()),
                      DeviceSpan<float>(thrust::raw_pointer_cast(d_out.data()),
-                                       d_out.size()));
+                                       d_out.size()),
+                     Stream{});
         out.f.resize(n);
         thrust::copy(d_out.begin(), d_out.end(), out.f.begin());
     } else {
@@ -184,18 +188,24 @@ Output run_device(DDMT& ddmt, const Input& in) {
                          thrust::raw_pointer_cast(d_in.data()), d_in.size()),
                      in.nsamps,
                      DeviceSpan<int32_t>(thrust::raw_pointer_cast(d_out.data()),
-                                         d_out.size()));
+                                         d_out.size()),
+                     Stream{});
         out.i.resize(n);
         thrust::copy(d_out.begin(), d_out.end(), out.i.begin());
     }
     return out;
 }
 
-Output run_time_major(DDMT& ddmt, const Input& in, bool on_device) {
+template <typename Engine>
+Output run_time_major(Engine& ddmt,
+                      const DDMTPlan& plan,
+                      SizeType nbeams,
+                      const Input& in,
+                      bool on_device) {
     Output out;
-    const auto n  = ddmt.get_nbeams() * ddmt.get_plan().get_dm_arr().size() *
-                    ddmt.get_output_nsamps(in.nsamps);
-    const auto tm = in.time_major(ddmt.get_nbeams());
+    const auto n =
+        nbeams * plan.get_dm_arr().size() * ddmt.get_output_nsamps(in.nsamps);
+    const auto tm = in.time_major(nbeams);
     out.i.resize(n);
     if (on_device) {
         const thrust::device_vector<uint8_t> d_in(tm.begin(), tm.end());
@@ -205,7 +215,8 @@ Output run_time_major(DDMT& ddmt, const Input& in, bool on_device) {
                                       d_in.size()),
             in.nsamps,
             DeviceSpan<int32_t>(thrust::raw_pointer_cast(d_out.data()),
-                                d_out.size()));
+                                d_out.size()),
+            Stream{});
         thrust::copy(d_out.begin(), d_out.end(), out.i.begin());
     } else {
         ddmt.execute_time_major(tm, in.nsamps, out.i);
@@ -314,14 +325,14 @@ TEST_CASE("parity: DDMT and SDMT (gpu) kernels match CPU, "
                                                   nsamps, 7 + nbits);
 
                     DDMT cpu(plan, Exec::cpu(), sc.nbeams);
-                    const auto ref = run_host(cpu, in);
+                    const auto ref = run_host(cpu, plan, sc.nbeams, in);
 
                     // Monolithic: host and device spans.
                     auto gpu_ptr = make_gpu(sdmt, plan, sc.nbeams);
-                    DDMT& gpu    = *gpu_ptr;
-                    require_same(run_host(gpu, in), ref);
+                    auto& gpu    = *gpu_ptr;
+                    require_same(run_host(gpu, plan, sc.nbeams, in), ref);
                     gpu.reset_history();
-                    require_same(run_device(gpu, in), ref);
+                    require_same(run_device(gpu, plan, sc.nbeams, in), ref);
 
                     // Streaming in uneven chunks (some shorter than the max
                     // delay, odd lengths), alternating host and device calls.
@@ -339,8 +350,10 @@ TEST_CASE("parity: DDMT and SDMT (gpu) kernels match CPU, "
                                                nsamps};
                     for (SizeType k = 0; k + 1 < std::size(bounds); ++k) {
                         const auto chunk = in.slice(bounds[k], bounds[k + 1]);
-                        const auto out   = (k % 2 == 0) ? run_device(gpu, chunk)
-                                                        : run_host(gpu, chunk);
+                        const auto out =
+                            (k % 2 == 0)
+                                ? run_device(gpu, plan, sc.nbeams, chunk)
+                                : run_host(gpu, plan, sc.nbeams, chunk);
                         if (nbits == 32) {
                             append_rows(acc_f, out.f);
                         } else {
@@ -381,17 +394,18 @@ TEST_CASE("parity: DDMT and SDMT (gpu) time-major streaming matches CPU "
                     const auto in     = Input::random(nbits, nbeams * nchans,
                                                       nsamps, 99 + nbits);
                     DDMT cpu(plan, Exec::cpu(), nbeams);
-                    const auto ref = run_host(cpu, in);
+                    const auto ref = run_host(cpu, plan, nbeams, in);
 
                     auto gpu_ptr = make_gpu(sdmt, plan, nbeams);
-                    DDMT& gpu    = *gpu_ptr;
+                    auto& gpu    = *gpu_ptr;
                     gpu.set_gulp_size(64);
                     std::vector<std::vector<int32_t>> acc(nbeams * dms.size());
                     const SizeType bounds[] = {0, 5, max_delay + 1,
                                                300 + max_delay, nsamps};
                     for (SizeType k = 0; k + 1 < std::size(bounds); ++k) {
                         const auto out = run_time_major(
-                            gpu, in.slice(bounds[k], bounds[k + 1]), on_device);
+                            gpu, plan, nbeams,
+                            in.slice(bounds[k], bounds[k + 1]), on_device);
                         append_rows(acc, out.i);
                     }
                     Output streamed;
@@ -419,7 +433,7 @@ TEST_CASE("parity: DDMT (gpu) device history save/load resumes a stream",
             const auto part2 = in.slice(max_delay + 150, in.nsamps);
 
             DDMT a(plan, test::gpu_exec());
-            run_device(a, part1);
+            run_device(a, plan, 1, part1);
             const auto size = a.history_state_size();
             thrust::device_vector<uint8_t> d_state(
                 nbits == 32 ? size * sizeof(float) : size);
@@ -432,7 +446,7 @@ TEST_CASE("parity: DDMT (gpu) device history save/load resumes a stream",
                 a.save_history(DeviceSpan<uint8_t>(
                     thrust::raw_pointer_cast(d_state.data()), size));
             }
-            const auto expected = run_device(a, part2);
+            const auto expected = run_device(a, plan, 1, part2);
 
             DDMT b(plan, test::gpu_exec());
             if (nbits == 32) {
@@ -444,7 +458,7 @@ TEST_CASE("parity: DDMT (gpu) device history save/load resumes a stream",
                 b.load_history(DeviceSpan<const uint8_t>(
                     thrust::raw_pointer_cast(d_state.data()), size));
             }
-            require_same(run_host(b, part2), expected);
+            require_same(run_host(b, plan, 1, part2), expected);
 
             // Host snapshot of the same state round-trips too.
             DDMT c(plan, test::gpu_exec());
@@ -465,7 +479,7 @@ TEST_CASE("parity: DDMT (gpu) device history save/load resumes a stream",
                 c.save_history(back);
                 REQUIRE(back == h);
             }
-            require_same(run_device(c, part2), expected);
+            require_same(run_device(c, plan, 1, part2), expected);
         }
     }
 }

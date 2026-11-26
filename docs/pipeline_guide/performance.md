@@ -150,7 +150,7 @@ runs:
 | :--- | ---: | ---: | ---: |
 | `cryopaf_low` | 37.9 ms | 24.4 ms | 21.8 ms |
 | `cryopaf_lband` | 17.2 ms | 13.8 ms | 11.6 ms |
-| `meerkat_lband` | 46.5 ms | 39.8 ms | 25.9 ms |
+| `meerkat_lband` | 46.5 ms | 39.8 ms | 25.7 ms |
 | `parkes_uwl` | – | – | 353 ms (1.84 GiB) |
 
 Fusion applies to `execute()` only. The stepper (`reset()` / `advance()`)
@@ -359,7 +359,7 @@ fdmt = FDMT(704.0, 1216.0, nchans, nsamps, 8.192e-5, 2048, nthreads=8)
 # (nchans, nsamps * nbits / 8) uint8, sample 0 in the low bits of byte 0
 packed = np.random.randint(0, 256, size=(nchans, nsamps * nbits // 8),
                            dtype=np.uint8)
-dmt = fdmt.execute(packed, nbits)       # float32 (n_dm, n_times)
+dmt = fdmt.execute(packed, nbits=nbits) # float32 (n_dm, n_times)
 ```
 :::
 :::{tab-item} C++
@@ -377,7 +377,7 @@ fdmt.execute(std::span<const uint8_t>(packed), /*nbits=*/2, dmt);
 :::
 ::::
 
-On the CUDA backend, `execute(packed, nbits)` behaves the same way, and the
+On the CUDA backend, `execute(packed, nbits=...)` behaves the same way, and the
 host overload copies only the packed bytes over PCIe.
 
 Speedup over float input, both at the default configuration (automatic
@@ -424,9 +424,13 @@ construct the engine with `int_tree=False`.
 
 ## Threads, block size and construction
 
-- **Threads** (`nthreads`, CPU): scaling is good up to the point where the
-  memory bus saturates. On an AMD EPYC CPU, 8 threads give 4.5–5.8× over
-  1 thread (float input).
+- **Threads** (`nthreads`): on the CPU, scaling is good up to the point where
+  the memory bus saturates; on an AMD EPYC CPU, 8 threads give 4.5–5.8× over
+  1 thread (float input). On a GPU backend, `nthreads` (default 1) caps the
+  host worker threads that pipeline host-memory results through pinned buffers
+  (up to 4 on `FDMT`, `FDMTFFT`, `DDMTFFT`, `CohFDMT`; pass `nthreads=4` for
+  multi-threaded host-output staging on large planes; device-memory calls do
+  not use it).
 - **Block size** (`nsamps`): in valid mode the overlap-save history makes the
   result independent of the block size, so choose it for latency and
   throughput. Throughput is best between a few thousand and ~16K samples,
@@ -478,16 +482,21 @@ exact size.
 
 - `FDMT`, `FDMTFFT`, `FDMTBoxcar`, `FDMTFFTBoxcar`: the constructor's
   arguments; everything is allocated at construction. On a GPU,
-  `FDMT.estimate_memory(...).host_staging` and `FDMTFFT`'s are what the
-  first host-memory call adds; `FDMTBoxcar` and `FDMTFFTBoxcar` stage host
-  input inside their budget (`usage`), so host calls add nothing.
-- `CohFDMT`: the configuration and backend.
+  `FDMT.estimate_memory(...).host_staging` and `FDMTFFT`'s are the device
+  buffers the first host-memory call adds, and `host_pinned` (reported in
+  `memory_usage.pinned` once allocated, excluded from `total()`) is the
+  pinned host staging it adds when the output reaches the staging threshold;
+  `FDMTBoxcar` and `FDMTFFTBoxcar` stage host input inside their budget
+  (`usage`), so host calls add nothing.
+- `CohFDMT`: the configuration and backend (reports `pinned` and
+  `host_pinned` alongside device categories).
 - `DDMTFFT`, `DDMT`, `SDMT`: the plan plus the call length `nsamps` (and
   `gulp_size` for DDMT and SDMT), because some buffers are made by the
   first calls that need them and then kept. `usage` is what the instance
-  holds while making calls of that length; the extra buffers of host-memory,
-  time-major or packed calls are separate fields. `DDMTFFT` counts a stream
-  from a cold start: its first calls use a few extra transform lengths.
+  holds while making calls of that length; the extra buffers of host-memory
+  (`host_staging`, `host_pinned`), time-major or packed calls are separate
+  fields. `DDMTFFT` counts a stream from a cold start: its first calls use a
+  few extra transform lengths.
 
 ```python
 plan = dmtlib.DDMTPlan(1200.0, 1600.0, 4096, 64e-6, 1000.0, 0.5)
@@ -520,9 +529,10 @@ history traffic, a few per cent at a few thousand samples.
 - **Default** (`chunk_nsamps=None` in Python, `0` in C++): the longest power
   of two ≥ 2048 whose two state halves (all beams) fit 2 GiB, capped at
   `nsamps`. On a GPU the engine first tries the longest power of two ≥ 256
-  whose state halves fit the device's L2 cache, so each merge reads the level
-  below from L2 instead of DRAM; it falls back to the 2 GiB rule when even 256
-  samples do not fit. On the L40S (96 MiB L2) this picks 512 for `cryopaf_low`
+  whose state halves fit a fixed 96 MiB cache target (the L40S's L2, so the
+  choice does not depend on the device), so each merge reads the level below
+  from L2 instead of DRAM; it falls back to the 2 GiB rule when even 256
+  samples do not fit. On the L40S this picks 512 for `cryopaf_low`
   and 1024 for `cryopaf_lband`, 1.05× and 1.13× faster than the 2 GiB
   rule's 8192 and 16384 (21.8 against 22.9 ms, 11.6 against 13.2 ms; the
   gap was larger before the direct levels removed most tree merges). Read the value used with `fdmt.chunk_nsamps` (C++

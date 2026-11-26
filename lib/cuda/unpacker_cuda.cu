@@ -99,14 +99,16 @@ public:
         for (const auto g : m_groups) {
             m_nsub += g;
         }
-        const auto table = make_decode_table(m_format);
-        std::vector<float> lut(256 * 4);
-        for (SizeType b = 0; b < 256; ++b) {
-            for (SizeType k = 0; k < 4; ++k) {
-                lut[(b * 4) + k] = table.value[b][k];
+        if (m_format.nbits != 8) {
+            const auto table = make_decode_table(m_format);
+            std::vector<float> lut(256 * 4);
+            for (SizeType b = 0; b < 256; ++b) {
+                for (SizeType k = 0; k < 4; ++k) {
+                    lut[(b * 4) + k] = table.value[b][k];
+                }
             }
+            m_lut.upload(lut);
         }
-        m_lut.upload(lut);
         m_desc_h.resize(m_nsub);
         m_desc.reserve(m_nsub);
     }

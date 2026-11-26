@@ -13,6 +13,7 @@
 
 #include <fmt/format.h>
 
+#include "dmt/dm_utils.hpp"
 #include "dmt/kadane_monoid.hpp"
 
 namespace dmt::kadane {
@@ -21,32 +22,12 @@ namespace {
 
 constexpr float kDeadThreshFloor = 1.0e35F;
 
-bool is_finite_f32(float x) noexcept {
-    const volatile uint32_t bits = std::bit_cast<uint32_t>(x);
-    return (bits & 0x7F800000U) != 0x7F800000U;
-}
-
-bool is_finite_f64(double x) noexcept {
-    const volatile uint64_t bits = std::bit_cast<uint64_t>(x);
-    return (bits & 0x7FF0000000000000ULL) != 0x7FF0000000000000ULL;
-}
-
-/// Step a positive float down by 1 ULP using integer bit arithmetic so
-/// `-ffast-math` / `-ffinite-math-only` cannot fold or warn on infinities.
-float step_down_pos_f32(float x) noexcept {
-    if (x <= 0.0F) {
-        return 0.0F;
-    }
-    const uint32_t bits = std::bit_cast<uint32_t>(x);
-    return bits > 0U ? std::bit_cast<float>(bits - 1U) : 0.0F;
-}
-
 bool is_dead_row(std::span<const float> row_thr) noexcept {
     if (row_thr.empty()) {
         return true;
     }
     return std::ranges::any_of(row_thr, [](float v) {
-        return !is_finite_f32(v) || v <= 0.0F || v >= kDeadThreshFloor;
+        return !utils::is_finite_bits(v) || v <= 0.0F || v >= kDeadThreshFloor;
     });
 }
 
@@ -65,15 +46,6 @@ void validate_gate_widths(std::span<const uint32_t> widths) {
         throw std::invalid_argument(
             "KadaneGatePlan: widths must have 1..4096 entries within "
             "1..1048576");
-    }
-    validate_strictly_ascending(widths);
-}
-
-void validate_surrogate_widths(std::span<const uint32_t> widths) {
-    if (widths.empty() || widths.front() == 0U ||
-        widths.back() > kMaxKadaneSurrogateWidth) {
-        throw std::invalid_argument(
-            "KadaneSurrogatePlan: widths must be non-empty within 1..4096");
     }
     validate_strictly_ascending(widths);
 }
@@ -182,58 +154,6 @@ private:
     std::vector<HullPoint> m_pts;
     SizeType m_head = 0;
 };
-
-/// Compute exact lossless float32 bucket cut on `[bucket.f_lo, bucket.f_hi)`
-/// for a fixed float32 `b_f32`, absorbing worst-case `bucket.w_hi`-step
-/// float32 drift (for `bucket.w_hi` up to `2^20`) and clamping non-positive or
-/// non-finite cuts safely to `0.0F`.
-float compute_bucket_cut_f32(const KadaneGateBucket& bucket,
-                             std::span<const uint32_t> widths,
-                             bool use_trapezoid,
-                             float b_f32,
-                             std::span<const float> row_thr) noexcept {
-    if (!is_finite_f32(b_f32) || b_f32 < 0.0F) {
-        return 0.0F;
-    }
-    const double b_val    = static_cast<double>(b_f32);
-    const uint32_t w0     = widths[0];
-    const uint32_t we0    = use_trapezoid ? trapezoid_edge_width(w0) : 0U;
-    const double tilde_w0 = static_cast<double>(w0 - we0);
-    const double tilde_thr0 =
-        static_cast<double>(row_thr[0]) * (we0 == 0U ? 1.0 : 0.5);
-    const double scale_1 = tilde_thr0 / std::sqrt(tilde_w0);
-
-    double tau_raw = std::numeric_limits<double>::max();
-    double thr_max = 0.0;
-    for (uint32_t f = bucket.f_lo; f < bucket.f_hi; ++f) {
-        const uint32_t wf     = widths[f];
-        const uint32_t we     = use_trapezoid ? trapezoid_edge_width(wf) : 0U;
-        const double tilde_wf = static_cast<double>(wf - we);
-        const auto thr_f      = static_cast<double>(row_thr[f]);
-        const double tilde_th = thr_f * (we == 0U ? 1.0 : 0.5);
-        tau_raw = std::min(tau_raw, tilde_th - (b_val * tilde_wf));
-        thr_max = std::max(thr_max, thr_f);
-    }
-    if (!is_finite_f64(tau_raw) || tau_raw <= 0.0) {
-        return 0.0F;
-    }
-
-    const auto w_hi = static_cast<double>(bucket.w_hi);
-    const double fp_err =
-        static_cast<double>(FLT_EPSILON) *
-        ((w_hi * (tau_raw + (2.0 * b_val) + (2.0 * scale_1))) +
-         (32.0 * (thr_max + (b_val * w_hi))));
-    const double margin = std::max(0.008 * scale_1, 4.0 * fp_err);
-    const double cut_d  = tau_raw - margin;
-    if (!is_finite_f64(cut_d) || cut_d <= 0.0) {
-        return 0.0F;
-    }
-    const auto cut_f32 = static_cast<float>(cut_d);
-    if (!is_finite_f32(cut_f32) || cut_f32 <= 0.0F) {
-        return 0.0F;
-    }
-    return step_down_pos_f32(cut_f32);
-}
 
 SizeType aligned_row_stride(SizeType n_rows) {
     if (n_rows == 0) {
@@ -422,12 +342,13 @@ KadaneGatePlan::KadaneGatePlan(std::span<const uint32_t> widths_in,
             }
             const double b_opt = hull.solve().bias;
             float b_f32        = static_cast<float>(b_opt);
-            if (!is_finite_f32(b_f32) || b_f32 <= 0.0F) {
+            if (!utils::is_finite_bits(b_f32) || b_f32 <= 0.0F) {
                 b_f32 = std::numeric_limits<float>::min();
             }
             bias[(k * row_stride) + r] = b_f32;
-            cut[(k * row_stride) + r]  = compute_bucket_cut_f32(
-                bkt, widths, use_trapezoid, b_f32, row_thr);
+            cut[(k * row_stride) + r]  = compute_bucket_cut_hd_f32(
+                bkt, widths.data(), num_filters, use_trapezoid, b_f32,
+                [&](SizeType f) { return row_thr[f]; });
         }
     }
 
@@ -457,13 +378,13 @@ KadaneGatePlan::KadaneGatePlan(std::span<const uint32_t> widths_in,
                 integer_thresh_lut.data() + (r * num_filters);
 
             const double mu_1 = mean_r[0] / static_cast<double>(int_weight[0]);
-            if (!is_finite_f64(mu_1) || mu_1 < 0.0) {
+            if (!utils::is_finite_bits(mu_1) || mu_1 < 0.0) {
                 tables_valid = false;
                 break;
             }
             row_mu1[idx] = mu_1;
             for (SizeType f = 0; f < num_filters; ++f) {
-                if (!is_finite_f64(mean_r[f]) || mean_r[f] < 0.0) {
+                if (!utils::is_finite_bits(mean_r[f]) || mean_r[f] < 0.0) {
                     tables_valid = false;
                     break;
                 }
@@ -531,7 +452,7 @@ KadaneGatePlan::KadaneGatePlan(std::span<const uint32_t> widths_in,
                     integer_thresh_lut.data() + (r * num_filters);
 
                 const double mu_s = row_mu1[idx] * scale_f64;
-                if (!is_finite_f64(mu_s) ||
+                if (!utils::is_finite_bits(mu_s) ||
                     mu_s >= static_cast<double>(b_cap)) {
                     shift_ok = false;
                     break;
@@ -544,7 +465,7 @@ KadaneGatePlan::KadaneGatePlan(std::span<const uint32_t> widths_in,
                     const double b_exc =
                         b_exc_tbl[(idx * num_buckets) + k] * scale_f64;
                     const double target_b = std::floor(mu_s + b_exc);
-                    if (!is_finite_f64(target_b) ||
+                    if (!utils::is_finite_bits(target_b) ||
                         target_b > static_cast<double>(b_cap)) {
                         shift_ok = false;
                         break;
@@ -636,8 +557,9 @@ void KadaneGatePlan::recompute_row_cuts(SizeType row,
         return;
     }
     for (SizeType k = 0; k < num_buckets; ++k) {
-        out_cuts[k] = compute_bucket_cut_f32(buckets[k], widths, use_trapezoid,
-                                             row_bias(k, row), min_thr);
+        out_cuts[k] = compute_bucket_cut_hd_f32(
+            buckets[k], widths.data(), widths.size(), use_trapezoid,
+            row_bias(k, row), [&](SizeType f) { return min_thr[f]; });
     }
 }
 
@@ -671,373 +593,6 @@ make_kadane_gate_plan(std::span<const uint32_t> widths,
     return KadaneGatePlan(widths, use_trapezoid, n_rows, raw_thresh_lut,
                           integer_mean_lut, integer_thresh_lut,
                           enable_int32_gate, max_int_sample);
-}
-
-void recompute_cuts_for_biases(const KadaneGatePlan& plan,
-                               std::span<const float> row_biases,
-                               std::span<const float> min_thr,
-                               std::span<float> out_cuts) {
-    if (row_biases.size() < plan.num_buckets ||
-        min_thr.size() != plan.widths.size() ||
-        out_cuts.size() < plan.num_buckets) {
-        throw std::invalid_argument(
-            "recompute_cuts_for_biases: invalid span sizes");
-    }
-    if (is_dead_row(min_thr)) {
-        for (SizeType k = 0; k < plan.num_buckets; ++k) {
-            out_cuts[k] = std::numeric_limits<float>::max();
-        }
-        return;
-    }
-    for (SizeType k = 0; k < plan.num_buckets; ++k) {
-        out_cuts[k] =
-            compute_bucket_cut_f32(plan.buckets[k], plan.widths,
-                                   plan.use_trapezoid, row_biases[k], min_thr);
-    }
-}
-
-KadaneSurrogatePlan::KadaneSurrogatePlan(
-    std::span<const uint32_t> widths_in,
-    bool use_trapezoid_in,
-    SizeType n_rows_in,
-    std::span<const float> raw_thresh_lut,
-    std::span<const float> inv_sigma_lut,
-    std::span<const double> integer_mean_lut,
-    double integer_unit_in,
-    bool allow_decimation)
-    : n_rows(n_rows_in),
-      row_stride(aligned_row_stride(n_rows_in)),
-      use_trapezoid(use_trapezoid_in),
-      is_integer(!integer_mean_lut.empty()),
-      integer_unit(integer_unit_in),
-      widths(widths_in.begin(), widths_in.end()) {
-    validate_surrogate_widths(widths_in);
-    const SizeType num_filters = widths.size();
-    if (n_rows > SIZE_MAX / num_filters ||
-        raw_thresh_lut.size() != n_rows * num_filters ||
-        inv_sigma_lut.size() != n_rows * num_filters) {
-        throw std::invalid_argument(
-            "KadaneSurrogatePlan: raw_thresh_lut and inv_sigma_lut must have "
-            "n_rows * widths.size() entries");
-    }
-    if (is_integer && (integer_mean_lut.size() != n_rows * num_filters ||
-                       !is_finite_f64(integer_unit) || integer_unit <= 0.0)) {
-        throw std::invalid_argument(
-            "KadaneSurrogatePlan: invalid integer_mean_lut or integer_unit");
-    }
-
-    max_width = widths.back();
-
-    // Precompute O(1) width -> nearest bank filter & log-log bracket weights.
-    width_nearest_filter.assign(max_width + 1U, 0U);
-    width_bracket_lo.assign(max_width + 1U, 0U);
-    width_bracket_hi.assign(max_width + 1U, 0U);
-    width_log_lerp.assign(max_width + 1U, 0.0F);
-
-    SizeType cur_hi = 0;
-    for (uint32_t w = 1U; w <= max_width; ++w) {
-        while (cur_hi + 1 < num_filters && widths[cur_hi] < w) {
-            ++cur_hi;
-        }
-        if (w <= widths[0]) {
-            width_nearest_filter[w] = 0U;
-            width_bracket_lo[w]     = 0U;
-            width_bracket_hi[w]     = 0U;
-            width_log_lerp[w]       = 0.0F;
-        } else if (widths[cur_hi] == w) {
-            const auto idx          = static_cast<uint32_t>(cur_hi);
-            width_nearest_filter[w] = idx;
-            width_bracket_lo[w]     = idx;
-            width_bracket_hi[w]     = idx;
-            width_log_lerp[w]       = 0.0F;
-        } else {
-            const SizeType lo      = cur_hi - 1;
-            const uint32_t w_lo    = widths[lo];
-            const uint32_t w_hi    = widths[cur_hi];
-            const uint32_t dist_lo = w - w_lo;
-            const uint32_t dist_hi = w_hi - w;
-            width_nearest_filter[w] =
-                static_cast<uint32_t>(dist_lo <= dist_hi ? lo : cur_hi);
-            width_bracket_lo[w] = static_cast<uint32_t>(lo);
-            width_bracket_hi[w] = static_cast<uint32_t>(cur_hi);
-            const double log_num =
-                std::log(static_cast<double>(w) / static_cast<double>(w_lo));
-            const double log_den =
-                std::log(static_cast<double>(w_hi) / static_cast<double>(w_lo));
-            width_log_lerp[w] = static_cast<float>(log_num / log_den);
-        }
-    }
-
-    // Build effective rectangular boxcar inv_sigma table per row.
-    // When `use_trapezoid == false`, this copies `inv_sigma_lut` directly;
-    // when `use_trapezoid == true`, widths >= 3 are converted from {1, 2, 1}
-    // trapezoid sigma to rectangular subarray sigma so unweighted Kadane
-    // excursion sums evaluate unbiased S/N.
-    box_inv_sigma_lut.assign(n_rows * num_filters, 0.0F);
-    disabled_row.assign(n_rows, 1U);
-    if (is_integer) {
-        row_mean_1.assign(n_rows, 0.0);
-    }
-    const uint32_t we0 = use_trapezoid ? trapezoid_edge_width(widths[0]) : 0U;
-    const double g0 = we0 == 0U ? static_cast<double>(widths[0])
-                                : static_cast<double>(2U * (widths[0] - we0));
-
-    for (SizeType r = 0; r < n_rows; ++r) {
-        const auto row_thr =
-            raw_thresh_lut.subspan(r * num_filters, num_filters);
-        const auto row_inv =
-            inv_sigma_lut.subspan(r * num_filters, num_filters);
-        if (is_dead_row(row_thr) || !is_finite_f32(row_inv[0]) ||
-            row_inv[0] <= 0.0F) {
-            continue;
-        }
-        bool inv_valid = true;
-        for (const float inv : row_inv) {
-            if (!is_finite_f32(inv) || inv <= 0.0F) {
-                inv_valid = false;
-                break;
-            }
-        }
-        if (!inv_valid) {
-            continue;
-        }
-        disabled_row[r] = 0U;
-        if (is_integer) {
-            const double m1 = integer_mean_lut[r * num_filters] / g0;
-            if (!is_finite_f64(m1) || m1 < 0.0) {
-                throw std::invalid_argument(
-                    "KadaneSurrogatePlan: negative or non-finite integer mean");
-            }
-            row_mean_1[r] = m1;
-        }
-
-        const double w0_var_den =
-            we0 == 0U ? static_cast<double>(widths[0])
-                      : ((4.0 * static_cast<double>(widths[0])) -
-                         (6.0 * static_cast<double>(we0)));
-        const double sigma1_sq = w0_var_den / (static_cast<double>(row_inv[0]) *
-                                               static_cast<double>(row_inv[0]));
-        for (SizeType f = 0; f < num_filters; ++f) {
-            const uint32_t wf = widths[f];
-            const uint32_t we = use_trapezoid ? trapezoid_edge_width(wf) : 0U;
-            if (we == 0U) {
-                box_inv_sigma_lut[(r * num_filters) + f] = row_inv[f];
-                continue;
-            }
-            const auto wd          = static_cast<double>(wf);
-            const auto ed          = static_cast<double>(we);
-            const double trap_var  = 1.0 / (static_cast<double>(row_inv[f]) *
-                                            static_cast<double>(row_inv[f]));
-            const double white_den = (4.0 * wd) - (6.0 * ed);
-            const double rho_white = wd / white_den;
-            const double half_wt   = 2.0 * (wd - ed);
-            const double rho_smear = (wd * wd) / (half_wt * half_wt);
-            const double obs_ratio = trap_var / (sigma1_sq * white_den);
-            const double smear_den =
-                std::max(1.0e-9, ((half_wt * half_wt) / white_den) - 1.0);
-            const double alpha =
-                std::clamp((obs_ratio - 1.0) / smear_den, 0.0, 1.0);
-            const double rho_eff =
-                ((1.0 - alpha) * rho_white) + (alpha * rho_smear);
-            const double box_var = trap_var * rho_eff;
-            box_inv_sigma_lut[(r * num_filters) + f] =
-                static_cast<float>(1.0 / std::sqrt(box_var));
-        }
-    }
-
-    // Partition [1, max_width] into K <= 3 geometric width strips, enabling
-    // fused f=4 decimation on wide strips when max_width >= 16 &
-    // !use_trapezoid.
-    const bool use_decim =
-        allow_decimation && (max_width >= 16U) && !use_trapezoid;
-    has_decimated = use_decim;
-
-    if (max_width <= 8U) {
-        num_passes = 1;
-        passes[0]  = {.w_lo = 1U, .w_hi = max_width, .decimate_factor = 1U};
-    } else if (max_width <= 128U) {
-        num_passes       = 2;
-        uint32_t w_split = static_cast<uint32_t>(
-            std::llround(std::sqrt(static_cast<double>(max_width))));
-        if (use_decim) {
-            w_split = std::clamp<uint32_t>(w_split, 12U, 16U);
-            w_split = std::min<uint32_t>(w_split, max_width - 4U);
-        } else {
-            w_split = std::clamp<uint32_t>(w_split, 2U, max_width - 1U);
-        }
-        passes[0] = {.w_lo = 1U, .w_hi = w_split, .decimate_factor = 1U};
-        passes[1] = {.w_lo            = w_split + 1U,
-                     .w_hi            = max_width,
-                     .decimate_factor = use_decim ? 4U : 1U};
-    } else {
-        num_passes        = 3;
-        const auto w_d    = static_cast<double>(max_width);
-        uint32_t w_split1 = static_cast<uint32_t>(std::llround(std::cbrt(w_d)));
-        if (use_decim) {
-            w_split1 = std::max<uint32_t>(w_split1, 12U);
-        } else {
-            w_split1 = std::max<uint32_t>(w_split1, 4U);
-        }
-        uint32_t w_split2 =
-            static_cast<uint32_t>(std::llround(std::pow(w_d, 2.0 / 3.0)));
-        w_split2 =
-            std::clamp<uint32_t>(w_split2, w_split1 + 8U, max_width - 4U);
-        passes[0] = {.w_lo = 1U, .w_hi = w_split1, .decimate_factor = 1U};
-        passes[1] = {.w_lo            = w_split1 + 1U,
-                     .w_hi            = w_split2,
-                     .decimate_factor = use_decim ? 4U : 1U};
-        passes[2] = {.w_lo            = w_split2 + 1U,
-                     .w_hi            = max_width,
-                     .decimate_factor = use_decim ? 4U : 1U};
-    }
-
-    // Compute per-row strip-center tangent biases and pre-filter triggers.
-    bias.assign(num_passes * row_stride, 0.0F);
-    trigger.assign(num_passes * row_stride, std::numeric_limits<float>::max());
-
-    const double inv_unit = is_integer ? (1.0 / integer_unit) : 1.0;
-    IncrementalLowerHull hull;
-    std::vector<uint32_t> strip_widths;
-    strip_widths.reserve(num_filters + 3);
-
-    for (SizeType r = 0; r < n_rows; ++r) {
-        if (disabled_row[r] != 0U) {
-            continue;
-        }
-        const double detect_u =
-            static_cast<double>(raw_thresh_lut[r * num_filters]) *
-            static_cast<double>(inv_sigma_lut[r * num_filters]);
-        const double mu_1 = is_integer ? row_mean_1[r] : 0.0;
-
-        for (SizeType k = 0; k < num_passes; ++k) {
-            const auto& p = passes[k];
-            strip_widths.clear();
-            strip_widths.push_back(p.w_lo);
-            const auto w_mid = static_cast<uint32_t>(std::clamp<long long>(
-                std::llround(std::sqrt(static_cast<double>(p.w_lo) * p.w_hi)),
-                p.w_lo, p.w_hi));
-            strip_widths.push_back(w_mid);
-            for (const uint32_t wf : widths) {
-                if (wf > p.w_lo && wf < p.w_hi) {
-                    strip_widths.push_back(wf);
-                }
-            }
-            strip_widths.push_back(p.w_hi);
-            std::ranges::sort(strip_widths);
-            const auto dup = std::ranges::unique(strip_widths);
-            strip_widths.erase(dup.begin(), dup.end());
-
-            hull.reset(strip_widths.size());
-            for (const uint32_t w : strip_widths) {
-                const double inv_s =
-                    static_cast<double>(interpolate_inv_sigma(r, w));
-                const double thr_w = detect_u / inv_s;
-                hull.push(static_cast<double>(w), thr_w);
-            }
-            const double b_samp = hull.solve().bias;
-
-            double tau_strip = std::numeric_limits<double>::max();
-            for (const uint32_t w : strip_widths) {
-                const double inv_s =
-                    static_cast<double>(interpolate_inv_sigma(r, w));
-                const double thr_w = detect_u / inv_s;
-                tau_strip = std::min(tau_strip,
-                                     thr_w - (b_samp * static_cast<double>(w)));
-            }
-
-            const auto dec_d         = static_cast<double>(p.decimate_factor);
-            const double step_b      = (mu_1 + (b_samp * inv_unit)) * dec_d;
-            const double trig_factor = p.decimate_factor == 1U ? 0.80 : 0.65;
-            const double trig_val =
-                std::max(0.0, trig_factor * tau_strip * inv_unit);
-
-            bias[(k * row_stride) + r] = static_cast<float>(step_b);
-            trigger[(k * row_stride) + r] =
-                step_down_pos_f32(static_cast<float>(trig_val));
-        }
-    }
-}
-
-uint32_t
-KadaneSurrogatePlan::nearest_filter_idx(uint32_t width) const noexcept {
-    if (widths.empty() || width <= 1U) {
-        return 0U;
-    }
-    if (width >= max_width) {
-        return static_cast<uint32_t>(widths.size() - 1);
-    }
-    return width_nearest_filter[width];
-}
-
-float KadaneSurrogatePlan::interpolate_inv_sigma(
-    SizeType row, uint32_t width) const noexcept {
-    if (row >= n_rows || disabled_row[row] != 0U || width == 0U) {
-        return 0.0F;
-    }
-    const SizeType num_filters = widths.size();
-    const float* row_inv       = box_inv_sigma_lut.data() + (row * num_filters);
-    if (width < widths[0]) {
-        const float scale = surrogate_width_scale(static_cast<float>(widths[0]),
-                                                  static_cast<float>(width));
-        return row_inv[0] * scale;
-    }
-    if (width >= max_width) {
-        const float inv_max = row_inv[num_filters - 1];
-        if (width == max_width) {
-            return inv_max;
-        }
-        // Extrapolate wide excursions > max_width with asymptotic 1/sqrt(w)
-        // noise growth so uncapped excursions never overestimate S/N.
-        const float scale = surrogate_width_scale(static_cast<float>(max_width),
-                                                  static_cast<float>(width));
-        return inv_max * scale;
-    }
-    const uint32_t lo = width_bracket_lo[width];
-    const uint32_t hi = width_bracket_hi[width];
-    const float t     = width_log_lerp[width];
-    if (lo == hi || t <= 0.0F) {
-        return row_inv[lo];
-    }
-    const float inv_lo = row_inv[lo];
-    const float inv_hi = row_inv[hi];
-    return surrogate_log_lerp(inv_lo, inv_hi, t);
-}
-
-float KadaneSurrogatePlan::eval_surrogate_snr(
-    SizeType row,
-    double raw_sum,
-    uint32_t width,
-    uint32_t* out_filter_idx) const noexcept {
-    if (out_filter_idx != nullptr) {
-        *out_filter_idx = nearest_filter_idx(width);
-    }
-    if (row >= n_rows || disabled_row[row] != 0U || width == 0U) {
-        return 0.0F;
-    }
-    const float inv_s = interpolate_inv_sigma(row, width);
-    if (inv_s <= 0.0F) {
-        return 0.0F;
-    }
-    double signal = raw_sum;
-    if (is_integer) {
-        signal = (raw_sum - (row_mean_1[row] * static_cast<double>(width))) *
-                 integer_unit;
-    }
-    return static_cast<float>(signal * static_cast<double>(inv_s));
-}
-
-KadaneSurrogatePlan
-make_kadane_surrogate_plan(std::span<const uint32_t> widths,
-                           bool use_trapezoid,
-                           SizeType n_rows,
-                           std::span<const float> raw_thresh_lut,
-                           std::span<const float> inv_sigma_lut,
-                           std::span<const double> integer_mean_lut,
-                           double integer_unit,
-                           bool allow_decimation) {
-    return KadaneSurrogatePlan(widths, use_trapezoid, n_rows, raw_thresh_lut,
-                               inv_sigma_lut, integer_mean_lut, integer_unit,
-                               allow_decimation);
 }
 
 } // namespace dmt::kadane

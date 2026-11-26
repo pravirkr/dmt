@@ -212,7 +212,7 @@ void bind_ddmt(py::module_& mod) {
         plan : DDMTPlan, optional
             Pre-configured DDMT plan.
         nthreads : int, optional
-            Number of OpenMP worker threads (default 1).
+            OpenMP threads (CPU) or host-staging worker cap (GPU; default 1).
         nbits : int, optional
             Bit precision per sample (32 for float, or 1, 2, 4, 8, 16 for packed integer).
         kill_mask : array_like, optional
@@ -249,6 +249,10 @@ void bind_ddmt(py::module_& mod) {
         ``__cuda_array_interface__`` array on this instance's device)
         without a copy, asynchronously on ``stream``, as for
         :meth:`FDMT.execute`.
+
+        Transform methods release the GIL during C++/GPU execution; a single
+        instance holds mutable streaming history and staging buffers and is
+        not safe for concurrent calls from multiple threads.
         )doc");
     def_ddmt_inits<DDMT>(ddmt_cls);
     ddmt_cls
@@ -267,8 +271,9 @@ void bind_ddmt(py::module_& mod) {
             "DDMTMemoryUsage: bytes held now (see estimate_memory).")
         .def(
             "execute",
-            [](DDMT& ddmt,
-               const py::array_t<float, py::array::c_style>& waterfall) {
+            [](DDMT& ddmt, const py::array& waterfall_obj) {
+                const auto waterfall = require_contiguous_array<float>(
+                    waterfall_obj, "DDMT.execute", "float32");
                 const auto& plan = ddmt.get_plan();
                 const auto ndim  = waterfall.ndim();
                 if (ndim != 2 && ndim != 3) {
@@ -323,19 +328,19 @@ void bind_ddmt(py::module_& mod) {
                         : std::vector<py::ssize_t>{
                               static_cast<py::ssize_t>(dm_count),
                               static_cast<py::ssize_t>(nsamps_out)});
-                if (nsamps_out > 0) {
-                    ddmt.execute(
-                        std::span<const float>(waterfall.data(),
-                                               waterfall.size()),
-                        std::span<float>(dmt.mutable_data(), dmt.size()));
-                } else {
-                    ddmt.execute(std::span<const float>(waterfall.data(),
-                                                        waterfall.size()),
-                                 std::span<float>{});
+                const std::span<const float> in_span(waterfall.data(),
+                                                     waterfall.size());
+                const std::span<float> out_span =
+                    nsamps_out > 0
+                        ? std::span<float>(dmt.mutable_data(), dmt.size())
+                        : std::span<float>{};
+                {
+                    const py::gil_scoped_release release;
+                    ddmt.execute(in_span, out_span);
                 }
                 return dmt;
             },
-            "waterfall"_a,
+            "waterfall"_a.noconvert(),
             R"doc(
             Dedisperse a float32 waterfall of shape ``(nchans, nsamps)``, or
             ``(nbeams, nchans, nsamps)`` if this instance's nbeams > 1.
@@ -343,9 +348,10 @@ void bind_ddmt(py::module_& mod) {
             )doc")
         .def(
             "execute",
-            [](DDMT& ddmt,
-               const py::array_t<uint8_t, py::array::c_style>& waterfall_packed,
+            [](DDMT& ddmt, const py::array& waterfall_packed_obj,
                SizeType nsamps) {
+                const auto waterfall_packed = require_contiguous_array<uint8_t>(
+                    waterfall_packed_obj, "DDMT.execute", "uint8");
                 const auto& plan      = ddmt.get_plan();
                 const auto& plan_c    = plan.get_container();
                 const auto nsamps_out = ddmt.get_output_nsamps(nsamps);
@@ -363,21 +369,19 @@ void bind_ddmt(py::module_& mod) {
                         : std::vector<py::ssize_t>{
                               static_cast<py::ssize_t>(dm_count),
                               static_cast<py::ssize_t>(nsamps_out)});
-                if (nsamps_out > 0) {
-                    ddmt.execute(
-                        std::span<const uint8_t>(waterfall_packed.data(),
-                                                 waterfall_packed.size()),
-                        nsamps,
-                        std::span<int32_t>(dmt.mutable_data(), dmt.size()));
-                } else {
-                    ddmt.execute(
-                        std::span<const uint8_t>(waterfall_packed.data(),
-                                                 waterfall_packed.size()),
-                        nsamps, std::span<int32_t>{});
+                const std::span<const uint8_t> in_span(waterfall_packed.data(),
+                                                       waterfall_packed.size());
+                const std::span<int32_t> out_span =
+                    nsamps_out > 0
+                        ? std::span<int32_t>(dmt.mutable_data(), dmt.size())
+                        : std::span<int32_t>{};
+                {
+                    const py::gil_scoped_release release;
+                    ddmt.execute(in_span, nsamps, out_span);
                 }
                 return dmt;
             },
-            "waterfall_packed"_a, "nsamps"_a,
+            "waterfall_packed"_a.noconvert(), py::kw_only(), "nsamps"_a,
             R"doc(
             Dedisperse a channel-major packed integer waterfall of shape
             ``(nchans, row_bytes)``, or ``(nbeams, nchans, row_bytes)`` if
@@ -387,10 +391,12 @@ void bind_ddmt(py::module_& mod) {
             )doc")
         .def(
             "execute_time_major",
-            [](DDMT& ddmt,
-               const py::array_t<uint8_t, py::array::c_style>&
-                   filterbank_packed,
+            [](DDMT& ddmt, const py::array& filterbank_packed_obj,
                SizeType nsamps) {
+                const auto filterbank_packed =
+                    require_contiguous_array<uint8_t>(filterbank_packed_obj,
+                                                      "DDMT.execute_time_major",
+                                                      "uint8");
                 const auto& plan_c    = ddmt.get_plan().get_container();
                 const auto nsamps_out = ddmt.get_output_nsamps(nsamps);
                 const auto dm_count   = plan_c.dm_arr.size();
@@ -409,13 +415,17 @@ void bind_ddmt(py::module_& mod) {
                               static_cast<py::ssize_t>(nsamps_out)});
                 // Always called, even with no output yet: the block still
                 // feeds the stream history.
-                ddmt.execute_time_major(
-                    std::span<const uint8_t>(filterbank_packed.data(),
-                                             filterbank_packed.size()),
-                    nsamps, std::span<int32_t>(dmt.mutable_data(), dmt.size()));
+                const std::span<const uint8_t> in_span(
+                    filterbank_packed.data(), filterbank_packed.size());
+                const std::span<int32_t> out_span(dmt.mutable_data(),
+                                                  dmt.size());
+                {
+                    const py::gil_scoped_release release;
+                    ddmt.execute_time_major(in_span, nsamps, out_span);
+                }
                 return dmt;
             },
-            "filterbank_packed"_a, "nsamps"_a,
+            "filterbank_packed"_a.noconvert(), py::kw_only(), "nsamps"_a,
             R"doc(
             Dedisperse a time-major packed filterbank of shape
             ``(nsamps, samp_bytes)``, or ``(nbeams, nsamps, samp_bytes)`` if
@@ -475,7 +485,7 @@ void bind_ddmt(py::module_& mod) {
             -----
             Asynchronous on ``stream``, with the stream history kept on the
             device. The packed :meth:`execute` and
-            :meth:`execute_time_major` take ``(waterfall_packed, nsamps)``
+            :meth:`execute_time_major` take ``(waterfall_packed, nsamps=...)``
             uint8 device arrays the same way.
             )doc")
         .def(
@@ -488,7 +498,7 @@ void bind_ddmt(py::module_& mod) {
                         DeviceSpan<int32_t> dmt,
                         Stream s) { ddmt.execute(in, n, dmt, s); });
             },
-            "waterfall_packed"_a, "nsamps"_a, py::kw_only(),
+            "waterfall_packed"_a, py::kw_only(), "nsamps"_a,
             "out"_a = py::none(), "stream"_a = py::none(),
             "Packed analogue of the device-memory execute() (int32 output).")
         .def(
@@ -503,7 +513,7 @@ void bind_ddmt(py::module_& mod) {
                         DeviceSpan<int32_t> dmt,
                         Stream s) { ddmt.execute_time_major(in, n, dmt, s); });
             },
-            "filterbank_packed"_a, "nsamps"_a, py::kw_only(),
+            "filterbank_packed"_a, py::kw_only(), "nsamps"_a,
             "out"_a = py::none(), "stream"_a = py::none(),
             "Device-memory execute_time_major() (GPU backends, int32 output).")
         .def("set_gulp_size", &DDMT::set_gulp_size, "gulp_size"_a,
@@ -518,56 +528,41 @@ void bind_ddmt(py::module_& mod) {
         .def("history_state_size", &DDMT::history_state_size)
         .def("save_history",
              [](const DDMT& ddmt) -> py::object {
-                 const auto& plan = ddmt.get_plan();
-                 const auto sz    = ddmt.history_state_size();
-                 if (plan.get_nbits() == 32) {
-                     py::array_t<float, py::array::c_style> hist(
+                 const auto sz   = ddmt.history_state_size();
+                 const auto save = [&](auto tag) -> py::object {
+                     using T = decltype(tag);
+                     py::array_t<T, py::array::c_style> hist(
                          static_cast<py::ssize_t>(sz));
-                     ddmt.save_history(
-                         std::span<float>(hist.mutable_data(), hist.size()));
+                     const std::span<T> out(hist.mutable_data(), hist.size());
+                     {
+                         const py::gil_scoped_release release;
+                         ddmt.save_history(out);
+                     }
                      return hist;
-                 }
-                 py::array_t<uint8_t, py::array::c_style> hist(
-                     static_cast<py::ssize_t>(sz));
-                 ddmt.save_history(
-                     std::span<uint8_t>(hist.mutable_data(), hist.size()));
-                 return hist;
+                 };
+                 return ddmt.get_plan().get_nbits() == 32 ? save(float{})
+                                                          : save(uint8_t{});
              })
         .def(
             "load_history",
             [](DDMT& ddmt, const py::array& hist_obj) {
-                const auto& plan = ddmt.get_plan();
-                const auto nbits = plan.get_nbits();
-                // Validate the *actual* dtype before casting: py::array_t's
-                // implicit conversion would otherwise silently truncate e.g. a
-                // float32 array into uint8 instead of raising a clear error.
-                if (nbits == 32) {
-                    if (hist_obj.dtype().kind() != 'f' ||
-                        hist_obj.itemsize() != 4) {
-                        throw std::invalid_argument(fmt::format(
-                            "DDMT.load_history: plan nbits=32 expects a "
-                            "float32 array, got dtype '{}'",
-                            std::string(py::str(hist_obj.dtype()))));
-                    }
-                    auto hist =
-                        py::array_t<float, py::array::c_style>(hist_obj);
-                    ddmt.load_history(
-                        std::span<const float>(hist.data(), hist.size()));
+                // Exact dtype and C order, as every host input: plan nbits
+                // 32 keeps float32 history, packed plans uint8.
+                const auto load = [&](auto tag, const char* dtype_name) {
+                    using T         = decltype(tag);
+                    const auto hist = require_contiguous_array<T>(
+                        hist_obj, "DDMT.load_history", dtype_name);
+                    const std::span<const T> in(hist.data(), hist.size());
+                    const py::gil_scoped_release release;
+                    ddmt.load_history(in);
+                };
+                if (ddmt.get_plan().get_nbits() == 32) {
+                    load(float{}, "float32");
                 } else {
-                    if (hist_obj.dtype().kind() != 'u' ||
-                        hist_obj.itemsize() != 1) {
-                        throw std::invalid_argument(fmt::format(
-                            "DDMT.load_history: plan nbits={} expects a "
-                            "uint8 array, got dtype '{}'",
-                            nbits, std::string(py::str(hist_obj.dtype()))));
-                    }
-                    auto hist =
-                        py::array_t<uint8_t, py::array::c_style>(hist_obj);
-                    ddmt.load_history(
-                        std::span<const uint8_t>(hist.data(), hist.size()));
+                    load(uint8_t{}, "uint8");
                 }
             },
-            "history"_a)
+            py::arg("history").noconvert())
         .def(
             "save_history",
             [](const DDMT& ddmt, const DeviceArray& out,

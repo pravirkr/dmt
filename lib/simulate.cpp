@@ -21,7 +21,7 @@ std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
                                                            SizeType nsamps,
                                                            float f_min,
                                                            float f_max,
-                                                           SizeType dt,
+                                                           float dt,
                                                            float pulse_toa,
                                                            float amplitude) {
     if (nchans == 0 || nsamps == 0) {
@@ -36,18 +36,16 @@ std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
     for (SizeType ichan = 0; ichan < nchans; ++ichan) {
         const auto freq =
             f_min + (static_cast<float>(ichan) * foff) + foff_half;
-        const auto freq_min = freq - foff_half;
-        const auto freq_max = freq + foff_half;
-        const auto dt_start =
-            static_cast<float>(dt) * utils::cff(f_min, freq_min, f_min, f_max);
+        const auto freq_min    = freq - foff_half;
+        const auto freq_max    = freq + foff_half;
+        const auto dt_start    = dt * utils::cff(f_min, freq_min, f_min, f_max);
         const auto tstart      = pulse_toa - dt_start;
         const auto tstart_int  = static_cast<IndexType>(tstart);
         const auto tstart_frac = tstart - static_cast<float>(tstart_int);
 
-        const auto dt_sub    = static_cast<float>(dt) *
-                               utils::cff(freq_min, freq_max, f_min, f_max);
-        const auto tend      = tstart - dt_sub;
-        const auto tend_int  = static_cast<IndexType>(tend);
+        const auto dt_sub   = dt * utils::cff(freq_min, freq_max, f_min, f_max);
+        const auto tend     = tstart - dt_sub;
+        const auto tend_int = static_cast<IndexType>(tend);
         const auto tend_frac = 1.0F - (tend - static_cast<float>(tend_int));
 
         float* arr_chan_start = &arr[ichan * nsamps];
@@ -181,13 +179,16 @@ std::vector<uint8_t> pack_baseband(std::span<const ComplexType> voltages,
             fmt::format("pack_baseband: expected {} voltages, got {}",
                         2 * nsub * nsamps, voltages.size()));
     }
+    if (sub_begin > nsub || t_begin > nsamps) {
+        throw std::invalid_argument("pack_baseband: range out of bounds");
+    }
     if (sub_count == 0) {
         sub_count = nsub - sub_begin;
     }
     if (t_count == 0) {
         t_count = nsamps - t_begin;
     }
-    if (sub_begin + sub_count > nsub || t_begin + t_count > nsamps) {
+    if (sub_count > nsub - sub_begin || t_count > nsamps - t_begin) {
         throw std::invalid_argument("pack_baseband: range out of bounds");
     }
     const auto st    = baseband_strides(format, t_count, sub_count);

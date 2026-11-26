@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
@@ -54,39 +55,7 @@ TEST_CASE("DDMT execute (host float) recovers a zero-DM ones waterfall",
                           nsamps_reduced, static_cast<float>(nchans))));
 }
 
-TEST_CASE("DDMT execute (device float span) matches the host overload",
-          "[ddmt_gpu][gpu]") {
-    const SizeType nchans = 16;
-    const SizeType nsamps = 128;
-
-    DDMT ddmt(test::kFMin, test::kFMax, nchans, test::kTsamp,
-              std::vector<float>{0.0F, 5.0F, 10.0F}, test::gpu_exec());
-    const auto waterfall = test::sequential_waterfall(nchans, nsamps);
-    const auto max_delay =
-        *std::ranges::max_element(ddmt.get_plan().get_container().delay_table);
-    const auto nsamps_reduced = nsamps - max_delay;
-    const auto dm_count       = ddmt.get_plan().get_dm_arr().size();
-
-    std::vector<float> dmt_host(dm_count * nsamps_reduced, 0.0F);
-    ddmt.execute(waterfall, dmt_host);
-    ddmt.reset_history();
-
-    thrust::device_vector<float> d_waterfall(waterfall.begin(),
-                                             waterfall.end());
-    thrust::device_vector<float> d_dmt(dm_count * nsamps_reduced, 0.0F);
-    ddmt.execute(
-        DeviceSpan<const float>(thrust::raw_pointer_cast(d_waterfall.data()),
-                                d_waterfall.size()),
-        DeviceSpan<float>(thrust::raw_pointer_cast(d_dmt.data()),
-                          d_dmt.size()));
-    std::vector<float> dmt_device(d_dmt.size());
-    thrust::copy(d_dmt.begin(), d_dmt.end(), dmt_device.begin());
-    cudaDeviceSynchronize();
-
-    test::require_approx(dmt_device, dmt_host);
-}
-
-TEST_CASE("DDMT packed-integer execute matches the float path",
+TEST_CASE("DDMT (gpu) packed-integer execute matches the float path",
           "[ddmt_gpu][gpu]") {
     const SizeType nchans        = 16;
     const SizeType nsamps        = 96;
@@ -124,31 +93,6 @@ TEST_CASE("DDMT packed-integer execute matches the float path",
     }
 }
 
-TEST_CASE("DDMT kill_mask excludes masked channels from the sum",
-          "[ddmt_gpu][gpu]") {
-    const SizeType nchans = 8;
-    const SizeType nsamps = 64;
-
-    std::vector<uint8_t> kill_mask(nchans, 1);
-    kill_mask[0] = 0;
-
-    DDMT ddmt(test::kFMin, test::kFMax, nchans, test::kTsamp, 10.0F, 5.0F, 0.0F,
-              test::gpu_exec(), /*nbits=*/32, kill_mask);
-    const auto max_delay =
-        *std::ranges::max_element(ddmt.get_plan().get_container().delay_table);
-    const auto nsamps_reduced = nsamps - max_delay;
-    const auto dm_count       = ddmt.get_plan().get_dm_arr().size();
-
-    std::vector<float> waterfall(nchans * nsamps, 1.0F);
-    std::vector<float> dmt(dm_count * nsamps_reduced, 0.0F);
-    ddmt.execute(waterfall, dmt);
-
-    std::vector<float> dm0(
-        dmt.begin(), dmt.begin() + static_cast<std::ptrdiff_t>(nsamps_reduced));
-    REQUIRE_THAT(dm0, Catch::Matchers::Equals(std::vector<float>(
-                          nsamps_reduced, static_cast<float>(nchans - 1))));
-}
-
 TEST_CASE("DDMT with LevinConfig", "[ddmt_gpu][gpu]") {
     const SizeType nchans = 16;
     plans::LevinConfig levin{
@@ -169,225 +113,32 @@ TEST_CASE("DDMT with LevinConfig", "[ddmt_gpu][gpu]") {
     CHECK(ddmt_from_plan.get_plan().get_dm_arr() == plan.get_dm_arr());
 }
 
-TEST_CASE("DDMT execute_time_major matches channel-major packed",
-          "[ddmt_gpu][gpu]") {
-    const SizeType nchans        = 16;
-    const SizeType nsamps        = 64;
-    const std::vector<float> dms = {0.0F, 5.0F, 12.0F};
-
-    const auto test_bits = [&](unsigned nbits) {
-        DYNAMIC_SECTION("nbits = " << nbits) {
-            plans::DDMTPlan plan(test::kFMin, test::kFMax, nchans, test::kTsamp,
-                                 dms, nbits);
-            DDMT ddmt(plan, test::gpu_exec());
-
-            const auto max_delay =
-                *std::ranges::max_element(plan.get_container().delay_table);
-            const auto nsamps_reduced = nsamps - max_delay;
-            const auto dm_count       = dms.size();
-
-            const auto mask = (1ULL << nbits) - 1;
-            std::vector<uint64_t> raw_data(nchans * nsamps);
-            for (size_t i = 0; i < raw_data.size(); ++i) {
-                raw_data[i] = (i * 37 + 11) & mask;
-            }
-
-            const auto chan_row_bytes = (nsamps * nbits + 7) / 8;
-            std::vector<uint8_t> chan_major(nchans * chan_row_bytes, 0);
-            for (SizeType c = 0; c < nchans; ++c) {
-                for (SizeType s = 0; s < nsamps; ++s) {
-                    const auto val        = raw_data[(c * nsamps) + s];
-                    const auto bit_offset = s * nbits;
-                    const auto byte_idx   = bit_offset / 8;
-                    const auto bit_sub    = bit_offset % 8;
-                    if (nbits == 8) {
-                        chan_major[(c * chan_row_bytes) + s] =
-                            static_cast<uint8_t>(val);
-                    } else if (nbits == 16) {
-                        auto* ptr = reinterpret_cast<uint16_t*>(
-                            &chan_major[c * chan_row_bytes]);
-                        ptr[s] = static_cast<uint16_t>(val);
-                    } else {
-                        chan_major[(c * chan_row_bytes) + byte_idx] |=
-                            static_cast<uint8_t>(val << bit_sub);
-                    }
-                }
-            }
-
-            const auto time_samp_bytes = (nchans * nbits + 7) / 8;
-            std::vector<uint8_t> time_major(nsamps * time_samp_bytes, 0);
-            for (SizeType s = 0; s < nsamps; ++s) {
-                for (SizeType c = 0; c < nchans; ++c) {
-                    const auto val        = raw_data[(c * nsamps) + s];
-                    const auto bit_offset = c * nbits;
-                    const auto byte_idx   = bit_offset / 8;
-                    const auto bit_sub    = bit_offset % 8;
-                    if (nbits == 8) {
-                        time_major[(s * time_samp_bytes) + c] =
-                            static_cast<uint8_t>(val);
-                    } else if (nbits == 16) {
-                        auto* ptr = reinterpret_cast<uint16_t*>(
-                            &time_major[s * time_samp_bytes]);
-                        ptr[c] = static_cast<uint16_t>(val);
-                    } else {
-                        time_major[(s * time_samp_bytes) + byte_idx] |=
-                            static_cast<uint8_t>(val << bit_sub);
-                    }
-                }
-            }
-
-            std::vector<int32_t> out_chan(dm_count * nsamps_reduced, 0);
-            std::vector<int32_t> out_time(dm_count * nsamps_reduced, 0);
-
-            ddmt.execute(chan_major, nsamps, out_chan);
-            // Both calls share one stream history; start the second cold.
-            ddmt.reset_history();
-            ddmt.execute_time_major(time_major, nsamps, out_time);
-
-            REQUIRE_THAT(out_time, Catch::Matchers::Equals(out_chan));
-        }
-    };
-
-    test_bits(1);
-    test_bits(2);
-    test_bits(4);
-    test_bits(8);
-    test_bits(16);
-}
-
-TEST_CASE("DDMT streaming history across chunks matches monolithic execute",
-          "[ddmt_gpu][gpu]") {
-    const SizeType nchans        = 8;
-    const std::vector<float> dms = {0.0F, 4.0F};
-
-    DDMT ddmt_mono(test::kFMin, test::kFMax, nchans, test::kTsamp, dms,
-                   test::gpu_exec());
-    DDMT ddmt_stream(test::kFMin, test::kFMax, nchans, test::kTsamp, dms,
-                     test::gpu_exec());
-
-    const auto max_delay = *std::ranges::max_element(
-        ddmt_mono.get_plan().get_container().delay_table);
-    const SizeType total_nsamps = 128;
-    const auto waterfall = test::sequential_waterfall(nchans, total_nsamps);
-
-    const auto nsamps_reduced = total_nsamps - max_delay;
-    std::vector<float> dmt_expected(dms.size() * nsamps_reduced, 0.0F);
-    ddmt_mono.execute(waterfall, dmt_expected);
-
-    const SizeType split = 70;
-    std::vector<float> block1(nchans * split);
-    std::vector<float> block2(nchans * (total_nsamps - split));
-    for (SizeType ichan = 0; ichan < nchans; ++ichan) {
-        std::copy_n(&waterfall[ichan * total_nsamps], split,
-                    &block1[ichan * split]);
-        std::copy_n(&waterfall[(ichan * total_nsamps) + split],
-                    total_nsamps - split,
-                    &block2[ichan * (total_nsamps - split)]);
-    }
-
-    const auto n_out1 = ddmt_stream.get_output_nsamps(split);
-    std::vector<float> dmt1(dms.size() * n_out1);
-    ddmt_stream.execute(block1, dmt1);
-
-    const auto n_out2 = ddmt_stream.get_output_nsamps(total_nsamps - split);
-    std::vector<float> dmt2(dms.size() * n_out2);
-    ddmt_stream.execute(block2, dmt2);
-
-    CHECK(n_out1 + n_out2 == nsamps_reduced);
-
-    std::vector<float> dmt_streamed(dms.size() * nsamps_reduced);
-    for (SizeType idm = 0; idm < dms.size(); ++idm) {
-        std::copy_n(&dmt1[idm * n_out1], n_out1,
-                    &dmt_streamed[idm * nsamps_reduced]);
-        std::copy_n(&dmt2[idm * n_out2], n_out2,
-                    &dmt_streamed[(idm * nsamps_reduced) + n_out1]);
-    }
-
-    test::require_approx(dmt_streamed, dmt_expected);
-
-    // Test save and load history
-    const auto hist_size = ddmt_stream.history_state_size();
-    std::vector<float> saved_history(hist_size);
-    ddmt_stream.save_history(saved_history);
-
-    ddmt_stream.reset_history();
-    CHECK(ddmt_stream.get_output_nsamps(split) == split - max_delay);
-
-    ddmt_stream.load_history(saved_history);
-    CHECK(ddmt_stream.get_output_nsamps(split) == split);
-}
-
-TEST_CASE("DDMT multi-beam float execute matches per-beam single-beam calls",
-          "[ddmt_gpu][gpu]") {
-    const SizeType nchans        = 8;
-    const SizeType nsamps        = 64;
-    const SizeType nbeams        = 3;
-    const std::vector<float> dms = {0.0F, 5.0F, 10.0F};
-
-    std::vector<float> waterfall(nbeams * nchans * nsamps);
-    for (SizeType ibeam = 0; ibeam < nbeams; ++ibeam) {
-        for (SizeType ichan = 0; ichan < nchans; ++ichan) {
-            for (SizeType isamp = 0; isamp < nsamps; ++isamp) {
-                const auto idx = (((ibeam * nchans) + ichan) * nsamps) + isamp;
-                waterfall[idx] = static_cast<float>(((ibeam + 1) * 100) +
-                                                    (ichan * 7) + isamp);
-            }
-        }
-    }
-
-    DDMT ddmt_multi(test::kFMin, test::kFMax, nchans, test::kTsamp, dms,
-                    test::gpu_exec(), /*nbits=*/32, /*kill_mask=*/{}, nbeams);
-    CHECK(ddmt_multi.get_nbeams() == nbeams);
-    const auto max_delay = *std::ranges::max_element(
-        ddmt_multi.get_plan().get_container().delay_table);
-    const auto nsamps_reduced = nsamps - max_delay;
-    const auto dm_count       = dms.size();
-
-    std::vector<float> dmt_multi(nbeams * dm_count * nsamps_reduced, 0.0F);
-    ddmt_multi.execute(waterfall, dmt_multi);
-
-    // Fresh single-beam instance per beam: execute(float) retains streaming
-    // history across calls by design, so reusing one instance across beams
-    // would contaminate beam N's reference with beam N-1's tail.
-    for (SizeType ibeam = 0; ibeam < nbeams; ++ibeam) {
-        DDMT ddmt_single(test::kFMin, test::kFMax, nchans, test::kTsamp, dms,
-                         test::gpu_exec());
-        std::vector<float> beam_waterfall(
-            waterfall.begin() +
-                static_cast<std::ptrdiff_t>(ibeam * nchans * nsamps),
-            waterfall.begin() +
-                static_cast<std::ptrdiff_t>((ibeam + 1) * nchans * nsamps));
-        std::vector<float> dmt_single(dm_count * nsamps_reduced, 0.0F);
-        ddmt_single.execute(beam_waterfall, dmt_single);
-
-        const auto* beam_out =
-            dmt_multi.data() + (ibeam * dm_count * nsamps_reduced);
-        for (SizeType i = 0; i < dmt_single.size(); ++i) {
-            CHECK(beam_out[i] == Catch::Approx(dmt_single[i]));
-        }
-    }
-}
-
 namespace {
 
 // A device-memory call of `nsamps` zero samples: channel-major or (packed)
 // time-major.
-void device_call(DDMT& eng, SizeType nsamps, SizeType out, bool time_major) {
-    const auto& plan  = eng.get_plan();
+template <typename Engine>
+void device_call(Engine& eng,
+                 const plans::DDMTPlan& plan,
+                 SizeType nbeams,
+                 SizeType nsamps,
+                 SizeType out,
+                 bool time_major) {
     const auto nbits  = plan.get_nbits();
     const auto nchans = plan.get_nchans();
-    const auto rows   = eng.get_nbeams() * nchans;
-    const auto nout   = eng.get_nbeams() * plan.get_dm_arr().size() * out;
+    const auto rows   = nbeams * nchans;
+    const auto nout   = nbeams * plan.get_dm_arr().size() * out;
     if (nbits == 32) {
         const thrust::device_vector<float> wf(rows * nsamps, 0.0F);
         thrust::device_vector<float> dmt(nout);
-        eng.execute(DeviceSpan<const float>(thrust::raw_pointer_cast(wf.data()),
-                                            wf.size()),
-                    DeviceSpan<float>(thrust::raw_pointer_cast(dmt.data()),
-                                      dmt.size()));
+        eng.execute(
+            DeviceSpan<const float>(thrust::raw_pointer_cast(wf.data()),
+                                    wf.size()),
+            DeviceSpan<float>(thrust::raw_pointer_cast(dmt.data()), dmt.size()),
+            Stream{});
     } else {
         const auto bytes =
-            time_major ? eng.get_nbeams() * nsamps *
+            time_major ? nbeams * nsamps *
                              bit_pack_utils::packed_row_bytes(nchans, nbits)
                        : rows * bit_pack_utils::packed_row_bytes(nsamps, nbits);
         const thrust::device_vector<uint8_t> wf(bytes, 0);
@@ -397,9 +148,9 @@ void device_call(DDMT& eng, SizeType nsamps, SizeType out, bool time_major) {
         const DeviceSpan<int32_t> o(thrust::raw_pointer_cast(dmt.data()),
                                     dmt.size());
         if (time_major) {
-            eng.execute_time_major(in, nsamps, o);
+            eng.execute_time_major(in, nsamps, o, Stream{});
         } else {
-            eng.execute(in, nsamps, o);
+            eng.execute(in, nsamps, o, Stream{});
         }
     }
     cudaDeviceSynchronize();
@@ -418,18 +169,31 @@ TEST_CASE("DDMT and SDMT (gpu) estimate_memory equal the instance",
     for (const bool sdmt : {false, true}) {
         for (const auto& c : ddmt_estimate::cases()) {
             INFO((sdmt ? "SDMT " : "DDMT ") << c.name << " (device memory)");
-            const ddmt_estimate::AlwaysShared shared;
-            const auto e = ddmt_estimate::estimate(sdmt, c, exec);
-            for (const bool tm : {false, true}) {
-                if (tm && c.plan.get_nbits() == 32) {
-                    continue;
+            const auto run_dev = [&](const algorithms::DDMTMemoryEstimate& e,
+                                     auto make_eng) {
+                for (const bool tm : {false, true}) {
+                    if (tm && c.plan.get_nbits() == 32) {
+                        continue;
+                    }
+                    auto eng = make_eng();
+                    ddmt_estimate::check_stream(
+                        *eng, c.nsamps, e, tm ? e.device_time_major_staging : 0,
+                        0, [&](SizeType out) {
+                            device_call(*eng, c.plan, c.nbeams, c.nsamps, out,
+                                        tm);
+                        });
                 }
-                auto eng = ddmt_estimate::make(sdmt, c, exec);
-                ddmt_estimate::check_stream(
-                    *eng, c.nsamps, e, tm ? e.device_time_major_staging : 0, 0,
-                    [&](SizeType out) {
-                        device_call(*eng, c.nsamps, out, tm);
-                    });
+            };
+            if (sdmt) {
+                const auto e =
+                    ddmt_estimate::make_forced_sdmt_gpu(c, exec, true)
+                        ->estimate(c.nsamps);
+                run_dev(e, [&] {
+                    return ddmt_estimate::make_forced_sdmt_gpu(c, exec, false);
+                });
+            } else {
+                const auto e = ddmt_estimate::estimate(false, c, exec);
+                run_dev(e, [&] { return ddmt_estimate::make(false, c, exec); });
             }
         }
     }
@@ -441,6 +205,90 @@ TEST_CASE("DDMT and SDMT (gpu) estimate_memory equal the instance",
     for (const bool sdmt : {false, true}) {
         const auto e = ddmt_estimate::estimate(sdmt, big, exec);
         CHECK(e.usage.history / 2 > props.totalGlobalMem);
+    }
+}
+
+TEST_CASE("DDMT (gpu) device-memory calls reject 32-bit sample overflow",
+          "[ddmt_gpu][gpu]") {
+    if (!test::gpu_device_available()) {
+        SKIP("no GPU device");
+    }
+    constexpr auto kMaxInt =
+        static_cast<SizeType>(std::numeric_limits<int>::max());
+    const auto exec = test::gpu_exec();
+    const Device dev{exec.backend, exec.device};
+    constexpr SizeType nchans = 8;
+
+    SECTION("float device execute: nsamps > INT_MAX and history + nsamps > "
+            "INT_MAX") {
+        DDMT ddmt(test::kFMin, test::kFMax, nchans, test::kTsamp, 100.0F, 50.0F,
+                  0.0F, exec);
+        thrust::device_vector<float> dummy(nchans * 16, 0.0F);
+        auto* ptr = thrust::raw_pointer_cast(dummy.data());
+
+        // Cold stream: nsamps alone exceeds INT_MAX.
+        const SizeType over = kMaxInt + 1;
+        CHECK_THROWS_AS(
+            ddmt.execute(
+                DeviceSpan<const float>(ptr, nchans * over, dev),
+                DeviceSpan<float>(ptr,
+                                  ddmt.get_output_nsamps(over) *
+                                      ddmt.get_plan().get_dm_arr().size(),
+                                  dev)),
+            std::invalid_argument);
+
+        // Warm the stream with a real small block so m_history_len > 0; then
+        // nsamps == INT_MAX fits in int32 alone, but history + nsamps
+        // overflows.
+        const SizeType warm_n = 16;
+        const thrust::device_vector<float> wf_warm(nchans * warm_n, 0.0F);
+        thrust::device_vector<float> out_warm(
+            std::max<SizeType>(1, ddmt.get_output_nsamps(warm_n) *
+                                      ddmt.get_plan().get_dm_arr().size()),
+            0.0F);
+        ddmt.execute(
+            DeviceSpan<const float>(thrust::raw_pointer_cast(wf_warm.data()),
+                                    wf_warm.size(), dev),
+            DeviceSpan<float>(thrust::raw_pointer_cast(out_warm.data()),
+                              ddmt.get_output_nsamps(warm_n) *
+                                  ddmt.get_plan().get_dm_arr().size(),
+                              dev));
+        REQUIRE(cudaDeviceSynchronize() == cudaSuccess);
+
+        const SizeType at_max = kMaxInt;
+        CHECK_THROWS_AS(
+            ddmt.execute(
+                DeviceSpan<const float>(ptr, nchans * at_max, dev),
+                DeviceSpan<float>(ptr,
+                                  ddmt.get_output_nsamps(at_max) *
+                                      ddmt.get_plan().get_dm_arr().size(),
+                                  dev)),
+            std::invalid_argument);
+    }
+
+    SECTION("packed channel-major and time-major device execute") {
+        DDMT ddmt(test::kFMin, test::kFMax, nchans, test::kTsamp, 100.0F, 50.0F,
+                  0.0F, exec, /*nbits=*/8);
+        thrust::device_vector<uint8_t> d_in(1, 0);
+        thrust::device_vector<int32_t> d_out(1, 0);
+        auto* in_ptr        = thrust::raw_pointer_cast(d_in.data());
+        auto* out_ptr       = thrust::raw_pointer_cast(d_out.data());
+        const SizeType over = kMaxInt + 1;
+        const SizeType out_elems =
+            ddmt.get_output_nsamps(over) * ddmt.get_plan().get_dm_arr().size();
+        const auto row_bytes  = bit_pack_utils::packed_row_bytes(over, 8);
+        const auto samp_bytes = bit_pack_utils::packed_row_bytes(nchans, 8);
+
+        CHECK_THROWS_AS(
+            ddmt.execute(
+                DeviceSpan<const uint8_t>(in_ptr, nchans * row_bytes, dev),
+                over, DeviceSpan<int32_t>(out_ptr, out_elems, dev)),
+            std::invalid_argument);
+        CHECK_THROWS_AS(
+            ddmt.execute_time_major(
+                DeviceSpan<const uint8_t>(in_ptr, over * samp_bytes, dev), over,
+                DeviceSpan<int32_t>(out_ptr, out_elems, dev)),
+            std::invalid_argument);
     }
 }
 

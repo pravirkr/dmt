@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -31,21 +32,16 @@ namespace {
 // never wraps inside the point loop; the pads are folded back once. 16
 // complex floats keep the transformed part 64-byte aligned.
 constexpr SizeType kPad = 16;
-constexpr int kMaxWidth = 16;
+constexpr int kMaxWidth = 8;
 
 // GCC drops __attribute__((vector_size(N))) on an alias template when N
 // depends on the parameter, so kernel_vec_t<KP> becomes plain float and
 // vec[i] fails ("subscripted value is neither array nor pointer"). Literal
 // sizes in explicit specializations stay real vectors on GCC and Clang.
-// Only the two widths the spreader instantiates are provided.
 template <int KP> struct kernel_vec_type;
 
 template <> struct kernel_vec_type<8> {
     using type = float __attribute__((vector_size(32)));
-};
-
-template <> struct kernel_vec_type<16> {
-    using type = float __attribute__((vector_size(64)));
 };
 
 template <int KP> using kernel_vec_t = typename kernel_vec_type<KP>::type;
@@ -189,6 +185,10 @@ public:
         // on each cell, so the float Horner stays accurate, as in FINUFFT).
         m_deg        = m_w + 2;
         const int np = m_deg + 1;
+        if (np < 6 || np > 11) {
+            throw std::logic_error(fmt::format(
+                "NUFFT: unsupported kernel polynomial size {}", np));
+        }
         m_cheb.assign(static_cast<SizeType>(m_w * np), 0.0F);
         for (int k = 0; k < m_w; ++k) {
             std::vector<double> val(static_cast<SizeType>(np));
@@ -247,11 +247,10 @@ public:
             }
         }
         // Transposed [n][kp] copy, zero past w, for the per-point Horner.
-        m_kp = m_w <= 8 ? 8 : 16;
-        m_coef_t.assign(static_cast<SizeType>(np * m_kp), 0.0F);
+        m_coef_t.assign(static_cast<SizeType>(np * kMaxWidth), 0.0F);
         for (int k = 0; k < m_w; ++k) {
             for (int q = 0; q < np; ++q) {
-                m_coef_t[static_cast<SizeType>((q * m_kp) + k)] =
+                m_coef_t[static_cast<SizeType>((q * kMaxWidth) + k)] =
                     m_cheb[static_cast<SizeType>((k * np) + q)];
             }
         }
@@ -355,26 +354,15 @@ public:
     case n:                                                                    \
         spread_located<KP, n>(l0, u, ar, ai, np, g0, g1);                      \
         return;
-            DMT_NUFFT_NC(5)
             DMT_NUFFT_NC(6)
             DMT_NUFFT_NC(7)
             DMT_NUFFT_NC(8)
             DMT_NUFFT_NC(9)
             DMT_NUFFT_NC(10)
             DMT_NUFFT_NC(11)
-            DMT_NUFFT_NC(12)
-            DMT_NUFFT_NC(13)
-            DMT_NUFFT_NC(14)
-            DMT_NUFFT_NC(15)
-            DMT_NUFFT_NC(16)
-            DMT_NUFFT_NC(17)
-            DMT_NUFFT_NC(18)
-            DMT_NUFFT_NC(19)
-            DMT_NUFFT_NC(20)
-            DMT_NUFFT_NC(21)
 #undef DMT_NUFFT_NC
         default:
-            break;
+            std::abort();
         }
     }
 
@@ -398,11 +386,7 @@ public:
         std::fill_n(e0, 2 * ext_n, ComplexType{});
         auto* g0 = reinterpret_cast<float*>(e0 + kPad);
         auto* g1 = reinterpret_cast<float*>(e1 + kPad);
-        if (m_kp == 8) {
-            spread_located_nc<8>(l0, u, ar, ai, np, g0, g1);
-        } else {
-            spread_located_nc<16>(l0, u, ar, ai, np, g0, g1);
-        }
+        spread_located_nc<kMaxWidth>(l0, u, ar, ai, np, g0, g1);
         // Merge the copies, then fold the pads onto the periodic grid.
         auto* a       = reinterpret_cast<float*>(e0);
         const auto* b = reinterpret_cast<const float*>(e1);
@@ -442,8 +426,7 @@ public:
     int m_deg{};
     std::vector<float> m_cheb; // [w][deg + 1] monomial coefficients
     utils::FFTVector<float>
-        m_coef_t; // [deg + 1][kp], zero past w (64 B aligned)
-    int m_kp{8};
+        m_coef_t; // [deg + 1][kMaxWidth], zero past w (64 B aligned)
     double m_beta{};
     SizeType m_nf{};
     SizeType m_half{};
@@ -451,7 +434,7 @@ public:
     std::unique_ptr<utils::FFTWRowPlan> m_fft;
 };
 
-Type1Plan::Type1Plan(SizeType modes, double tol, int /*nthreads*/)
+Type1Plan::Type1Plan(SizeType modes, double tol)
     : m_impl(std::make_unique<Impl>(modes, tol)) {}
 Type1Plan::~Type1Plan()                                     = default;
 Type1Plan::Type1Plan(Type1Plan&& other) noexcept            = default;

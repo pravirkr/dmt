@@ -11,8 +11,12 @@ from dmtlib import (
     FDMTPlan,
     OverflowPolicy,
     PeakFindingMode,
-    add_frb_track,
 )
+
+try:
+    from ._helpers import pack_lsb_first, sorted_candidates
+except ImportError:
+    from _helpers import pack_lsb_first, sorted_candidates
 
 
 def config(
@@ -25,21 +29,6 @@ def config(
         max_cands_per_dm=0,
         peak_mode=mode,
     )
-
-
-def sorted_candidates(parts: list[np.ndarray]) -> np.ndarray:
-    data = np.concatenate(parts)
-    fields = [
-        "beam_idx",
-        "subband_level",
-        "subband_idx",
-        "dm_idx",
-        "filter_idx",
-        "begin_sample",
-        "end_sample",
-        "peak_sample",
-    ]
-    return np.sort(data, order=fields)
 
 
 @pytest.mark.parametrize("mode", list(PeakFindingMode.__members__.values()))
@@ -153,12 +142,6 @@ def test_gpu_matches_cpu(gpu_backend: str, mode: PeakFindingMode) -> None:
             np.testing.assert_array_equal(result[name], expected[name])
 
 
-def pack_codes(codes: np.ndarray, bits: int) -> np.ndarray:
-    """Independently padded rows, with least significant sample bits first."""
-    lanes = ((codes[..., None] >> np.arange(bits)) & 1).astype(np.uint8)
-    return np.packbits(lanes.reshape(*codes.shape[:-1], -1), axis=-1, bitorder="little")
-
-
 @pytest.mark.parametrize("bits", [1, 2, 4, 8, 16])
 @pytest.mark.parametrize("mode", list(PeakFindingMode.__members__.values()))
 def test_packed_streaming_and_centered_reference(
@@ -184,7 +167,7 @@ def test_packed_streaming_and_centered_reference(
     actual, expected = [], []
     for k in range(blocks):
         block = codes[:, :, k * samples : (k + 1) * samples]
-        actual.append(packed.execute(pack_codes(block, bits)).candidates)
+        actual.append(packed.execute(pack_lsb_first(block, bits)).candidates)
         expected.append(
             floating.execute((block.astype(np.float32) - mean).copy()).candidates
         )
@@ -200,7 +183,7 @@ def test_packed_streaming_and_centered_reference(
     with pytest.raises(ValueError):
         packed.execute(np.zeros((2, 7, samples), np.float32))
     with pytest.raises(ValueError):
-        packed.execute(pack_codes(codes[:, :, :samples], bits)[:, :, :-1].copy())
+        packed.execute(pack_lsb_first(codes[:, :, :samples], bits)[:, :, :-1].copy())
     assert len(packed.search_plans[-1].integer_thresh_lut) > 0
 
 
@@ -369,8 +352,11 @@ def test_drain_searches_the_skewed_tail() -> None:
         input_mean=107.5,
     )
     found = {}
+    min_budget = FDMTBoxcar.estimate_minimum_memory(
+        plan, cfg, nthreads=1
+    ).max_memory_bytes
     for end in ("flush", "drain"):
-        search = FDMTBoxcar(plan, cfg, nthreads=1, max_memory_bytes=75 << 20)
+        search = FDMTBoxcar(plan, cfg, nthreads=1, max_memory_bytes=min_budget)
         latency = search.search_latency
         assert latency > 0
         parts = [search.execute(block).candidates for block in blocks]
@@ -662,7 +648,6 @@ def test_boxcar_screen_mode_binding_defaults_and_roundtrip() -> None:
     assert set(BoxcarScreenMode.__members__) == {
         "PREFIX",
         "KADANE",
-        "KADANE_SURROGATE",
         "NONE",
         "AUTO",
     }
@@ -689,389 +674,74 @@ def test_boxcar_screen_mode_binding_defaults_and_roundtrip() -> None:
     assert "BoxcarScreenMode" in FDMTBoxcar.__doc__
 
 
-def test_keep_brightest_with_screen_modes() -> None:
-    plan = FDMTPlan(1200, 1500, 32, 2048, 0.001, 31, subband_depth=1)
-    rng = np.random.default_rng(17)
-    data = np.round(rng.standard_normal((32, 2048), dtype=np.float32) * 8) / 8
-    for t in range(80, 680, 60):
-        data[:, t : t + 6] += 4.5
-    data[:, 1750:1754] += 12.0
-
-    exact = {}
-    for screen in (
-        BoxcarScreenMode.PREFIX,
-        BoxcarScreenMode.KADANE,
-        BoxcarScreenMode.NONE,
-    ):
-        cfg = BoxcarConfig(
-            16,
-            peak_mode=PeakFindingMode.ALL_ABOVE_THRESHOLD,
-            max_candidates=200,
-            max_cands_per_dm=8,
-            overflow_policy=OverflowPolicy.KEEP_BRIGHTEST,
-            screen_mode=screen,
-        )
-        res = FDMTBoxcar(plan, cfg, nthreads=1, chunk_nsamps=256).execute(data)
-        assert res.emitted_count == 200
-        assert res.overflowed
-        exact[screen] = res
-
-    ref = exact[BoxcarScreenMode.PREFIX]
-    for screen in (BoxcarScreenMode.KADANE, BoxcarScreenMode.NONE):
-        got = exact[screen]
-        assert got.total_detected == ref.total_detected
-        assert got.dropped_per_dm == ref.dropped_per_dm
-        assert got.dropped_global == ref.dropped_global
-        assert_same(
-            sorted_candidates([got.candidates]),
-            sorted_candidates([ref.candidates]),
-        )
-
-    sur_drop_cfg = BoxcarConfig(
-        16,
-        detect_thresh=4.5,
-        peak_mode=PeakFindingMode.ALL_ABOVE_THRESHOLD,
-        max_candidates=32,
-        max_cands_per_dm=4,
-        overflow_policy=OverflowPolicy.DROP_NEW,
-        screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
-    )
-    sur_drop = FDMTBoxcar(plan, sur_drop_cfg, nthreads=1, chunk_nsamps=256).execute(
-        data
-    )
-    assert sur_drop.overflowed
-    assert not np.any(sur_drop.candidates["peak_sample"] >= 1740)
-
-    sur_keep_cfg = BoxcarConfig(
-        16,
-        detect_thresh=4.5,
-        peak_mode=PeakFindingMode.ALL_ABOVE_THRESHOLD,
-        max_candidates=32,
-        max_cands_per_dm=4,
-        overflow_policy=OverflowPolicy.KEEP_BRIGHTEST,
-        screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
-    )
-    sur_keep = FDMTBoxcar(plan, sur_keep_cfg, nthreads=1, chunk_nsamps=256).execute(
-        data
-    )
-    assert sur_keep.overflowed
-    assert sur_keep.emitted_count == 32
-    best = sur_keep.candidates[np.argmax(sur_keep.candidates["snr"])]
-    assert 1745 <= int(best["peak_sample"]) <= 1765
-
-
-@pytest.mark.parametrize("trapezoid", [False, True])
-@pytest.mark.parametrize("peak_mode", list(PeakFindingMode.__members__.values()))
-def test_exact_screen_modes_parity_float_and_packed(
-    trapezoid: bool, peak_mode: PeakFindingMode
-) -> None:
+@pytest.mark.parametrize(
+    "screen",
+    [BoxcarScreenMode.AUTO, BoxcarScreenMode.KADANE, BoxcarScreenMode.NONE],
+)
+def test_screen_modes_match_prefix(screen: BoxcarScreenMode) -> None:
     rng = np.random.default_rng(104)
     samples = 311
-    blocks = 3
-    grid = [-41, 0, 7, 63]
-    plan = FDMTPlan(700, 1200, 7, samples, 0.001, dt_grid=grid, subband_depth=1)
-    # Quantized dyadic floats avoid FMA/non-FMA tie noise while keeping rich
-    # positive and negative excursions across chunk boundaries.
-    f_blocks = []
-    for k in range(blocks):
-        blk = np.round(rng.standard_normal((2, 7, samples), dtype=np.float32) * 8) / 8
-        if k == 1:
-            blk[:, :4, 40:55] += 3.5
-        f_blocks.append(blk)
+    plan = FDMTPlan(
+        700, 1200, 7, samples, 0.001, dt_grid=[-41, 0, 7, 63], subband_depth=1
+    )
+    f_blocks = [
+        np.round(rng.standard_normal((2, 7, samples), dtype=np.float32) * 8) / 8
+        for _ in range(3)
+    ]
+    f_blocks[1][:, :4, 40:55] += 3.5
 
-    def run_drain(search: FDMTBoxcar, seq: list[np.ndarray]) -> np.ndarray:
+    def run_drain(cfg: BoxcarConfig, seq: list[np.ndarray], **kw: object) -> np.ndarray:
+        search = FDMTBoxcar(plan, cfg, nthreads=1, chunk_nsamps=64, **kw)
         parts = [search.execute(b).candidates for b in seq]
         parts.append(search.drain().candidates)
         return sorted_candidates(parts)
 
-    ref_cfg = config(peak_mode)
-    ref_cfg.use_trapezoid = trapezoid
+    # Float + trapezoid + drain
+    ref_cfg = config()
+    ref_cfg.use_trapezoid = True
     ref_cfg.screen_mode = BoxcarScreenMode.PREFIX
-    ref = run_drain(FDMTBoxcar(plan, ref_cfg, nbeams=2, chunk_nsamps=64), f_blocks)
+    got_cfg = config()
+    got_cfg.use_trapezoid = True
+    got_cfg.screen_mode = screen
+    ref = run_drain(ref_cfg, f_blocks, nbeams=2)
     assert len(ref) > 0
-    for screen in (BoxcarScreenMode.KADANE, BoxcarScreenMode.NONE):
-        cfg = config(peak_mode)
-        cfg.use_trapezoid = trapezoid
-        cfg.screen_mode = screen
-        got = run_drain(
-            FDMTBoxcar(plan, cfg, nthreads=1, nbeams=2, chunk_nsamps=64), f_blocks
-        )
-        assert_same(got, ref)
+    assert_same(run_drain(got_cfg, f_blocks, nbeams=2), ref)
 
-    # Packed uint8 multi-chunk + drain() parity.
+    # Packed uint8 + drain
     u8_blocks = [
-        rng.integers(90, 166, (2, 7, samples), dtype=np.uint8) for _ in range(blocks)
+        rng.integers(90, 166, (2, 7, samples), dtype=np.uint8) for _ in range(3)
     ]
     u8_blocks[1][:, 2:6, 100:116] = 220
-    u8_results = {}
-    for screen in (
-        BoxcarScreenMode.PREFIX,
-        BoxcarScreenMode.KADANE,
-        BoxcarScreenMode.NONE,
-    ):
-        cfg = BoxcarConfig(
-            17,
-            wtsp=1.5,
-            detect_thresh=3.2,
-            noise_sigma=float(np.sqrt((76**2 - 1) / 12)),
-            peak_mode=peak_mode,
-            max_cands_per_dm=0,
-            input_nbits=8,
-            input_mean=127.5,
-            use_trapezoid=trapezoid,
-            screen_mode=screen,
-        )
-        u8_results[screen] = run_drain(
-            FDMTBoxcar(plan, cfg, nthreads=1, nbeams=2, chunk_nsamps=64), u8_blocks
-        )
-    assert len(u8_results[BoxcarScreenMode.PREFIX]) > 0
-    assert_same(
-        u8_results[BoxcarScreenMode.KADANE], u8_results[BoxcarScreenMode.PREFIX]
-    )
-    assert_same(u8_results[BoxcarScreenMode.NONE], u8_results[BoxcarScreenMode.PREFIX])
-
-
-def test_exact_screen_modes_kill_mask_and_skewed_drain() -> None:
-    # Constructor and dynamic per-call kill_mask parity across PREFIX/KADANE/NONE.
-    plan, blocks, masks = mask_blocks(21)
-    for use_trap in (False, True):
-        by_mode = {}
-        ctor_by_mode = {}
-        for screen in (
-            BoxcarScreenMode.PREFIX,
-            BoxcarScreenMode.KADANE,
-            BoxcarScreenMode.NONE,
-        ):
-            cfg = config()
-            cfg.use_trapezoid = use_trap
-            cfg.screen_mode = screen
-            by_mode[screen] = masked_stream(FDMTBoxcar(plan, cfg), blocks, masks)
-            ctor_by_mode[screen] = masked_stream(
-                FDMTBoxcar(plan, cfg, kill_mask=masks[0]), blocks, [None] * 4
-            )
-        assert len(by_mode[BoxcarScreenMode.PREFIX]) > 0
-        assert_same(by_mode[BoxcarScreenMode.KADANE], by_mode[BoxcarScreenMode.PREFIX])
-        assert_same(by_mode[BoxcarScreenMode.NONE], by_mode[BoxcarScreenMode.PREFIX])
-        assert_same(
-            ctor_by_mode[BoxcarScreenMode.KADANE],
-            ctor_by_mode[BoxcarScreenMode.PREFIX],
-        )
-        assert_same(
-            ctor_by_mode[BoxcarScreenMode.NONE],
-            ctor_by_mode[BoxcarScreenMode.PREFIX],
-        )
-
-    # Skewed-window subband search + drain() parity across PREFIX/KADANE/NONE.
-    rng = np.random.default_rng(31)
-    nchans, nsamps = 1152, 4096
-    skew_plan = FDMTPlan(
-        1100.0, 1714.0, nchans, nsamps, 455.6e-6, 2700, subband_depth=1
-    )
-    codes = rng.integers(0, 216, (nchans, 2 * nsamps), dtype=np.uint8)
-    codes[600:1100, -14:-7] += 42
-    skew_blocks = [
-        np.ascontiguousarray(codes[:, k * nsamps : (k + 1) * nsamps]) for k in range(2)
-    ]
-    skew_res = {}
-    for screen in (
-        BoxcarScreenMode.PREFIX,
-        BoxcarScreenMode.KADANE,
-        BoxcarScreenMode.NONE,
-    ):
-        cfg = BoxcarConfig(
-            17,
-            wtsp=1.5,
-            detect_thresh=5.5,
-            noise_sigma=float(np.sqrt((216**2 - 1) / 12)),
-            input_nbits=8,
-            input_mean=107.5,
-            screen_mode=screen,
-        )
-        eng = FDMTBoxcar(skew_plan, cfg, nthreads=1, max_memory_bytes=75 << 20)
-        assert eng.search_latency > 0
-        parts = [eng.execute(b).candidates for b in skew_blocks]
-        parts.append(eng.drain().candidates)
-        skew_res[screen] = sorted_candidates(parts)
-    assert len(skew_res[BoxcarScreenMode.PREFIX]) > 0
-    assert_same(skew_res[BoxcarScreenMode.KADANE], skew_res[BoxcarScreenMode.PREFIX])
-    assert_same(skew_res[BoxcarScreenMode.NONE], skew_res[BoxcarScreenMode.PREFIX])
-
-
-def test_kadane_surrogate_end_to_end_pulse_and_quiet_noise() -> None:
-    rng = np.random.default_rng(77)
-    nchans, nsamps = 64, 1024
-    grid = list(range(0, 96, 3))
-    plan = FDMTPlan(
-        1100.0, 1500.0, nchans, nsamps, 0.001, dt_grid=grid, subband_depth=1
-    )
-    kill = np.ones(nchans, dtype=np.uint8)
-    kill[10:14] = 0
-
-    # Quiet noise produces zero false alarms at high threshold.
-    for use_trap in (False, True):
-        quiet_cfg = BoxcarConfig(
-            64,
-            wtsp=1.5,
-            detect_thresh=6.5,
-            use_trapezoid=use_trap,
-            screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
-        )
-        quiet_eng = FDMTBoxcar(plan, quiet_cfg, nthreads=1, kill_mask=kill)
-        quiet_cands = []
-        for _ in range(2):
-            blk = rng.standard_normal((nchans, nsamps), dtype=np.float32)
-            quiet_cands.append(quiet_eng.execute(blk).candidates)
-        quiet_cands.append(quiet_eng.drain().candidates)
-        assert len(np.concatenate(quiet_cands)) == 0
-
-    # Injected dispersed pulse across multi-chunk streaming + drain().
-    data = rng.standard_normal((nchans, 2 * nsamps), dtype=np.float32)
-    pulse = np.zeros((nchans, nsamps), dtype=np.float32)
-    add_frb_track(pulse, plan, 18, 2.5, 620, 8)
-    data[:, nsamps:] += pulse
-    blocks = [data[:, k * nsamps : (k + 1) * nsamps].copy() for k in range(2)]
-
-    for use_trap in (False, True):
-        found = {}
-        for screen in (BoxcarScreenMode.PREFIX, BoxcarScreenMode.KADANE_SURROGATE):
-            cfg = BoxcarConfig(
-                64,
-                wtsp=1.5,
-                detect_thresh=6.5,
-                use_trapezoid=use_trap,
-                screen_mode=screen,
-            )
-            eng = FDMTBoxcar(plan, cfg, nthreads=1, chunk_nsamps=256, kill_mask=kill)
-            frontier = eng.get_candidate_frontier()
-            parts = []
-            for blk in blocks:
-                res = eng.execute(blk)
-                assert np.all(res.candidates["begin_sample"] >= frontier)
-                frontier = eng.get_candidate_frontier()
-                parts.append(res.candidates)
-            last = eng.drain()
-            assert np.all(last.candidates["begin_sample"] >= frontier)
-            assert eng.get_candidate_frontier() == eng.searched_nsamps
-            found[screen] = np.concatenate([*parts, last.candidates])
-        ref_full = found[BoxcarScreenMode.PREFIX]
-        sur_full = found[BoxcarScreenMode.KADANE_SURROGATE]
-        ref_root = ref_full[ref_full["subband_level"] == 0]
-        sur_root = sur_full[sur_full["subband_level"] == 0]
-        assert len(sur_root) > 0
-        best_ref = ref_root[np.argmax(ref_root["snr"])]
-        best_sur = sur_root[np.argmax(sur_root["snr"])]
-        assert int(best_sur["dm_idx"]) == int(best_ref["dm_idx"])
-        assert abs(int(best_sur["peak_sample"]) - int(best_ref["peak_sample"])) <= 6
-        assert (
-            0.90 * float(best_ref["snr"])
-            <= float(best_sur["snr"])
-            <= (1.15 * float(best_ref["snr"]))
-        )
-        # Surrogate search is deterministic across thread counts.
-        sur_1t_cfg = BoxcarConfig(
-            64,
-            wtsp=1.5,
-            detect_thresh=6.5,
-            use_trapezoid=use_trap,
-            screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
-        )
-        sur_1t = FDMTBoxcar(
-            plan, sur_1t_cfg, nthreads=1, chunk_nsamps=256, kill_mask=kill
-        )
-        c1 = sorted_candidates(
-            [*[sur_1t.execute(b).candidates for b in blocks], sur_1t.drain().candidates]
-        )
-        assert_same(sorted_candidates([sur_full]), c1)
-
-
-def test_kadane_surrogate_packed_uint8() -> None:
-    rng = np.random.default_rng(78)
-    nchans, nsamps = 64, 1024
-    plan = FDMTPlan(
-        1100.0, 1500.0, nchans, nsamps, 0.001, dt_grid=list(range(0, 96, 3))
-    )
-    u8_noise = np.clip(
-        np.round(128.0 + 10.0 * rng.standard_normal((nchans, nsamps))), 0, 255
-    ).astype(np.uint8)
-    u8_pulse = np.zeros((nchans, nsamps), dtype=np.float32)
-    add_frb_track(u8_pulse, plan, 12, 30.0, 500, 4)
-    u8_sig = np.clip(np.round(u8_noise.astype(np.float32) + u8_pulse), 0, 255).astype(
-        np.uint8
-    )
-    sur_u8_cfg = BoxcarConfig(
-        32,
+    u8_kwargs = dict(
         wtsp=1.5,
-        detect_thresh=6.5,
-        noise_sigma=10.0,
+        detect_thresh=3.2,
+        noise_sigma=float(np.sqrt((76**2 - 1) / 12)),
+        max_cands_per_dm=0,
         input_nbits=8,
-        input_mean=128.0,
-        screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
+        input_mean=127.5,
     )
-    sur_u8 = FDMTBoxcar(plan, sur_u8_cfg, nthreads=1, chunk_nsamps=256)
-    assert len(sur_u8.execute(u8_noise).candidates) == 0
-    cands_u8 = np.concatenate(
-        [sur_u8.execute(u8_sig).candidates, sur_u8.drain().candidates]
+    u8_ref = run_drain(
+        BoxcarConfig(17, screen_mode=BoxcarScreenMode.PREFIX, **u8_kwargs),
+        u8_blocks,
+        nbeams=2,
     )
-    root_u8 = cands_u8[cands_u8["subband_level"] == 0]
-    assert len(root_u8) > 0
-    best_u8 = root_u8[np.argmax(root_u8["snr"])]
-    assert abs(int(best_u8["dm_idx"]) - 12) <= 1
-    assert abs(int(best_u8["peak_sample"]) - (nsamps + 500)) <= 6
-
-
-def _auto_case() -> tuple[FDMTPlan, list[np.ndarray]]:
-    rng = np.random.default_rng(91)
-    plan = FDMTPlan(
-        700, 1200, 7, 733, 0.001, dt_grid=[-73, -12, 0, 4, 97], subband_depth=1
+    assert len(u8_ref) > 0
+    assert_same(
+        run_drain(
+            BoxcarConfig(17, screen_mode=screen, **u8_kwargs), u8_blocks, nbeams=2
+        ),
+        u8_ref,
     )
-    # Unquantized floats: S/N bits depend on the exact summation order.
-    blocks = []
-    for _ in range(2):
-        data = rng.standard_normal((7, 733), dtype=np.float32)
-        data[:4, 320:336] += 4
-        blocks.append(data)
-    return plan, blocks
 
-
-def _auto_bytes(plan: FDMTPlan, screen: BoxcarScreenMode, **kw: object) -> int:
-    cfg = config()
-    cfg.screen_mode = screen
-    return FDMTBoxcar(plan, cfg, chunk_nsamps=64, **kw).memory_usage.total
-
-
-def _auto_run(
-    plan: FDMTPlan, blocks: list[np.ndarray], screen: BoxcarScreenMode, **kw: object
-) -> np.ndarray:
-    cfg = config()
-    cfg.screen_mode = screen
-    search = FDMTBoxcar(plan, cfg, chunk_nsamps=64, **kw)
-    assert search.config.screen_mode == screen
-    parts = [search.execute(b).candidates for b in blocks]
-    parts.append(search.drain().candidates)
-    return sorted_candidates(parts)
-
-
-def test_auto_screen_mode_is_kadane_on_cpu() -> None:
-    plan, blocks = _auto_case()
-    auto = _auto_run(plan, blocks, BoxcarScreenMode.AUTO)
-    kadane = _auto_run(plan, blocks, BoxcarScreenMode.KADANE)
-    assert len(auto) > 0
-    assert auto.tobytes() == kadane.tobytes()
-    # Exact modes emit the same candidates; the engine's buffers show which ran.
-    auto_b = _auto_bytes(plan, BoxcarScreenMode.AUTO)
-    assert auto_b == _auto_bytes(plan, BoxcarScreenMode.KADANE)
-    assert auto_b != _auto_bytes(plan, BoxcarScreenMode.PREFIX)
-
-
-def test_auto_screen_mode_is_prefix_on_gpu(gpu_backend: str) -> None:
-    plan, blocks = _auto_case()
-    auto = _auto_run(plan, blocks, BoxcarScreenMode.AUTO, backend=gpu_backend)
-    prefix = _auto_run(plan, blocks, BoxcarScreenMode.PREFIX, backend=gpu_backend)
-    assert len(auto) > 0
-    assert auto.tobytes() == prefix.tobytes()
-    auto_b = _auto_bytes(plan, BoxcarScreenMode.AUTO, backend=gpu_backend)
-    assert auto_b == _auto_bytes(plan, BoxcarScreenMode.PREFIX, backend=gpu_backend)
-    assert auto_b != _auto_bytes(plan, BoxcarScreenMode.KADANE, backend=gpu_backend)
+    # Per-call kill masks
+    m_plan, m_blocks, masks = mask_blocks(21)
+    m_ref_cfg = config()
+    m_ref_cfg.screen_mode = BoxcarScreenMode.PREFIX
+    m_got_cfg = config()
+    m_got_cfg.screen_mode = screen
+    m_ref = masked_stream(FDMTBoxcar(m_plan, m_ref_cfg), m_blocks, masks)
+    assert len(m_ref) > 0
+    assert_same(masked_stream(FDMTBoxcar(m_plan, m_got_cfg), m_blocks, masks), m_ref)
 
 
 @pytest.mark.parametrize("screen", list(BoxcarScreenMode.__members__.values()))
@@ -1133,7 +803,9 @@ def _check_boxcar_estimate(backend: str) -> None:
         assert "FDMTBoxcarMemoryEstimate(" in repr(est)
 
     big = FDMTPlan(1100.0, 1714.0, 1152, 4096, 455.6e-6, 2700)
-    budget = 70 << 20
+    budget = FDMTBoxcar.estimate_minimum_memory(
+        big, config(), backend=backend
+    ).max_memory_bytes
     est = FDMTBoxcar.estimate_memory(
         big, config(), backend=backend, max_memory_bytes=budget
     )

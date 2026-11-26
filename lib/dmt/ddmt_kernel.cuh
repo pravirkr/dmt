@@ -5,6 +5,7 @@
 #include "dmt/common/types.hpp"
 
 #include "dmt/bit_pack_utils.hpp"
+#include "dmt/device_macros.hpp"
 
 /**
  * @file ddmt_kernel.cuh
@@ -17,8 +18,8 @@
  * into one combined buffer.
  *
  * Samples are summed per output in ascending channel order starting from
- * zero, exactly as the CPU engine does, so float results are bitwise
- * identical across backends and kernels, and integer results are exact.
+ * zero: integer results are exact, and float results agree across backends
+ * and kernels within floating-point rounding.
  */
 
 namespace dmt::algorithms::ddmt_gpu {

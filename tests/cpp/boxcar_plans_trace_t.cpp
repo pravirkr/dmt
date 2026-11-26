@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include "dmt/boxcar.hpp"
 #include "dmt/fdmt_box_weights.hpp"
@@ -215,4 +216,37 @@ DMT_SIZED_TEST_CASE("make_boxcar_plans equals a per-row trace of the FDMT tree",
             }
         }
     }
+}
+
+TEST_CASE("Trapezoidal boxcar variance matches discrete convolution and "
+          "width screen groups are formed",
+          "[boxcar][trapezoid][plans][cpu]") {
+    using namespace algorithms::detail;
+    for (SizeType len :
+         {SizeType{1}, SizeType{2}, SizeType{3}, SizeType{5}, SizeType{8}}) {
+        for (uint32_t width : {1U, 2U, 3U, 4U, 5U, 8U, 12U, 16U, 32U}) {
+            const uint32_t w_edge = trapezoid_edge_width(width);
+            std::vector<double> filt(width, 1.0);
+            for (uint32_t k = w_edge; k < width - w_edge; ++k) {
+                filt[k] = w_edge > 0 ? 2.0 : 1.0;
+            }
+            const SizeType conv_len = len + width - 1;
+            double exact_var        = 0.0;
+            for (SizeType n = 0; n < conv_len; ++n) {
+                double c = 0.0;
+                for (SizeType i = 0; i < len; ++i) {
+                    const SizeType j = n - i;
+                    if (n >= i && j < width) {
+                        c += 1.25 * filt[j];
+                    }
+                }
+                exact_var += c * c;
+            }
+            CHECK_THAT(fdmt_trapezoid_variance(len, width, w_edge, 1.25),
+                       Catch::Matchers::WithinRel(exact_var, 1e-12));
+        }
+    }
+    REQUIRE_FALSE(
+        boxcar_screen_groups(plans::generate_box_width_trials(48, 1.0F), false)
+            .empty());
 }

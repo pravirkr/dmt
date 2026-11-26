@@ -16,8 +16,8 @@ reports each differing key and exits non-zero on any mismatch beyond `--tol`
 (absolute), or when the key sets differ. Across backends, exclude the keys
 that differ by design: the skewed-window state (`--exclude skew/`, the GPU
 runs its direct path and the saved state is backend-specific), the
-float-input FDMTBoxcar `snr` fields and the `kKadaneSurrogate` `snr`, which
-differ by rounding, and `boxcar_x/fft_boxcar/` (float FFT sums).
+float-input FDMTBoxcar `snr` fields, which differ by rounding, and
+`boxcar_x/fft_boxcar/` (float FFT sums).
 """
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ def _fdmt_packed(out: dict, backend: str, rng: np.random.Generator) -> None:
                 int_tree=int_tree,
                 backend=backend,
             )
-            out[f"fdmt/packed{nbits}/i{int(int_tree)}"] = f.execute(packed, nbits)
+            out[f"fdmt/packed{nbits}/i{int(int_tree)}"] = f.execute(packed, nbits=nbits)
 
 
 def _fdmt_stepper(out: dict, backend: str, data: np.ndarray) -> None:
@@ -118,7 +118,7 @@ def _ddmt_packed(out: dict, backend: str, rng: np.random.Generator) -> None:
         d = dmtlib.DDMT(
             F_MIN, F_MAX, nchans, TSAMP, 100.0, 1.0, nbits=nbits, backend=backend
         )
-        out[f"ddmt/packed{nbits}"] = d.execute(_pack(values, nbits), nsamps)
+        out[f"ddmt/packed{nbits}"] = d.execute(_pack(values, nbits), nsamps=nsamps)
 
 
 def _fft(out: dict, backend: str, data: np.ndarray) -> None:
@@ -274,7 +274,7 @@ def _fdmt_boxcar(out: dict, backend: str) -> None:
     out["fdmt_boxcar/overflow/counts"] = np.asarray(counts, dtype=np.uint64)
 
 
-def _boxcar_features(out: dict, backend: str) -> None:
+def _boxcar_features(out: dict, backend: str) -> None:  # noqa: PLR0915
     """FDMTBoxcar options added after 0.8.0, on integer input (exact sums).
 
     Every screen mode on a screened configuration (wtsp 1, blocks of several
@@ -304,7 +304,6 @@ def _boxcar_features(out: dict, backend: str) -> None:
         "prefix": dmtlib.BoxcarScreenMode.PREFIX,
         "kadane": dmtlib.BoxcarScreenMode.KADANE,
         "none": dmtlib.BoxcarScreenMode.NONE,
-        "surrogate": dmtlib.BoxcarScreenMode.KADANE_SURROGATE,
     }
     plan = dmtlib.FDMTPlan(F_MIN, F_MAX, nchans, nsamps, TSAMP, 96, subband_depth=1)
     for name, screen in screens.items():
@@ -430,7 +429,9 @@ def _skewed(out: dict, backend: str) -> None:
     codes = rng.integers(0, 216, size=(nchans, nsamps * nblocks), dtype=np.int32)
     codes[200:900, 5000:5006] += 40
     plan = dmtlib.FDMTPlan(1100.0, 1714.0, nchans, nsamps, 455.6e-6, 2700)
-    budget = 30 << 20
+    # CPU needs <30 MiB on the skewed path; CUDA's direct path holds 38.4 MiB
+    # with its full tree history allocated upfront (chunk=256).
+    budget = (30 if backend == "cpu" else 40) << 20
     f = dmtlib.FDMT(plan, max_memory_bytes=budget, backend=backend)
     for k in range(2):
         block = codes[:, k * nsamps : (k + 1) * nsamps].astype(np.float32)
@@ -439,7 +440,7 @@ def _skewed(out: dict, backend: str) -> None:
     f = dmtlib.FDMT(plan, max_memory_bytes=budget, backend=backend)
     for k in range(2):
         block = codes[:, k * nsamps : (k + 1) * nsamps].astype(np.uint8)
-        out[f"skew/fdmt/u8/block{k}"] = f.execute(block, 8)
+        out[f"skew/fdmt/u8/block{k}"] = f.execute(block, nbits=8)
     out["skew/fdmt/u8/history"] = f.save_history()
 
     sub = dmtlib.FDMTPlan(

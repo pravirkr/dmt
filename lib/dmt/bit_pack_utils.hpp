@@ -3,10 +3,15 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <stdexcept>
+#include <string>
 #include <type_traits>
 
 #include "dmt/common/types.hpp"
+
+#include "dmt/device_macros.hpp"
 
 namespace dmt::bit_pack_utils {
 
@@ -158,6 +163,49 @@ constexpr uint32_t max_sample_value(SizeType nbits) noexcept {
     return (1U << nbits) - 1U;
 }
 
+/** @brief True when @p nbits is one of the packed integer widths (1, 2, 4, 8,
+ * 16). */
+constexpr bool is_packed_width(SizeType nbits) noexcept {
+    return nbits == 1 || nbits == 2 || nbits == 4 || nbits == 8 || nbits == 16;
+}
+
+/** @brief Byte length of one channel row holding @p nsamps samples (float when
+ * 32). */
+constexpr SizeType row_bytes_for(SizeType nsamps, SizeType nbits) noexcept {
+    return nbits == 32 ? nsamps * sizeof(float)
+                       : packed_row_bytes(nsamps, nbits);
+}
+
+/** @brief Calls `f.template operator()<NBITS>()` for runtime width 1, 2, 4, 8,
+ * 16, or 32. */
+template <typename F>
+inline void dispatch_nbits(SizeType nbits, F&& f, const char* caller = "dmt") {
+    switch (nbits) {
+    case 1:
+        f.template operator()<1>();
+        break;
+    case 2:
+        f.template operator()<2>();
+        break;
+    case 4:
+        f.template operator()<4>();
+        break;
+    case 8:
+        f.template operator()<8>();
+        break;
+    case 16:
+        f.template operator()<16>();
+        break;
+    case 32:
+        f.template operator()<32>();
+        break;
+    default:
+        throw std::invalid_argument(
+            std::string(caller) +
+            ": unsupported nbits=" + std::to_string(nbits));
+    }
+}
+
 #if !defined(__CUDA_ARCH__) && !defined(__HIP_DEVICE_COMPILE__)
 namespace detail {
 
@@ -207,6 +255,7 @@ DMT_H inline void unpack_row(const uint8_t* __restrict__ row,
                              T* __restrict__ out) noexcept {
     static_assert(detail::is_packed_nbits(NBITS),
                   "unpack_row: NBITS must be 1, 2, 4, 8, or 16");
+    // NOLINTNEXTLINE(bugprone-branch-clone): if-constexpr discards two branches
     if constexpr (NBITS == 8) {
 #if defined(_OPENMP) && !defined(__CUDACC__) && !defined(__HIP__)
 #pragma omp simd
@@ -215,12 +264,13 @@ DMT_H inline void unpack_row(const uint8_t* __restrict__ row,
             out[i] = static_cast<T>(row[i]);
         }
     } else if constexpr (NBITS == 16) {
-        const auto* words = reinterpret_cast<const uint16_t*>(row);
 #if defined(_OPENMP) && !defined(__CUDACC__) && !defined(__HIP__)
 #pragma omp simd
 #endif
         for (SizeType i = 0; i < nsamps; ++i) {
-            out[i] = static_cast<T>(words[i]);
+            uint16_t word = 0;
+            std::memcpy(&word, row + (i * 2), sizeof(word));
+            out[i] = static_cast<T>(word);
         }
     } else {
         detail::unpack_row_subbyte<NBITS, T>(row, nsamps, out);
@@ -251,7 +301,7 @@ DMT_H inline void unpack_row(const uint8_t* __restrict__ row,
         unpack_row<16>(row, nsamps, out);
         break;
     default:
-        break;
+        std::abort();
     }
 }
 

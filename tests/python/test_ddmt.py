@@ -115,9 +115,9 @@ class TestDDMT:
                     bit_sub = bit_off % 8
                     time_major[s, byte_idx] |= val << bit_sub
 
-        out_chan = ddmt.execute(chan_major, nsamps)
+        out_chan = ddmt.execute(chan_major, nsamps=nsamps)
         ddmt.reset_history()  # shared stream history
-        out_time = ddmt.execute_time_major(time_major, nsamps)
+        out_time = ddmt.execute_time_major(time_major, nsamps=nsamps)
 
         np.testing.assert_array_equal(out_time, out_chan)
 
@@ -140,8 +140,8 @@ class TestDDMT:
 
         # 2. Streamed execution across two chunks
         chunk1_samps = 100
-        chunk1 = full_waterfall[:, :chunk1_samps]
-        chunk2 = full_waterfall[:, chunk1_samps:]
+        chunk1 = np.ascontiguousarray(full_waterfall[:, :chunk1_samps])
+        chunk2 = np.ascontiguousarray(full_waterfall[:, chunk1_samps:])
 
         ddmt.reset_history()
         out1 = ddmt.execute(chunk1)
@@ -206,9 +206,9 @@ class TestDDMT:
             chan_major.transpose((0, 2, 1))  # (nbeams, nsamps, nchans)
         )
 
-        out_chan = ddmt_multi.execute(chan_major, nsamps)
+        out_chan = ddmt_multi.execute(chan_major, nsamps=nsamps)
         ddmt_multi.reset_history()  # shared stream history
-        out_time = ddmt_multi.execute_time_major(time_major, nsamps)
+        out_time = ddmt_multi.execute_time_major(time_major, nsamps=nsamps)
         np.testing.assert_array_equal(out_time, out_chan)
         assert out_chan.shape[0] == nbeams
 
@@ -229,8 +229,8 @@ class TestDDMT:
 
         streamed = DDMT(f_min, f_max, nchans, tsamp, dms, nbeams=nbeams)
         split = 50
-        out1 = streamed.execute(waterfall[:, :, :split])
-        out2 = streamed.execute(waterfall[:, :, split:])
+        out1 = streamed.execute(np.ascontiguousarray(waterfall[:, :, :split]))
+        out2 = streamed.execute(np.ascontiguousarray(waterfall[:, :, split:]))
 
         out_cat = np.concatenate([out1, out2], axis=2)
         np.testing.assert_allclose(out_cat, out_expected, rtol=1e-5, atol=1e-5)
@@ -240,7 +240,7 @@ class TestDDMT:
         assert len(hist) == streamed.history_state_size()
         streamed.reset_history()
         streamed.load_history(hist)
-        out3 = streamed.execute(waterfall[:, :, :30])
+        out3 = streamed.execute(np.ascontiguousarray(waterfall[:, :, :30]))
         assert out3.shape[2] == 30
 
     @pytest.mark.parametrize("nbits", [1, 2, 4, 8, 16])
@@ -280,14 +280,14 @@ class TestDDMT:
             return buf
 
         mono_packed = pack_data(raw)
-        out_mono = mono.execute(mono_packed, nsamps)
+        out_mono = mono.execute(mono_packed, nsamps=nsamps)
 
         streamed = DDMT(plan)
         c1_packed = pack_data(raw[:, :split])
         c2_packed = pack_data(raw[:, split:])
 
-        out1 = streamed.execute(c1_packed, split)
-        out2 = streamed.execute(c2_packed, nsamps - split)
+        out1 = streamed.execute(c1_packed, nsamps=split)
+        out2 = streamed.execute(c2_packed, nsamps=nsamps - split)
 
         out_streamed = np.concatenate([out1, out2], axis=1)
         np.testing.assert_array_equal(out_streamed, out_mono)
@@ -321,7 +321,7 @@ class TestDDMT:
                 bit_off = s * nbits
                 c1[c, bit_off // 8] |= (val & mask) << (bit_off % 8)
 
-        ddmt1.execute(c1, chunk1_samps)
+        ddmt1.execute(c1, nsamps=chunk1_samps)
 
         # Save history
         hist = ddmt1.save_history()
@@ -347,8 +347,8 @@ class TestDDMT:
                 bit_off = s * nbits
                 c2[c, bit_off // 8] |= (val & mask) << (bit_off % 8)
 
-        out1 = ddmt1.execute(c2, chunk2_samps)
-        out2 = ddmt2.execute(c2, chunk2_samps)
+        out1 = ddmt1.execute(c2, nsamps=chunk2_samps)
+        out2 = ddmt2.execute(c2, nsamps=chunk2_samps)
         np.testing.assert_array_equal(out1, out2)
 
         # reset_history clears state
@@ -364,12 +364,12 @@ class TestDDMT:
         chan_major = rng.integers(0, 256, (nchans, nsamps), dtype=np.uint8)
         time_major = np.ascontiguousarray(chan_major.T)
 
-        expected = DDMT(plan).execute(chan_major, nsamps)
+        expected = DDMT(plan).execute(chan_major, nsamps=nsamps)
 
         ddmt = DDMT(plan)
         bounds = [0, 3, 40, 41, 130, nsamps]
         parts = [
-            ddmt.execute_time_major(np.ascontiguousarray(time_major[a:b]), b - a)
+            ddmt.execute_time_major(np.ascontiguousarray(time_major[a:b]), nsamps=b - a)
             for a, b in zip(bounds[:-1], bounds[1:])
         ]
         np.testing.assert_array_equal(np.concatenate(parts, axis=1), expected)
@@ -420,7 +420,7 @@ class TestSDMT:
         ddmt = DDMT(*args, nthreads=1, nbits=nbits)
         sdmt = SDMT(*args, nthreads=1, nbits=nbits)
         np.testing.assert_array_equal(
-            sdmt.execute(data, nsamps), ddmt.execute(data, nsamps)
+            sdmt.execute(data, nsamps=nsamps), ddmt.execute(data, nsamps=nsamps)
         )
 
     def test_float_matches_ddmt_and_streams(self) -> None:
@@ -431,8 +431,8 @@ class TestSDMT:
         expected = DDMT(*args).execute(wf)
 
         sdmt = SDMT(*args, nthreads=1)
-        out1 = sdmt.execute(wf[:, :900])
-        out2 = sdmt.execute(wf[:, 900:])
+        out1 = sdmt.execute(np.ascontiguousarray(wf[:, :900]))
+        out2 = sdmt.execute(np.ascontiguousarray(wf[:, 900:]))
         got = np.concatenate([out1, out2], axis=1)
         np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-4)
 
@@ -440,16 +440,16 @@ class TestSDMT:
         assert len(hist) == sdmt.history_state_size()
         sdmt.reset_history()
         sdmt.load_history(hist)
-        assert sdmt.execute(wf[:, :64]).shape[1] == 64
+        assert sdmt.execute(np.ascontiguousarray(wf[:, :64])).shape[1] == 64
 
     def test_time_major_matches_channel_major(self) -> None:
         nsamps = 1500
         rng = np.random.default_rng(5)
         data = rng.integers(0, 256, (self.NCHANS, nsamps), dtype=np.uint8)
         sdmt = SDMT(self.F_MIN, self.F_MAX, self.NCHANS, self.TSAMP, self.DMS, nbits=8)
-        out_chan = sdmt.execute(data, nsamps)
+        out_chan = sdmt.execute(data, nsamps=nsamps)
         sdmt.reset_history()
-        out_time = sdmt.execute_time_major(np.ascontiguousarray(data.T), nsamps)
+        out_time = sdmt.execute_time_major(np.ascontiguousarray(data.T), nsamps=nsamps)
         np.testing.assert_array_equal(out_time, out_chan)
 
     def test_unavailable_backend_raises(self) -> None:
@@ -577,9 +577,10 @@ def _check_estimate(backend: str) -> None:
             eng.set_gulp_size(gulp)
             dtype = np.float32 if nbits == 32 else np.uint8
             nbytes = 1000 if nbits == 32 else 500
-            args = (np.zeros((16, nbytes), dtype),) + (() if nbits == 32 else (1000,))
+            block = np.zeros((16, nbytes), dtype)
+            exec_kw = {} if nbits == 32 else {"nsamps": 1000}
             for _ in range(2):
-                eng.execute(*args)
+                eng.execute(block, **exec_kw)
                 got, want = eng.memory_usage, est.usage
                 assert (got.plan, got.history) == (want.plan, want.history)
                 assert (got.staging, got.pinned) == (est.host_staging, est.host_pinned)

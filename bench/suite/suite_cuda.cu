@@ -52,7 +52,7 @@ bool skip_if_over_device_budget(benchmark::State& state,
     std::size_t free_bytes  = 0;
     std::size_t total_bytes = 0;
     BENCH_GPU_TRY(cudaMemGetInfo(&free_bytes, &total_bytes));
-    const double need   = estimate_bytes(algo, plan, p, true);
+    const double need   = estimate_bytes(algo, plan, p, bench_gpu_exec());
     const double budget = 0.9 * static_cast<double>(free_bytes);
     if (need > budget) {
         state.SkipWithError(
@@ -99,20 +99,19 @@ void bench_fdmt_cuda(benchmark::State& state, Point p) {
     mem.report(state);
 }
 
-// FDMT-FFT: device-resident, or (kHost) host arrays in and out; float or
-// packed input.
-template <bool kFrac, bool kHost>
+// FDMT-FFT (fractional delays): device-resident, or (kHost) host arrays in
+// and out; float or packed input.
+template <bool kHost>
 void bench_fdmt_fft_cuda(benchmark::State& state, Point p) {
     GpuPeakMemory mem;
     mem.begin();
     const auto plan = make_plan(p);
-    if (skip_if_over_device_budget(
-            state, kFrac ? Algo::kFDMTFFTFrac : Algo::kFDMTFFT, plan, p)) {
+    if (skip_if_over_device_budget(state, Algo::kFDMTFFTFrac, plan, p)) {
         return;
     }
     try {
         FDMTFFT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, dm_grid(p), true,
-                     "valid", bench_gpu_exec(), 1, kFrac);
+                     "valid", bench_gpu_exec(), 1, true);
         const auto run = [&](const auto& call) {
             call(); // warm-up (history, plans, staging)
             BENCH_GPU_TRY(cudaDeviceSynchronize());
@@ -203,23 +202,21 @@ void bench_ddmt_cuda(benchmark::State& state, Point p) {
     set_ddmt_rate(state, plan, p);
 }
 
-// DDMT-FFT (NUFFT or brute force): device-resident, or (kHost) host arrays
-// in and out; float or packed input.
-template <DDMTFFTMethod kMethod, bool kHost>
+// DDMT-FFT (NUFFT): device-resident, or (kHost) host arrays in and out; float
+// or packed input.
+template <bool kHost>
 void bench_ddmt_fft_cuda(benchmark::State& state, Point p) {
     GpuPeakMemory mem;
     mem.begin();
-    constexpr auto kAlgo =
-        kMethod == DDMTFFTMethod::kBrute ? Algo::kDDMTFFTBrute : Algo::kDDMTFFT;
     const auto plan = make_plan(p);
-    if (skip_if_over_device_budget(state, kAlgo, plan, p)) {
+    if (skip_if_over_device_budget(state, Algo::kDDMTFFT, plan, p)) {
         return;
     }
     try {
         const auto dms = dm_grid(p);
         DDMTFFT eng(kFMin, kFMax, kNchans, kTsamp, std::span<const float>(dms),
                     bench_gpu_exec(), p.nbits, {}, 1,
-                    DDMTFFTOptions{.method = kMethod});
+                    DDMTFFTOptions{.method = DDMTFFTMethod::kNUFFT});
         const auto ndms   = dms.size();
         const auto n_warm = ndms * p.nsamps;
         // Cold calls fill the history and have fewer outputs.
@@ -287,9 +284,9 @@ void register_cuda() {
         for (const auto& p : sweep_points(sweep)) {
             add(bench_name(Algo::kFDMT, DMT_GPU_NAME, p), bench_fdmt_cuda, p);
             add(bench_name(Algo::kFDMTFFTFrac, DMT_GPU_NAME, p),
-                bench_fdmt_fft_cuda<true, false>, p);
+                bench_fdmt_fft_cuda<false>, p);
             add(bench_name(Algo::kDDMTFFT, DMT_GPU_NAME, p),
-                bench_ddmt_fft_cuda<DDMTFFTMethod::kNUFFT, false>, p);
+                bench_ddmt_fft_cuda<false>, p);
             add(bench_name(Algo::kDDMT, DMT_GPU_NAME, p),
                 bench_ddmt_cuda<DDMT, Algo::kDDMT>, p);
             add(bench_name(Algo::kSDMT, DMT_GPU_NAME, p),
@@ -303,9 +300,9 @@ void register_cuda() {
         add(bench_name(Algo::kSDMT, DMT_GPU_NAME, p),
             bench_ddmt_cuda<SDMT, Algo::kSDMT>, p);
         add(bench_name(Algo::kFDMTFFTFrac, DMT_GPU_NAME, p),
-            bench_fdmt_fft_cuda<true, false>, p);
+            bench_fdmt_fft_cuda<false>, p);
         add(bench_name(Algo::kDDMTFFT, DMT_GPU_NAME, p),
-            bench_ddmt_fft_cuda<DDMTFFTMethod::kNUFFT, false>, p);
+            bench_ddmt_fft_cuda<false>, p);
     }
 }
 

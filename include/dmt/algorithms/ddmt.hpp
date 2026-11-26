@@ -223,7 +223,7 @@ public:
     [[nodiscard]] SizeType get_nbeams() const noexcept;
     /// @brief Backend this instance runs on.
     [[nodiscard]] Backend backend() const noexcept;
-    /// @brief OpenMP threads used (CPU backend); 1 on a GPU backend.
+    /// @brief OpenMP threads (CPU) or host-staging worker cap (GPU).
     [[nodiscard]] int nthreads() const noexcept;
     /// @brief Device ordinal used (GPU backend); -1 on the CPU backend.
     [[nodiscard]] int device() const noexcept;

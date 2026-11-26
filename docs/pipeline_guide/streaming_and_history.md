@@ -36,9 +36,10 @@ the tree in chunks of `chunk_nsamps`, joined by the same history, so the
 working state is sized by the chunk, not the block.
 
 - **Default chunk.** The longest power of two ≥ 2048 whose state fits in
-  2 GiB, capped at `nsamps`, and shorter on a GPU when that keeps the state in
-  L2. For `cryopaf_low` with 32 768-sample blocks: 5.5 GiB for the whole
-  block, 1.4 GiB with the automatic 8192-sample chunk.
+  2 GiB, capped at `nsamps`, and shorter on a GPU when that keeps the state
+  within a fixed 96 MiB cache target (the L40S's L2, so the choice does not
+  depend on the device). For `cryopaf_low` with 32 768-sample blocks: 5.5 GiB
+  for the whole block, 1.4 GiB with the automatic 8192-sample chunk.
 - **Output.** Bit-identical for any chunk with packed input, integer-valued
   input, explicit fusion depths and the CPU tree. Automatic GPU direct levels
   agree to float rounding.
@@ -78,8 +79,9 @@ the last $\Delta t_{\max}$ samples of every beam and channel.
 - **One history for every overload.** Float and packed, channel- and
   time-major, host and device input share it; you can mix them in one stream.
 - **GPU.** The history stays on the device. Device-memory calls are one
-  asynchronous launch sequence with no host sync. Host-memory calls stream
-  through the device in `gulp_size` chunks (`set_gulp_size()`).
+  asynchronous launch sequence with no host sync. For `DDMT` and `SDMT`,
+  host-memory calls stream through the device in `gulp_size` chunks
+  (`set_gulp_size()`); `DDMTFFT` transforms each call whole.
 
 ## Several streams through one engine
 

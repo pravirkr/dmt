@@ -31,10 +31,6 @@ using namespace pybind11::literals; // NOLINT
 
 namespace {
 
-std::vector<uint8_t> mask_vec(const py::object& m) {
-    return extract_kill_mask(m);
-}
-
 DDMTFFTOptions
 make_options(std::string_view method, double tolerance, SizeType guard) {
     return DDMTFFTOptions{
@@ -84,24 +80,25 @@ void bind_ddmt_fft(py::module_& mod) {
 
     py::class_<DDMTFFTMemoryUsage>(mod, "DDMTFFTMemoryUsage", R"doc(
         Memory a DDMTFFT instance holds, in bytes (host memory on the CPU
-        backend, device memory on a GPU backend). Buffers are made by the
-        calls that need them and kept (see ``DDMTFFT.estimate_memory``). Not
-        counted: input and output arrays, the FFT libraries' plan objects
-        (cuFFT work areas are counted), per-call temporaries and the GPU's
-        64 MiB pinned host staging.
+        backend, device memory on a GPU backend, ``pinned`` apart). Buffers
+        are made by the calls that need them and kept (see
+        ``DDMTFFT.estimate_memory``). Not counted: input and output arrays,
+        the FFT libraries' plan objects (cuFFT work areas are counted), and
+        per-call temporaries. ``pinned`` is not included in ``total``.
         )doc")
         .def_readonly("plan", &DDMTFFTMemoryUsage::plan)
         .def_readonly("history", &DDMTFFTMemoryUsage::history)
         .def_readonly("transform", &DDMTFFTMemoryUsage::transform)
         .def_readonly("workspace", &DDMTFFTMemoryUsage::workspace)
         .def_readonly("staging", &DDMTFFTMemoryUsage::staging)
+        .def_readonly("pinned", &DDMTFFTMemoryUsage::pinned)
         .def_property_readonly("total", &DDMTFFTMemoryUsage::total)
         .def("__repr__", [](const DDMTFFTMemoryUsage& m) {
             return fmt::format("DDMTFFTMemoryUsage(plan={}, history={}, "
                                "transform={}, workspace={}, staging={}, "
-                               "total={})",
+                               "pinned={}, total={})",
                                m.plan, m.history, m.transform, m.workspace,
-                               m.staging, m.total());
+                               m.staging, m.pinned, m.total());
         });
 
     py::class_<DDMTFFTMemoryEstimate>(mod, "DDMTFFTMemoryEstimate", R"doc(
@@ -109,22 +106,23 @@ void bind_ddmt_fft(py::module_& mod) {
         ``DDMTFFT.estimate_memory`` (computed without allocating it).
 
         ``usage`` equals that instance's ``memory_usage`` once a cold stream
-        of such calls is warm (``staging`` 0: CPU calls, GPU calls on float
-        device arrays). The staging calls of another kind add:
-        ``host_staging`` for host arrays (GPU; 0 on the CPU),
-        ``time_major_staging`` for ``execute_time_major`` (packed plans) and
-        ``device_staging`` for packed device arrays (GPU).
+        of such calls is warm (``staging`` and ``pinned`` 0: CPU calls, GPU
+        calls on float device arrays). The staging calls of another kind add:
+        ``host_staging`` and ``host_pinned`` for host arrays (GPU; 0 on the
+        CPU), ``time_major_staging`` for ``execute_time_major`` (packed plans)
+        and ``device_staging`` for packed device arrays (GPU).
         )doc")
         .def_readonly("usage", &DDMTFFTMemoryEstimate::usage)
         .def_readonly("host_staging", &DDMTFFTMemoryEstimate::host_staging)
+        .def_readonly("host_pinned", &DDMTFFTMemoryEstimate::host_pinned)
         .def_readonly("time_major_staging",
                       &DDMTFFTMemoryEstimate::time_major_staging)
         .def_readonly("device_staging", &DDMTFFTMemoryEstimate::device_staging)
         .def("__repr__", [](const DDMTFFTMemoryEstimate& e) {
             return fmt::format("DDMTFFTMemoryEstimate(total={}, "
-                               "host_staging={}, time_major_staging={}, "
-                               "device_staging={})",
-                               e.usage.total(), e.host_staging,
+                               "host_staging={}, host_pinned={}, "
+                               "time_major_staging={}, device_staging={})",
+                               e.usage.total(), e.host_staging, e.host_pinned,
                                e.time_major_staging, e.device_staging);
         });
 
@@ -143,7 +141,7 @@ void bind_ddmt_fft(py::module_& mod) {
         f_min, f_max, nchans, tsamp, dm_max, dm_step, dm_min, dm_arr, levin, plan
             As for :class:`DDMT`.
         nthreads : int, optional
-            OpenMP threads (CPU).
+            OpenMP threads (CPU) or host-staging worker cap (GPU; default 1).
         nbits : int, optional
             Input precision: 32 (float) or 1, 2, 4, 8, 16 (packed).
         kill_mask : array_like, optional
@@ -170,6 +168,10 @@ void bind_ddmt_fft(py::module_& mod) {
         On a GPU backend :meth:`execute` and the history methods also take
         device arrays without a copy, asynchronously on ``stream``, as for
         :class:`DDMT`.
+
+        Transform methods release the GIL during C++/GPU execution; a single
+        instance holds mutable streaming history and workspace buffers and is
+        not safe for concurrent calls from multiple threads.
         )doc");
     cls.def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
                         float dm_max, float dm_step, float dm_min, int nthreads,
@@ -180,7 +182,7 @@ void bind_ddmt_fft(py::module_& mod) {
                         std::optional<float> f_ref) {
                 return DDMTFFT(f_min, f_max, nchans, tsamp, dm_max, dm_step,
                                dm_min, make_exec(backend, nthreads, device),
-                               nbits, mask_vec(kill_mask), nbeams,
+                               nbits, extract_kill_mask(kill_mask), nbeams,
                                make_options(method, tolerance, guard), f_ref);
             }),
             "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_max"_a,
@@ -199,7 +201,7 @@ void bind_ddmt_fft(py::module_& mod) {
                  return DDMTFFT(f_min, f_max, nchans, tsamp,
                                 std::span<const float>(dms.data(), dms.size()),
                                 make_exec(backend, nthreads, device), nbits,
-                                mask_vec(kill_mask), nbeams,
+                                extract_kill_mask(kill_mask), nbeams,
                                 make_options(method, tolerance, guard), f_ref);
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_arr"_a,
@@ -215,7 +217,7 @@ void bind_ddmt_fft(py::module_& mod) {
                          std::optional<float> f_ref) {
                  return DDMTFFT(f_min, f_max, nchans, tsamp, levin,
                                 make_exec(backend, nthreads, device), nbits,
-                                mask_vec(kill_mask), nbeams,
+                                extract_kill_mask(kill_mask), nbeams,
                                 make_options(method, tolerance, guard), f_ref);
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "levin"_a,
@@ -294,8 +296,9 @@ void bind_ddmt_fft(py::module_& mod) {
             "transform as output.")
         .def(
             "execute",
-            [](DDMTFFT& e,
-               const py::array_t<float, py::array::c_style>& waterfall) {
+            [](DDMTFFT& e, const py::array& waterfall_obj) {
+                const auto waterfall = require_contiguous_array<float>(
+                    waterfall_obj, "DDMTFFT.execute", "float32");
                 const auto ndim = waterfall.ndim();
                 if (ndim != 2 && ndim != 3) {
                     throw std::invalid_argument(
@@ -313,12 +316,16 @@ void bind_ddmt_fft(py::module_& mod) {
                 const auto nsamps =
                     static_cast<SizeType>(waterfall.shape(ndim - 1));
                 auto out = output_array(e, nsamps, ndim == 3);
-                e.execute(
-                    std::span<const float>(waterfall.data(), waterfall.size()),
-                    std::span<float>(out.mutable_data(), out.size()));
+                const std::span<const float> in_span(waterfall.data(),
+                                                     waterfall.size());
+                const std::span<float> out_span(out.mutable_data(), out.size());
+                {
+                    const py::gil_scoped_release release;
+                    e.execute(in_span, out_span);
+                }
                 return out;
             },
-            "waterfall"_a,
+            "waterfall"_a.noconvert(),
             R"doc(
             Dedisperse a float32 waterfall ``(nchans, nsamps)`` or
             ``(nbeams, nchans, nsamps)``; returns ``(n_dm, output_nsamps)`` or
@@ -326,29 +333,37 @@ void bind_ddmt_fft(py::module_& mod) {
             )doc")
         .def(
             "execute",
-            [](DDMTFFT& e,
-               const py::array_t<uint8_t, py::array::c_style>& packed,
-               SizeType nsamps) {
+            [](DDMTFFT& e, const py::array& packed_obj, SizeType nsamps) {
+                const auto packed = require_contiguous_array<uint8_t>(
+                    packed_obj, "DDMTFFT.execute", "uint8");
                 auto out = output_array(e, nsamps, e.get_nbeams() > 1);
-                e.execute(
-                    std::span<const uint8_t>(packed.data(), packed.size()),
-                    nsamps, std::span<float>(out.mutable_data(), out.size()));
+                const std::span<const uint8_t> in_span(packed.data(),
+                                                       packed.size());
+                const std::span<float> out_span(out.mutable_data(), out.size());
+                {
+                    const py::gil_scoped_release release;
+                    e.execute(in_span, nsamps, out_span);
+                }
                 return out;
             },
-            "waterfall_packed"_a, "nsamps"_a,
+            "waterfall_packed"_a.noconvert(), py::kw_only(), "nsamps"_a,
             "Dedisperse a channel-major packed waterfall (float32 output).")
         .def(
             "execute_time_major",
-            [](DDMTFFT& e,
-               const py::array_t<uint8_t, py::array::c_style>& packed,
-               SizeType nsamps) {
+            [](DDMTFFT& e, const py::array& packed_obj, SizeType nsamps) {
+                const auto packed = require_contiguous_array<uint8_t>(
+                    packed_obj, "DDMTFFT.execute_time_major", "uint8");
                 auto out = output_array(e, nsamps, e.get_nbeams() > 1);
-                e.execute_time_major(
-                    std::span<const uint8_t>(packed.data(), packed.size()),
-                    nsamps, std::span<float>(out.mutable_data(), out.size()));
+                const std::span<const uint8_t> in_span(packed.data(),
+                                                       packed.size());
+                const std::span<float> out_span(out.mutable_data(), out.size());
+                {
+                    const py::gil_scoped_release release;
+                    e.execute_time_major(in_span, nsamps, out_span);
+                }
                 return out;
             },
-            "filterbank_packed"_a, "nsamps"_a,
+            "filterbank_packed"_a.noconvert(), py::kw_only(), "nsamps"_a,
             "Dedisperse a time-major packed filterbank (float32 output).")
         .def(
             "execute",
@@ -383,37 +398,34 @@ void bind_ddmt_fft(py::module_& mod) {
                     [&](DeviceSpan<const uint8_t> in, DeviceSpan<float> dmt,
                         Stream s) { e.execute(in, nsamps, dmt, s); });
             },
-            "waterfall_packed"_a, "nsamps"_a, py::kw_only(),
+            "waterfall_packed"_a, py::kw_only(), "nsamps"_a,
             "out"_a = py::none(), "stream"_a = py::none(),
             "Dedisperse a channel-major packed uint8 device array (float32 "
             "output).")
         .def("get_output_nsamps", &DDMTFFT::get_output_nsamps, "input_nsamps"_a)
         .def("reset_history", &DDMTFFT::reset_history)
         .def("history_state_size", &DDMTFFT::history_state_size)
-        .def("set_gulp_size", &DDMTFFT::set_gulp_size, "gulp_size"_a)
-        .def_property_readonly("gulp_size", &DDMTFFT::get_gulp_size)
         .def("save_history",
              [](const DDMTFFT& e) {
                  py::array_t<float, py::array::c_style> hist(
                      static_cast<py::ssize_t>(e.history_state_size()));
-                 e.save_history(
-                     std::span<float>(hist.mutable_data(), hist.size()));
+                 const std::span<float> out(hist.mutable_data(), hist.size());
+                 {
+                     const py::gil_scoped_release release;
+                     e.save_history(out);
+                 }
                  return hist;
              })
         .def(
             "load_history",
             [](DDMTFFT& e, const py::array& obj) {
-                if (obj.dtype().kind() != 'f' || obj.itemsize() != 4) {
-                    throw std::invalid_argument(fmt::format(
-                        "DDMTFFT.load_history: expects a float32 array, got "
-                        "dtype '{}'",
-                        std::string(py::str(obj.dtype()))));
-                }
-                auto hist = py::array_t<float, py::array::c_style>(obj);
-                e.load_history(
-                    std::span<const float>(hist.data(), hist.size()));
+                const auto hist = require_contiguous_array<float>(
+                    obj, "DDMTFFT.load_history", "float32");
+                const std::span<const float> in(hist.data(), hist.size());
+                const py::gil_scoped_release release;
+                e.load_history(in);
             },
-            "history"_a)
+            py::arg("history").noconvert())
         .def(
             "save_history",
             [](const DDMTFFT& e, const DeviceArray& out,

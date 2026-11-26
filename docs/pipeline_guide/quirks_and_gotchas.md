@@ -26,10 +26,14 @@ FDMT(1200.0, 1600.0, 256, 1024, 1e-3, dm_grid=my_dm_array)   # or dt_grid=
 
 The planner sorts custom grids and drops duplicates.
 
-## Pass contiguous arrays
+## Pass contiguous arrays with exact dtype
 
-The bindings read C-contiguous memory. Wrap strided slices such as
-`waterfall[::2, :]` in `np.ascontiguousarray` before `execute()`.
+The Python bindings require C-contiguous memory and exact dtype (`float32`,
+`uint8` for packed input, `complex64` for `pack_baseband`), raising `ValueError`
+rather than silently copying or casting (including `load_history()` and
+in-place `dmt=` / `out=` buffers). Wrap strided slices such as
+`waterfall[:, :nsamps]` or `waterfall[::2, :]` in `.copy()` or
+`np.ascontiguousarray(...)` before `execute()`.
 
 (output-buffers)=
 ## Output buffers
@@ -52,7 +56,8 @@ std::vector<float> buf(fdmt.get_nbeams() * fdmt.get_plan().get_dmt_size());
 fdmt.execute(waterfall, buf);   // every block
 ```
 
-In Python, `execute()` returns a view of the output buffer. Pass `out=` to
+In Python, `execute()` (including `FDMTFFT.execute()` and
+`execute_time_major()`) returns a view of the output buffer. Pass `out=` to
 reuse one buffer, about 10% faster for large blocks; without it every call
 allocates a new array.
 
@@ -100,7 +105,12 @@ frequency, then `2**k - 1` staggered ones if `subband_depth >= k`.
   `reset()`/`execute()`, or it raises `RuntimeError` (C++
   `std::logic_error`). `reset_history()` abandons the block. `full`/`roll`
   allow restarting.
-- **Whole blocks.** It needs `chunk_nsamps == nsamps` and raises otherwise.
+- **Whole blocks, tree path only.** The stepper needs `chunk_nsamps == nsamps`
+  on the tree path and raises otherwise. The skewed-window path (chosen when
+  `max_memory_bytes` is below the tree path's) has no stepper on any backend;
+  use `execute()`, or a budget that fits the tree path.
+- **Keyword-only arguments in Python.** Pass `dmt=` (and `nbits=` for packed
+  input) to `reset()` by keyword only; positional calls raise `TypeError`.
 - **No fusion.** It runs level by level; only `execute()` uses `fuse_levels`.
 - **Views are overwritten.** On the CPU they share memory with the engine;
   copy what you keep. On CUDA from Python they are host copies.

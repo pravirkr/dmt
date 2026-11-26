@@ -190,13 +190,6 @@ inline void check_last_gpu_error(
     }
 }
 
-inline void check_gpu_sync_error(
-    std::string_view msg     = "",
-    std::source_location loc = std::source_location::current()) {
-    check_gpu_call(cudaDeviceSynchronize(), "Synchronization failed", loc);
-    check_last_gpu_error(msg, loc);
-}
-
 /// An engine's device buffers did not fit: a std::bad_alloc (Python
 /// MemoryError, as before) that says what the configuration needs.
 class DeviceAllocationError : public std::bad_alloc {
@@ -413,23 +406,6 @@ private:
     cudaEvent_t m_event{nullptr};
     bool m_pending{false};
 };
-
-[[nodiscard]] inline std::string get_device_info() noexcept {
-    int device;
-    cudaDeviceProp props{};
-    if (auto err = cudaGetDevice(&device); err != cudaSuccess) {
-        return fmt::format("Failed to get device: {}", cudaGetErrorString(err));
-    }
-    if (auto err = cudaGetDeviceProperties(&props, device);
-        err != cudaSuccess) {
-        return fmt::format("Failed to get properties: {}",
-                           cudaGetErrorString(err));
-    }
-
-    return fmt::format("{} device {}: {} (CC {}.{}), Mem: {} MiB", DMT_GPU_NAME,
-                       device, props.name, props.major, props.minor,
-                       props.totalGlobalMem >> 20);
-}
 
 inline void set_device(int device_id) {
     int device_count;

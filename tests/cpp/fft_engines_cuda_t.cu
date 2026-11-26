@@ -18,6 +18,7 @@
 #include "dmt/engines.hpp"
 #include "dmt/gpu_compat.cuh"
 
+#include "fft_estimate_cases.hpp"
 #include "test_helpers.hpp"
 
 // Robustness and parity of the GPU Fourier engines against the CPU ones:
@@ -59,27 +60,6 @@ double max_rel(const std::vector<float>& a, const std::vector<float>& b) {
     return ref > 0.0 ? diff / ref : diff;
 }
 
-std::vector<uint8_t> pack_rows(const std::vector<uint32_t>& vals,
-                               SizeType rows,
-                               SizeType n,
-                               SizeType nbits) {
-    const auto rb = ((n * nbits) + 7) / 8;
-    std::vector<uint8_t> out(rows * rb, 0);
-    for (SizeType r = 0; r < rows; ++r) {
-        for (SizeType i = 0; i < n; ++i) {
-            const auto v   = vals[(r * n) + i];
-            const auto bit = i * nbits;
-            for (SizeType q = 0; q < nbits; ++q) {
-                if (((v >> q) & 1U) != 0U) {
-                    out[(r * rb) + ((bit + q) / 8)] |=
-                        static_cast<uint8_t>(1U << ((bit + q) % 8));
-                }
-            }
-        }
-    }
-    return out;
-}
-
 template <typename T>
 std::vector<T> to_host(const thrust::device_vector<T>& d) {
     std::vector<T> h(d.size());
@@ -94,17 +74,6 @@ template <typename T>
 DeviceSpan<const T> dcspan(const thrust::device_vector<T>& d) {
     return {thrust::raw_pointer_cast(d.data()), d.size()};
 }
-
-struct SegmentCap {
-    explicit SegmentCap(SizeType n) {
-        algorithms::detail::set_fft_segment_cap(n);
-    }
-    ~SegmentCap() { algorithms::detail::set_fft_segment_cap(0); }
-    SegmentCap(const SegmentCap&)            = delete;
-    SegmentCap& operator=(const SegmentCap&) = delete;
-    SegmentCap(SegmentCap&&)                 = delete;
-    SegmentCap& operator=(SegmentCap&&)      = delete;
-};
 
 // A non-blocking stream (no implicit ordering with the legacy stream).
 struct NonBlockingStream {
@@ -371,8 +340,8 @@ TEST_CASE("FDMTFFT GPU packed, time-major, kill mask and history",
                 }
             }
         }
-        const auto packed    = pack_rows(vals, 2 * nch, ns, nbits);
-        const auto tm_packed = pack_rows(tm, 2 * ns, nch, nbits);
+        const auto packed    = test::pack_rows(vals, 2 * nch, ns, nbits);
+        const auto tm_packed = test::pack_rows(tm, 2 * ns, nch, nbits);
         FDMTFFT cpu(kFMin, kFMax, nch, ns, kTsamp, 48, 0, 1, true, "valid",
                     Exec::cpu(), 2, true, mask);
         FDMTFFT gpu(kFMin, kFMax, nch, ns, kTsamp, 48, 0, 1, true, "valid",
@@ -413,18 +382,30 @@ TEST_CASE("FDMTFFT GPU forced segments match the CPU",
     for (const auto* mode : {"valid", "full"}) {
         for (const bool frac : {true, false}) {
             CAPTURE(mode, frac);
-            const SegmentCap cap(1024);
-            FDMTFFT cpu(kFMin, kFMax, nch, ns, kTsamp, 48, 0, 1, true, mode,
-                        Exec::cpu(), 1, frac);
-            FDMTFFT gpu(kFMin, kFMax, nch, ns, kTsamp, 48, 0, 1, true, mode,
-                        test::gpu_exec(), 1, frac);
-            const auto n = cpu.get_plan().get_dmt_size();
+            const plans::FDMTPlan plan(kFMin, kFMax, nch, ns, kTsamp, 48, 0, 1,
+                                       mode);
+            const auto fdmt_mode = std::string_view(mode) == "valid"
+                                       ? FDMTMode::kValid
+                                       : FDMTMode::kFull;
+            const algorithms::detail::FDMTFFTEngineConfig base{
+                .use_box_smearing  = true,
+                .mode              = fdmt_mode,
+                .nbeams            = 1,
+                .exec              = Exec::cpu(),
+                .fractional_delays = frac,
+                .max_segment       = 1024};
+            auto gpu_cfg   = base;
+            gpu_cfg.exec   = test::gpu_exec();
+            const auto cpu = algorithms::detail::make_fdmt_fft_cpu(plan, base);
+            const auto gpu =
+                algorithms::detail::make_fdmt_fft_gpu(plan, gpu_cfg);
+            const auto n = plan.get_dmt_size();
             std::vector<float> a(n);
             std::vector<float> b(n);
             for (unsigned blk = 0; blk < 2; ++blk) {
                 const auto wf = noise(nch * ns, 130 + blk);
-                cpu.execute(wf, a);
-                gpu.execute(wf, b);
+                cpu->execute(wf, a);
+                gpu->execute(wf, b);
                 CHECK(max_rel(b, a) < 2e-5);
             }
         }
@@ -541,18 +522,23 @@ TEST_CASE("DDMTFFT GPU large uniform run and forced segments",
     gpu.execute(wf, b);
     CHECK(max_rel(b, a) < 2e-5);
 
-    const SegmentCap cap(1024);
-    DDMTFFT cpu_s(kFMin, kFMax, 32, kTsamp, 20.0F, 0.5F, 0.0F, Exec::cpu());
-    DDMTFFT gpu_s(kFMin, kFMax, 32, kTsamp, 20.0F, 0.5F, 0.0F,
-                  test::gpu_exec());
-    const auto ns2 = SizeType{6000};
-    const auto n2 =
-        cpu_s.get_plan().get_dm_arr().size() * cpu_s.get_output_nsamps(ns2);
+    const plans::DDMTPlan plan_s(kFMin, kFMax, 32, kTsamp, 20.0F, 0.5F, 0.0F);
+    const algorithms::detail::DDMTFFTEngineConfig seg_cpu{
+        .nbeams      = 1,
+        .exec        = Exec::cpu(),
+        .options     = {.method = DDMTFFTMethod::kNUFFT},
+        .max_segment = 1024};
+    auto seg_gpu     = seg_cpu;
+    seg_gpu.exec     = test::gpu_exec();
+    const auto cpu_s = algorithms::detail::make_ddmt_fft_cpu(plan_s, seg_cpu);
+    const auto gpu_s = algorithms::detail::make_ddmt_fft_gpu(plan_s, seg_gpu);
+    const auto ns2   = SizeType{6000};
+    const auto n2 = plan_s.get_dm_arr().size() * cpu_s->get_output_nsamps(ns2);
     std::vector<float> c(n2);
     std::vector<float> d(n2);
     const auto wf2 = noise(32 * ns2, 401);
-    cpu_s.execute(wf2, c);
-    gpu_s.execute(wf2, d);
+    cpu_s->execute(wf2, c);
+    gpu_s->execute(wf2, d);
     CHECK(max_rel(d, c) < 2e-5);
 }
 
@@ -613,8 +599,8 @@ TEST_CASE("DDMTFFT GPU packed 1 and 4 bits, time-major with beams",
                 }
             }
         }
-        const auto packed    = pack_rows(vals, 2 * nch, ns, nbits);
-        const auto tm_packed = pack_rows(tm, 2 * ns, nch, nbits);
+        const auto packed    = test::pack_rows(vals, 2 * nch, ns, nbits);
+        const auto tm_packed = test::pack_rows(tm, 2 * ns, nch, nbits);
         DDMTFFT cpu(kFMin, kFMax, nch, kTsamp, 20.0F, 0.5F, 0.0F, Exec::cpu(),
                     nbits, {}, 2);
         DDMTFFT gpu(kFMin, kFMax, nch, kTsamp, 20.0F, 0.5F, 0.0F,
@@ -631,6 +617,89 @@ TEST_CASE("DDMTFFT GPU packed 1 and 4 bits, time-major with beams",
         gpu_tm.execute_time_major(tm_packed, ns, c);
         CHECK(max_rel(b, a) < 2e-5);
         CHECK(max_rel(c, a) < 2e-5);
+    }
+}
+
+TEST_CASE("FDMTFFT valid streaming nsamps < dt_max",
+          "[fdmt_fft_gpu][gpu][parity]") {
+    const float f_min   = 1000.0F;
+    const float f_max   = 1500.0F;
+    const size_t nchans = 8;
+    const size_t nsamps = 4;
+    const float tsamp   = 0.001F;
+    const size_t dt_max = 12;
+
+    FDMTFFT fdmt_cpu(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                     "valid");
+    FDMTFFT fdmt_cuda(f_min, f_max, nchans, nsamps, tsamp, dt_max, 0, 1, true,
+                      "valid", test::gpu_exec());
+    fdmt_cpu.reset_history();
+    fdmt_cuda.reset_history();
+    const auto n = fdmt_cpu.get_plan().get_dmt_size();
+    std::mt19937 rng(9);
+    std::uniform_real_distribution<float> dist(0.5F, 2.0F);
+    for (int blk = 0; blk < 4; ++blk) {
+        std::vector<float> wf(nchans * nsamps);
+        for (auto& v : wf) {
+            v = dist(rng);
+        }
+        std::vector<float> dmt_cpu(n, 0.0F);
+        std::vector<float> dmt_cuda(n, 0.0F);
+        fdmt_cpu.execute(wf, dmt_cpu);
+        fdmt_cuda.execute(wf, dmt_cuda);
+        REQUIRE_THAT(dmt_cuda, Catch::Matchers::Approx(dmt_cpu).margin(0.1));
+    }
+}
+
+TEST_CASE("FDMTFFT estimate_memory equals the constructed instance (gpu)",
+          "[fdmt_fft_gpu][gpu][budget]") {
+    const auto gpu = test::gpu_exec();
+    fft_estimate::check_all(gpu);
+    SECTION("device calls allocate nothing; host calls add host_staging") {
+        const plans::FDMTPlan plan(1000.0F, 1500.0F, 64, 1024, 0.001F, 80);
+        const auto e = FDMTFFT::estimate_memory(plan, true, gpu, 2);
+        FDMTFFT f(plan, true, gpu, 2);
+        const auto total = f.get_memory_usage().total();
+        thrust::device_vector<float> in(2 * 64 * 1024, 1.0F);
+        thrust::device_vector<float> out(2 * plan.get_dmt_size());
+        f.execute(DeviceSpan<const float>(thrust::raw_pointer_cast(in.data()),
+                                          in.size()),
+                  DeviceSpan<float>(thrust::raw_pointer_cast(out.data()),
+                                    out.size()));
+        REQUIRE(cudaDeviceSynchronize() == cudaSuccess);
+        CHECK(f.get_memory_usage().total() == total);
+        CHECK(f.get_memory_usage().pinned == 0);
+        std::vector<float> in_h(in.size(), 1.0F);
+        std::vector<float> out_h(out.size());
+        f.execute(std::span<const float>(in_h), std::span<float>(out_h));
+        CHECK(f.get_memory_usage().total() == total + e.host_staging);
+        CHECK(f.get_memory_usage().pinned == e.host_pinned);
+    }
+    SECTION("nothing is allocated") {
+        // 2^16 beams: hundreds of GB of buffers and cuFFT work areas, sized
+        // (the plans are made), never allocated (an allocation would throw).
+        const SizeType beams = SizeType{1} << 16;
+        const auto e =
+            FDMTFFT::estimate_memory(1000.0F, 1500.0F, 256, 4096, 0.001F, 400,
+                                     0, 1, true, "valid", gpu, beams);
+        INFO("state " << e.usage.state << " history " << e.usage.history
+                      << " workspace " << e.usage.workspace);
+        CHECK(e.usage.total() > (SizeType{100} << 30));
+    }
+    SECTION("a configuration the device cannot hold fails clearly") {
+        // Terabytes: the free-memory check fails before anything is
+        // allocated.
+        // A std::bad_alloc (Python MemoryError), with the requirement.
+        CHECK_THROWS_AS(FDMTFFT(1000.0F, 1500.0F, 256, 4096, 0.001F, 400, 0, 1,
+                                true, "full", gpu, SizeType{1} << 16),
+                        std::bad_alloc);
+        CHECK_THROWS_WITH(
+            FDMTFFT(1000.0F, 1500.0F, 256, 4096, 0.001F, 400, 0, 1, true,
+                    "full", gpu, SizeType{1} << 16),
+            Catch::Matchers::ContainsSubstring("this configuration needs") &&
+                Catch::Matchers::ContainsSubstring(
+                    "is free on the device (nothing allocated)") &&
+                Catch::Matchers::ContainsSubstring("estimate_memory()"));
     }
 }
 

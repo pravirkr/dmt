@@ -20,7 +20,7 @@
 // Skewed-window GPU path (fdmt_cuda_direct.cu: skewed direct levels, batched
 // mid levels and the target-ring direct top). Small plans take the unskewed
 // direct top, so the engines here force the skewed path
-// (FDMTEngineConfig::gpu_path) and check that they took it.
+// (FDMTEngineConfig::path) and check that they took it.
 
 namespace dmt {
 
@@ -58,23 +58,23 @@ struct SkewRig {
         cfg.nbeams       = nbeams;
         cfg.chunk_nsamps = ch == 0 ? chunk : ch;
         cfg.fuse_levels  = skewed ? kFDMTAutoFuse : 0;
-        cfg.gpu_path =
-            skewed ? algorithms::detail::FDMTEngineConfig::GPUPath::kSkewed
-                   : algorithms::detail::FDMTEngineConfig::GPUPath::kAuto;
-        auto e = algorithms::detail::make_fdmt_gpu(plan, cfg);
+        cfg.path         = skewed ? algorithms::detail::FDMTPath::kSkewed
+                                  : algorithms::detail::FDMTPath::kTree;
+        auto e           = algorithms::detail::make_fdmt_gpu(plan, cfg);
         INFO("path: " << e->search_path());
-        REQUIRE(e->search_path().starts_with("skewed direct levels") == skewed);
+        REQUIRE(e->path() == cfg.path);
         return e;
     }
     [[nodiscard]] std::unique_ptr<algorithms::detail::FDMTEngine>
     cpu(bool skewed) const {
         algorithms::detail::FDMTEngineConfig cfg{};
-        cfg.exec               = Exec::cpu();
-        cfg.nbeams             = nbeams;
-        cfg.chunk_nsamps       = chunk;
-        cfg.skew_history_bytes = skewed ? 0 : SIZE_MAX;
-        auto e                 = algorithms::detail::make_fdmt_cpu(plan, cfg);
-        REQUIRE(e->search_path().empty() == !skewed);
+        cfg.exec         = Exec::cpu();
+        cfg.nbeams       = nbeams;
+        cfg.chunk_nsamps = chunk;
+        cfg.path         = skewed ? algorithms::detail::FDMTPath::kSkewed
+                                  : algorithms::detail::FDMTPath::kTree;
+        auto e           = algorithms::detail::make_fdmt_cpu(plan, cfg);
+        REQUIRE(e->path() == cfg.path);
         return e;
     }
     [[nodiscard]] SizeType dmt_size() const {
@@ -194,6 +194,12 @@ TEST_CASE("FDMT (gpu) skewed path: packed input, history and input types",
         }
         std::vector<float> junk(hsize, 0.5F);
         REQUIRE_THROWS_AS(a->load_history(junk), std::invalid_argument);
+        auto nan_hdr = hist;
+        nan_hdr[6]   = std::numeric_limits<float>::quiet_NaN();
+        REQUIRE_THROWS_AS(a->load_history(nan_hdr), std::invalid_argument);
+        auto inf_hdr = hist;
+        inf_hdr[6]   = std::numeric_limits<float>::infinity();
+        REQUIRE_THROWS_AS(a->load_history(inf_hdr), std::invalid_argument);
     }
 
     SECTION("switching input type keeps the stream (matches CPU skew)") {

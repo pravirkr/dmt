@@ -7,16 +7,162 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "dmt/common/boxcar_plans.hpp"
 #include "dmt/common/candidate.hpp"
 #include "dmt/common/plans.hpp"
 
+#include "dmt/dm_utils.hpp"
+#include "dmt/fdmt_box_weights.hpp"
+#include "dmt/fdmt_variance.hpp"
+
 namespace dmt::algorithms::detail {
+
+/// Ascending (leaf box length, active channel count) entry of a row's
+/// noise histogram.
+struct BoxcarLengthBin {
+    uint32_t len;
+    uint32_t count;
+};
+
+/// Merges two ascending BoxcarLengthBin histograms into `dst` (counting only
+/// when `dst == nullptr`). Returns the merged entry count.
+inline SizeType merge_length_bins(std::span<const BoxcarLengthBin> a,
+                                  std::span<const BoxcarLengthBin> b,
+                                  BoxcarLengthBin* dst) noexcept {
+    const BoxcarLengthBin* x  = a.data();
+    const BoxcarLengthBin* xe = x + a.size();
+    const BoxcarLengthBin* y  = b.data();
+    const BoxcarLengthBin* ye = y + b.size();
+    SizeType k                = 0;
+    while (x != xe || y != ye) {
+        BoxcarLengthBin v{};
+        if (y == ye || (x != xe && x->len < y->len)) {
+            v = *x++;
+        } else if (x == xe || y->len < x->len) {
+            v = *y++;
+        } else {
+            v = {x->len, x->count + y->count};
+            ++x;
+            ++y;
+        }
+        if (dst != nullptr) {
+            dst[k] = v;
+        }
+        ++k;
+    }
+    return k;
+}
+
+/// Σ count · len · weight over a row's ascending length histogram (skipping
+/// zero counts): the row's mean per unit code and filter weight.
+inline double row_mean_weight(std::span<const BoxcarLengthBin> hist,
+                              bool smear,
+                              SizeType frac_bits,
+                              double unit) noexcept {
+    double sum = 0.0;
+    for (const auto& e : hist) {
+        if (e.count == 0) {
+            continue;
+        }
+        const SizeType len  = e.len;
+        const double weight = smear ? box_weight(len, frac_bits) * unit : 1.0;
+        sum += static_cast<double>(e.count) * static_cast<double>(len) * weight;
+    }
+    return sum;
+}
+
+struct RowWidthNoise {
+    float inv_sigma         = 0.0F;
+    float thresh            = std::numeric_limits<float>::max();
+    double integer_mean     = 0.0;
+    uint64_t integer_thresh = UINT64_MAX;
+    bool ok_float           = true;
+    bool ok_int             = true;
+};
+
+/// Noise parameters of one (row, width) pair from its ascending leaf-length
+/// histogram. Shared by make_boxcar_plans() and BoxcarNoiseModel::compute()
+/// so constructor tables and per-call mask tables stay bit-identical.
+/// When `shift_to_ref` is true (packed per-call masks), the integer cutoff is
+/// shifted by the exact difference between `mw_ref` and `mw`.
+inline RowWidthNoise row_width_noise(std::span<const BoxcarLengthBin> hist,
+                                     SizeType width,
+                                     const BoxcarConfig& config,
+                                     bool smear,
+                                     SizeType frac_bits,
+                                     double unit,
+                                     bool packed,
+                                     double mw,
+                                     double mw_ref     = 0.0,
+                                     bool shift_to_ref = false) noexcept {
+    const SizeType w_edge =
+        config.use_trapezoid
+            ? trapezoid_edge_width(static_cast<uint32_t>(width))
+            : 0;
+    double variance = 0.0;
+    for (const auto& e : hist) {
+        if (e.count == 0) {
+            continue;
+        }
+        const SizeType len  = e.len;
+        const double weight = smear ? box_weight(len, frac_bits) * unit : 1.0;
+        const auto n        = static_cast<double>(e.count);
+        variance += n * fdmt_trapezoid_variance(len, width, w_edge, weight);
+    }
+    RowWidthNoise out;
+    if (variance == 0.0) {
+        return out;
+    }
+    const double sigma    = config.noise_sigma * std::sqrt(variance);
+    const float inv_sigma = static_cast<float>(1.0 / sigma);
+    const float threshold = static_cast<float>(config.detect_thresh * sigma);
+    out.ok_float          = utils::is_finite_bits(inv_sigma) &&
+                            utils::is_finite_bits(threshold) && inv_sigma > 0 &&
+                            threshold > 0;
+    out.inv_sigma         = inv_sigma;
+    out.thresh            = threshold;
+    if (packed) {
+        const double scale = smear ? 1.0 / unit : 1.0;
+        const double filter_weight =
+            w_edge == 0 ? static_cast<double>(width)
+                        : static_cast<double>(2 * (width - w_edge));
+        const double mean = config.input_mean * mw * filter_weight * scale;
+        const double cutoff =
+            std::ceil(mean + (config.detect_thresh * sigma * scale));
+        if (!shift_to_ref) {
+            out.ok_int = cutoff < std::ldexp(1.0, 64);
+            if (out.ok_int) {
+                out.integer_mean   = mean;
+                out.integer_thresh = static_cast<uint64_t>(cutoff);
+            }
+        } else {
+            const double mean_ref =
+                config.input_mean * mw_ref * filter_weight * scale;
+            const double shift = mean_ref - mean;
+            // A whole number (integer mean code, dyadic weights).
+            const bool fits = cutoff < std::ldexp(1.0, 64) && shift >= 0 &&
+                              shift < std::ldexp(1.0, 63) &&
+                              shift == std::floor(shift);
+            out.ok_int      = fits;
+            if (fits) {
+                const auto c0      = static_cast<uint64_t>(cutoff);
+                const auto sh      = static_cast<uint64_t>(shift);
+                out.ok_int         = c0 <= UINT64_MAX - sh;
+                out.integer_thresh = c0 + sh;
+            }
+        }
+    }
+    return out;
+}
 
 /// Raw thresholds and inverse sigmas of every searched row and width (rows
 /// in plane order, then DM; widths fastest), as BoxcarPlanePlan's
@@ -116,10 +262,7 @@ public:
     }
 
 private:
-    struct Bin {
-        uint32_t len;
-        uint32_t count;
-    };
+    using Bin = BoxcarLengthBin;
     /// Fills the bins of every level from level-0 counts `mask` (empty:
     /// all active); with `layout`, also builds the offsets first.
     void fill(std::span<const uint8_t> mask, bool layout);
@@ -236,5 +379,215 @@ inline void block_masks(const LiveHistory& live,
         out.catch_all = true;
     }
 }
+
+/**
+ * @brief Noise tables and kill runs for one call (FDMTBoxcar per-call masks).
+ *
+ * `steady` / `transition_tables` null means the constructor's tables. When
+ * blocks are shorter than the engine's search latency, the facade also
+ * supplies a catch-all table set covering every channel live since
+ * `FDMTBoxcarEngine::noise_catch_all_begin()`. The engine keeps the latest
+ * one and gives it, as steady and transition tables, to the oldest entry of
+ * a full ring, which then also stands for the evicted blocks still searched.
+ */
+struct BlockNoise {
+    uint64_t first_sample = 0;
+    std::shared_ptr<const NoiseTables> steady;
+    bool transition = false;
+    std::shared_ptr<const NoiseTables> transition_tables;
+    std::vector<std::pair<SizeType, SizeType>> kill_runs;
+    bool has_catch_all = false; ///< catch_all set (null: constructor)
+    std::shared_ptr<const NoiseTables> catch_all;
+};
+
+/**
+ * @brief Host-side ring buffer and rollback state for per-call kill masks,
+ * shared by the CPU and GPU FDMTBoxcar engines.
+ */
+class BlockNoiseRing {
+public:
+    void enable(
+        SizeType ring_needed,
+        SizeType ring_size,
+        const std::vector<std::pair<SizeType, SizeType>>& default_kill_runs) {
+        m_ring_needed = ring_needed;
+        m_ring_size   = ring_size;
+        m_ring.reserve(m_ring_size + 1);
+        m_enabled = true;
+        reset(default_kill_runs);
+    }
+
+    [[nodiscard]] bool enabled() const noexcept { return m_enabled; }
+    [[nodiscard]] SizeType ring_needed() const noexcept {
+        return m_ring_needed;
+    }
+    [[nodiscard]] SizeType ring_size() const noexcept { return m_ring_size; }
+    [[nodiscard]] std::span<const BlockNoise> entries() const noexcept {
+        return m_ring;
+    }
+    [[nodiscard]] const std::vector<std::pair<SizeType, SizeType>>&
+    current_kill_runs() const noexcept {
+        return m_ring.back().kill_runs;
+    }
+
+    void push(BlockNoise entry) { m_pending = std::move(entry); }
+
+    void
+    reset(const std::vector<std::pair<SizeType, SizeType>>& default_kill_runs) {
+        m_pending.reset();
+        m_evicted.reset();
+        m_prev_evicted.reset();
+        m_commit_open   = false;
+        m_has_catch_all = false;
+        m_catch_all.reset();
+        m_catch_undo = {};
+        m_ring.clear();
+        BlockNoise first; // the constructor tables from stream sample 0
+        first.kill_runs = default_kill_runs;
+        m_ring.push_back(std::move(first));
+    }
+
+    void commit(
+        uint64_t position,
+        const std::vector<std::pair<SizeType, SizeType>>& default_kill_runs) {
+        if (!m_enabled) {
+            return;
+        }
+        BlockNoise entry;
+        if (m_pending) {
+            entry = std::move(*m_pending);
+            m_pending.reset();
+        } else {
+            entry.steady    = m_ring.back().steady;
+            entry.kill_runs = default_kill_runs;
+        }
+        entry.first_sample         = position;
+        m_prev_evicted             = std::move(m_evicted);
+        m_catch_undo               = {};
+        m_catch_undo.has_catch_all = m_has_catch_all;
+        m_catch_undo.catch_all     = m_catch_all;
+        if (entry.has_catch_all) {
+            m_catch_all         = std::move(entry.catch_all);
+            m_has_catch_all     = true;
+            entry.has_catch_all = false;
+        }
+        m_evicted.reset();
+        if (m_ring.size() == m_ring_size) {
+            m_evicted = std::move(m_ring.front());
+            m_ring.erase(m_ring.begin());
+        }
+        m_ring.push_back(std::move(entry));
+        // A short block evicted an entry still searched: the oldest kept one
+        // stands for it with the catch-all.
+        if (m_evicted && m_ring_needed > m_ring_size && m_has_catch_all) {
+            auto& front                    = m_ring.front();
+            m_catch_undo.front_set         = true;
+            m_catch_undo.steady            = front.steady;
+            m_catch_undo.transition_tables = front.transition_tables;
+            m_catch_undo.transition        = front.transition;
+            front.steady                   = m_catch_all;
+            front.transition_tables        = m_catch_all;
+            front.transition               = true;
+        }
+        m_commit_open = true;
+    }
+
+    void finish_commit() noexcept {
+        m_commit_open = false;
+        m_catch_undo  = {};
+        m_prev_evicted.reset();
+    }
+
+    // m_ring is pre-reserved to m_ring_size + 1 in enable().
+    // NOLINTNEXTLINE(bugprone-exception-escape)
+    bool undo_commit() noexcept {
+        if (!m_commit_open) {
+            return false;
+        }
+        auto& u = m_catch_undo;
+        if (u.front_set) {
+            auto& front             = m_ring.front();
+            front.steady            = std::move(u.steady);
+            front.transition_tables = std::move(u.transition_tables);
+            front.transition        = u.transition;
+        }
+        m_has_catch_all = u.has_catch_all;
+        m_catch_all     = std::move(u.catch_all);
+        u               = {};
+        m_ring.pop_back();
+        if (m_evicted) {
+            m_ring.insert(m_ring.begin(), std::move(*m_evicted));
+        }
+        m_evicted     = std::move(m_prev_evicted);
+        m_commit_open = false;
+        return true;
+    }
+
+    bool drop() noexcept {
+        m_pending.reset();
+        return undo_commit();
+    }
+
+    [[nodiscard]] uint64_t
+    catch_all_begin(uint64_t position, uint64_t block_nsamps) const noexcept {
+        if (!m_enabled || m_ring_needed <= m_ring_size) {
+            return UINT64_MAX;
+        }
+        // The first sample of the oldest block the next call still searches.
+        const uint64_t back = (m_ring_needed - 1) * block_nsamps;
+        return position > back ? position - back : 0;
+    }
+
+    [[nodiscard]] SizeType index_for(uint64_t sample) const noexcept {
+        SizeType i = m_ring.size() - 1;
+        while (i > 0 && m_ring[i].first_sample > sample) {
+            --i;
+        }
+        return i;
+    }
+
+    [[nodiscard]] bool references_table(uint64_t id) const noexcept {
+        const auto has = [id](const BlockNoise& e) {
+            return (e.steady && e.steady->id == id) ||
+                   (e.transition_tables && e.transition_tables->id == id);
+        };
+        if (m_evicted && has(*m_evicted)) {
+            return true;
+        }
+        for (const auto& e : m_ring) {
+            if (has(e)) {
+                return true;
+            }
+        }
+        // The tables the catch-all replaced: an undo restores them.
+        const auto& u = m_catch_undo;
+        return u.front_set &&
+               ((u.steady && u.steady->id == id) ||
+                (u.transition_tables && u.transition_tables->id == id));
+    }
+
+private:
+    /// What the open commit replaced (restored by undo_commit()).
+    struct CatchUndo {
+        bool has_catch_all = false;
+        std::shared_ptr<const NoiseTables> catch_all;
+        bool front_set = false;
+        std::shared_ptr<const NoiseTables> steady, transition_tables;
+        bool transition = false;
+    };
+
+    bool m_enabled         = false;
+    SizeType m_ring_size   = 1;
+    SizeType m_ring_needed = 1;
+    std::vector<BlockNoise> m_ring; ///< oldest first, at most m_ring_size
+    std::optional<BlockNoise> m_pending;
+    /// The entry the last commit evicted, kept until its call completes.
+    std::optional<BlockNoise> m_evicted;
+    std::optional<BlockNoise> m_prev_evicted;
+    bool m_commit_open   = false;
+    bool m_has_catch_all = false; ///< m_catch_all set (null: constructor)
+    std::shared_ptr<const NoiseTables> m_catch_all;
+    CatchUndo m_catch_undo;
+};
 
 } // namespace dmt::algorithms::detail

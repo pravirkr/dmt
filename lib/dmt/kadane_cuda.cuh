@@ -1,10 +1,9 @@
 #pragma once
 
-#include <cmath>
 #include <cstdint>
 
+#include "dmt/device_macros.hpp"
 #include "dmt/kadane_monoid.hpp"
-#include "dmt/kadane_surrogate.hpp"
 #if defined(__CUDACC__) || defined(__HIPCC__) || defined(__HIP__)
 #include "dmt/gpu_compat.cuh"
 #endif
@@ -33,109 +32,6 @@ struct KadaneGateDeviceView {
     int32_t* state_ic           = nullptr; ///< [tasks * num_buckets]
     LagWindow<float>* lag_f32   = nullptr; ///< [tasks * num_buckets] optional
     LagWindow<int32_t>* lag_i32 = nullptr; ///< [tasks * num_buckets] optional
-};
-
-/// Compact device descriptor & O(1) S/N evaluator for `kKadaneSurrogate`.
-struct KadaneSurrogateDeviceView {
-    SizeType num_passes = 0;
-    SizeType n_rows     = 0;
-    SizeType row_stride = 0;
-    SizeType n_filters  = 0;
-    uint32_t max_width  = 0;
-    bool has_decimated  = false;
-    bool is_integer     = false;
-    bool int_u32_direct = false;
-    double integer_unit = 1.0;
-
-    uint32_t decimate_factors[kMaxSurrogatePasses]{};
-
-    const float* bias            = nullptr; ///< [num_passes * row_stride]
-    const float* trigger         = nullptr; ///< [num_passes * row_stride]
-    const float* box_inv_sigma   = nullptr; ///< [n_rows * n_filters]
-    const double* row_mean_1     = nullptr; ///< [n_rows] when is_integer
-    const double* row_int_m1     = nullptr; ///< [n_rows] when packed centered
-    const uint8_t* disabled_row  = nullptr; ///< [n_rows]
-    const uint32_t* w_nearest    = nullptr; ///< [max_width + 1]
-    const uint32_t* w_bracket_lo = nullptr; ///< [max_width + 1]
-    const uint32_t* w_bracket_hi = nullptr; ///< [max_width + 1]
-    const float* w_log_lerp      = nullptr; ///< [max_width + 1]
-
-    KadaneSurrogateRowState* row_states = nullptr; ///< [tasks]
-    uint64_t* row_pos                   = nullptr; ///< [tasks]
-
-    [[nodiscard]] DMT_HD float row_bias(SizeType k, SizeType r) const noexcept {
-        return bias[(k * row_stride) + r];
-    }
-
-    [[nodiscard]] DMT_HD float row_trigger(SizeType k,
-                                           SizeType r) const noexcept {
-        return trigger[(k * row_stride) + r];
-    }
-
-    [[nodiscard]] DMT_HD uint32_t
-    nearest_filter_idx(uint32_t width) const noexcept {
-        if (n_filters == 0 || width <= 1U) {
-            return 0U;
-        }
-        if (width >= max_width) {
-            return static_cast<uint32_t>(n_filters - 1);
-        }
-        return w_nearest[width];
-    }
-
-    [[nodiscard]] DMT_HD float interpolate_inv_sigma(
-        SizeType row, uint32_t width, uint32_t min_width) const noexcept {
-        if (row >= n_rows || disabled_row[row] != 0U || width == 0U) {
-            return 0.0F;
-        }
-        const float* row_inv = box_inv_sigma + (row * n_filters);
-        if (width < min_width) {
-            const float scale = surrogate_width_scale(
-                static_cast<float>(min_width), static_cast<float>(width));
-            return row_inv[0] * scale;
-        }
-        if (width >= max_width) {
-            const float inv_max = row_inv[n_filters - 1];
-            if (width == max_width) {
-                return inv_max;
-            }
-            const float scale = surrogate_width_scale(
-                static_cast<float>(max_width), static_cast<float>(width));
-            return inv_max * scale;
-        }
-        const uint32_t lo = w_bracket_lo[width];
-        const uint32_t hi = w_bracket_hi[width];
-        const float t     = w_log_lerp[width];
-        if (lo == hi || t <= 0.0F) {
-            return row_inv[lo];
-        }
-        const float inv_lo = row_inv[lo];
-        const float inv_hi = row_inv[hi];
-        return surrogate_log_lerp(inv_lo, inv_hi, t);
-    }
-
-    [[nodiscard]] DMT_HD float
-    eval_surrogate_snr(SizeType row,
-                       double raw_sum,
-                       uint32_t width,
-                       uint32_t min_width,
-                       uint32_t& out_filter_idx) const noexcept {
-        out_filter_idx = nearest_filter_idx(width);
-        if (row >= n_rows || disabled_row[row] != 0U || width == 0U) {
-            return 0.0F;
-        }
-        const float inv_s = interpolate_inv_sigma(row, width, min_width);
-        if (inv_s <= 0.0F) {
-            return 0.0F;
-        }
-        double signal = raw_sum;
-        if (is_integer && row_mean_1 != nullptr) {
-            signal =
-                (raw_sum - (row_mean_1[row] * static_cast<double>(width))) *
-                integer_unit;
-        }
-        return static_cast<float>(signal * static_cast<double>(inv_s));
-    }
 };
 
 #if defined(__CUDACC__) || defined(__HIPCC__) || defined(__HIP__)

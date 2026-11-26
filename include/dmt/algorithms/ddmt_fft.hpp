@@ -50,11 +50,11 @@ struct DDMTFFTOptions {
 
 /**
  * @brief Memory a DDMTFFT instance holds, in bytes: host memory on the CPU
- * backend, device memory on a GPU backend. Buffers are created by the calls
- * that need them and kept (see DDMTFFT::estimate_memory()). Not counted: the
- * caller's input and output, the FFT libraries' plan objects (cuFFT work
- * areas are counted), per-call temporaries, and on a GPU the 64 MiB pinned
- * host staging of host-memory calls.
+ * backend, device memory on a GPU backend (`pinned` apart). Buffers are
+ * created by the calls that need them and kept (see
+ * DDMTFFT::estimate_memory()). Not counted: the caller's input and output, the
+ * FFT libraries' plan objects (cuFFT work areas are counted), and per-call
+ * temporaries.
  */
 struct DDMTFFTMemoryUsage {
     SizeType plan{0};      ///< Delay and method tables (NUFFT plans)
@@ -65,8 +65,10 @@ struct DDMTFFTMemoryUsage {
     SizeType workspace{0}; ///< CPU: per-thread rows and scratch
     SizeType staging{0};   ///< Unpacked input, and on a GPU the device copies
                            ///< of host input and output, for the calls made
+    SizeType pinned{0};    ///< GPU: pinned host buffers held for host-memory
+                           ///< calls (host memory, not in total())
 
-    /// Total held by the instance.
+    /// Total held where the instance runs (excludes `pinned`).
     [[nodiscard]] constexpr SizeType total() const noexcept {
         return plan + history + transform + workspace + staging;
     }
@@ -78,11 +80,17 @@ struct DDMTFFTMemoryUsage {
  */
 struct DDMTFFTMemoryEstimate {
     /// get_memory_usage() once a cold stream of calls of that length is warm
-    /// (staging 0: CPU execute(), GPU device-memory execute() of float input).
+    /// (staging and pinned 0: CPU execute(), GPU device-memory execute() of
+    /// float input).
     DDMTFFTMemoryUsage usage{};
     /// Staging such a stream of host-memory execute() calls adds (GPU; 0 on
     /// the CPU).
     SizeType host_staging{0};
+    /// GPU: pinned host bytes such a stream of host-memory execute() or
+    /// execute_time_major() calls adds when the warm output reaches the
+    /// staging threshold (2 * min(max(1, nthreads), 4) * 8 MiB; 0 otherwise
+    /// and on the CPU).
+    SizeType host_pinned{0};
     /// Staging such a stream of execute_time_major() calls adds (packed
     /// plans; 0 for float plans).
     SizeType time_major_staging{0};
@@ -213,7 +221,7 @@ public:
     [[nodiscard]] SizeType get_nbeams() const noexcept;
     /// @brief Backend this instance runs on.
     [[nodiscard]] Backend backend() const noexcept;
-    /// @brief OpenMP threads used (CPU backend); 1 on a GPU backend.
+    /// @brief OpenMP threads (CPU) or host-staging worker cap (GPU).
     [[nodiscard]] int nthreads() const noexcept;
     /// @brief Device ordinal used (GPU backend); -1 on the CPU backend.
     [[nodiscard]] int device() const noexcept;
@@ -271,14 +279,6 @@ public:
     get_output_nsamps(SizeType input_nsamps) const noexcept;
     /// @brief Discards the retained history (cold start).
     void reset_history() noexcept;
-
-    /// @brief Host-path chunk length, stored for API parity with DDMT. The
-    /// Fourier engines transform every call whole on every backend:
-    /// chunking a call would move the transform boundaries, and with them
-    /// the (guard-level) result. 0: default.
-    void set_gulp_size(SizeType gulp_size);
-    /// @brief Current host-path chunk length in input samples.
-    [[nodiscard]] SizeType get_gulp_size() const noexcept;
 
     /// @brief Floats in a fully warmed-up history: nbeams * nchans *
     /// (get_max_delay() + guard).

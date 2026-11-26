@@ -286,10 +286,12 @@ FDMTFFT::estimate_memory(const plans::FDMTPlan& plan,
                          .chunk_nsamps = impl.m_engine->segment_nsamps()};
     if (exec.backend != Backend::kCPU) {
         // The float input block and the output plane, staged on the device.
+        const SizeType out_bytes = nbeams * plan.get_dmt_size() * sizeof(float);
         e.host_staging =
-            nbeams *
-            ((plan.get_nchans() * plan.get_nsamps()) + plan.get_dmt_size()) *
-            sizeof(float);
+            (nbeams * plan.get_nchans() * plan.get_nsamps() * sizeof(float)) +
+            out_bytes;
+        e.host_pinned =
+            detail::host_staging_pinned_bytes(out_bytes, exec.nthreads);
     }
     return e;
 }
@@ -307,7 +309,7 @@ FDMTMemoryUsage FDMTFFT::get_memory_usage() const noexcept {
 SizeType FDMTFFT::get_nbeams() const noexcept { return m_impl->m_cfg.nbeams; }
 Backend FDMTFFT::backend() const noexcept { return m_impl->m_cfg.exec.backend; }
 int FDMTFFT::nthreads() const noexcept {
-    return m_impl->on_cpu() ? std::max(1, m_impl->m_cfg.exec.nthreads) : 1;
+    return std::max(1, m_impl->m_cfg.exec.nthreads);
 }
 int FDMTFFT::device() const noexcept {
     return m_impl->on_cpu() ? -1 : m_impl->m_cfg.exec.device;

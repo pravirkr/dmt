@@ -14,6 +14,7 @@
 
 #include "dmt/engines.hpp"
 
+#include "test_helpers.hpp"
 #include "test_random.hpp"
 
 // FDMTFFT packed and time-major input, kill mask and streaming history, and
@@ -39,28 +40,6 @@ std::vector<float> noise(SizeType n, unsigned seed) {
     return dmt::test_random::normal<float>(n, seed);
 }
 
-// rows x n unsigned values -> rows of LSB-first packed bytes.
-std::vector<uint8_t> pack_rows(const std::vector<uint32_t>& vals,
-                               SizeType rows,
-                               SizeType n,
-                               SizeType nbits) {
-    const auto rb = ((n * nbits) + 7) / 8;
-    std::vector<uint8_t> out(rows * rb, 0);
-    for (SizeType r = 0; r < rows; ++r) {
-        for (SizeType i = 0; i < n; ++i) {
-            const auto v   = vals[(r * n) + i];
-            const auto bit = i * nbits;
-            for (SizeType q = 0; q < nbits; ++q) {
-                if (((v >> q) & 1U) != 0U) {
-                    out[(r * rb) + ((bit + q) / 8)] |=
-                        static_cast<uint8_t>(1U << ((bit + q) % 8));
-                }
-            }
-        }
-    }
-    return out;
-}
-
 double max_rel(const std::vector<float>& a, const std::vector<float>& b) {
     REQUIRE(a.size() == b.size());
     double diff = 0.0;
@@ -71,18 +50,6 @@ double max_rel(const std::vector<float>& a, const std::vector<float>& b) {
     }
     return ref > 0.0 ? diff / ref : diff;
 }
-
-// Restores the segment-cap hook at scope exit.
-struct SegmentCap {
-    explicit SegmentCap(SizeType n) {
-        algorithms::detail::set_fft_segment_cap(n);
-    }
-    ~SegmentCap() { algorithms::detail::set_fft_segment_cap(0); }
-    SegmentCap(const SegmentCap&)            = delete;
-    SegmentCap& operator=(const SegmentCap&) = delete;
-    SegmentCap(SegmentCap&&)                 = delete;
-    SegmentCap& operator=(SegmentCap&&)      = delete;
-};
 
 } // namespace
 
@@ -105,8 +72,8 @@ TEST_CASE("FDMTFFT packed and time-major input match float input",
                     }
                 }
             }
-            const auto packed    = pack_rows(vals, 2 * kNch, kNs, nbits);
-            const auto tm_packed = pack_rows(tm, 2 * kNs, kNch, nbits);
+            const auto packed    = test::pack_rows(vals, 2 * kNch, kNs, nbits);
+            const auto tm_packed = test::pack_rows(tm, 2 * kNs, kNch, nbits);
             const auto make      = [&] {
                 return FDMTFFT(kFMin, kFMax, kNch, kNs, kTsamp, 48, 0, 1, true,
                                mode, Exec::cpu(), 2);
@@ -133,7 +100,7 @@ TEST_CASE("FDMTFFT packed stepper matches packed execute",
           "[cpu][fdmt_fft_cpu]") {
     const auto vals =
         dmt::test_random::uniform_int<uint32_t>(kNch * kNs, 9, 0, 15);
-    const auto packed = pack_rows(vals, kNch, kNs, 4);
+    const auto packed = test::pack_rows(vals, kNch, kNs, 4);
     FDMTFFT a(kFMin, kFMax, kNch, kNs, kTsamp, 48);
     FDMTFFT b(kFMin, kFMax, kNch, kNs, kTsamp, 48);
     const auto n = a.get_plan().get_dmt_size();
@@ -224,18 +191,26 @@ TEST_CASE("FDMTFFT forced segments equal the single transform",
     for (const auto* mode : {"valid", "full"}) {
         for (const bool frac : {true, false}) {
             CAPTURE(mode, frac);
-            FDMTFFT single(kFMin, kFMax, kNch, ns, kTsamp, 48, 0, 1, true, mode,
-                           Exec::cpu(), 1, frac);
-            const SegmentCap cap(1024);
-            FDMTFFT segmented(kFMin, kFMax, kNch, ns, kTsamp, 48, 0, 1, true,
-                              mode, Exec::cpu(), 1, frac);
-            const auto n = single.get_plan().get_dmt_size();
+            const plans::FDMTPlan plan(kFMin, kFMax, kNch, ns, kTsamp, 48, 0, 1,
+                                       mode);
+            FDMTFFT single(plan, true, Exec::cpu(), 1, frac);
+            const auto fdmt_mode = std::string_view(mode) == "valid"
+                                       ? FDMTMode::kValid
+                                       : FDMTMode::kFull;
+            const auto segmented = algorithms::detail::make_fdmt_fft_cpu(
+                plan, {.use_box_smearing  = true,
+                       .mode              = fdmt_mode,
+                       .nbeams            = 1,
+                       .exec              = Exec::cpu(),
+                       .fractional_delays = frac,
+                       .max_segment       = 1024});
+            const auto n = plan.get_dmt_size();
             std::vector<float> a(n);
             std::vector<float> b(n);
             for (unsigned blk = 0; blk < 2; ++blk) {
                 const auto wf = noise(kNch * ns, 20 + blk);
                 single.execute(wf, a);
-                segmented.execute(wf, b);
+                segmented->execute(wf, b);
                 // Integer delays: exact circular shifts, the same linear
                 // convolution. Fractional: the segments truncate the
                 // interpolation kernel elsewhere, a guard-level difference
@@ -251,22 +226,24 @@ TEST_CASE("DDMTFFT forced segments equal the single transform",
           "[cpu][ddmt_fft_cpu]") {
     const SizeType nch = 32;
     const SizeType ns  = 6000;
+    const plans::DDMTPlan plan(kFMin, kFMax, nch, kTsamp, 30.0F, 0.5F, 0.0F);
     for (const auto method : {DDMTFFTMethod::kBrute, DDMTFFTMethod::kNUFFT}) {
         CAPTURE(algorithms::to_string(method));
         const DDMTFFTOptions opts{.method = method};
-        DDMTFFT single(kFMin, kFMax, nch, kTsamp, 30.0F, 0.5F, 0.0F,
-                       Exec::cpu(), 32, {}, 1, opts);
-        const SegmentCap cap(1024);
-        DDMTFFT segmented(kFMin, kFMax, nch, kTsamp, 30.0F, 0.5F, 0.0F,
-                          Exec::cpu(), 32, {}, 1, opts);
-        const auto ndm = single.get_plan().get_dm_arr().size();
+        DDMTFFT single(plan, Exec::cpu(), 1, opts);
+        const auto segmented =
+            algorithms::detail::make_ddmt_fft_cpu(plan, {.nbeams  = 1,
+                                                         .exec    = Exec::cpu(),
+                                                         .options = opts,
+                                                         .max_segment = 1024});
+        const auto ndm = plan.get_dm_arr().size();
         for (unsigned blk = 0; blk < 2; ++blk) {
             const auto wf = noise(nch * ns, 30 + blk);
             const auto n  = ndm * single.get_output_nsamps(ns);
             std::vector<float> a(n);
             std::vector<float> b(n);
             single.execute(wf, a);
-            segmented.execute(wf, b);
+            segmented->execute(wf, b);
             // Guard-level (sinc truncation at the segment edges).
             CHECK(max_rel(b, a) < 5e-2);
         }

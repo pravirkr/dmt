@@ -101,7 +101,8 @@ inline SizeType fdmt_chunk_nsamps(const plans::FDMTPlan& plan,
                                   FDMTMode mode,
                                   SizeType nbeams,
                                   SizeType requested,
-                                  bool regular_only = false) {
+                                  bool regular_only   = false,
+                                  SizeType elem_bytes = sizeof(float)) {
     const SizeType nsamps = plan.get_nsamps();
     if (mode != FDMTMode::kValid) {
         if (requested != 0 && requested < nsamps) {
@@ -134,7 +135,16 @@ inline SizeType fdmt_chunk_nsamps(const plans::FDMTPlan& plan,
         }
         chunk = next;
     }
-    return std::min(chunk, nsamps);
+    chunk = std::min(chunk, nsamps);
+    if ((plan.get_history_size() + plan.get_tree_history_size()) *
+            sizeof(float) >
+        kFDMTChunkStateBudget) {
+        return std::min<SizeType>(1024, nsamps);
+    }
+    if (elem_bytes == sizeof(uint64_t)) {
+        return std::min(nsamps, std::max<SizeType>(64, chunk / 2));
+    }
+    return chunk;
 }
 
 /// Shortest chunk fdmt_cache_chunk() considers: below it the per-chunk
@@ -144,10 +154,10 @@ inline constexpr SizeType kFDMTMinCacheChunk = 256;
 /**
  * @brief GPU automatic chunk: the longest power of two, at least
  * kFDMTMinCacheChunk, whose two state halves (`elem_bytes` per element) fit
- * `cache_bytes` (the device's L2), so each merge reads the level below from
- * L2 rather than DRAM; capped at nsamps. 0 when even the shortest does not
+ * `cache_bytes` (a fixed L2-sized target), so each merge reads the level below
+ * from L2 rather than DRAM; capped at nsamps. 0 when even the shortest does not
  * fit: the merges are DRAM-bound at any chunk and fdmt_chunk_nsamps()'s
- * budget rule applies. On the L40S (96 MiB L2) this is 1.4-1.8x faster than
+ * budget rule applies. On the L40S (96 MiB L2) this is 1.05-1.13x faster than
  * the budget rule on the cryopaf_low presets.
  */
 inline SizeType fdmt_cache_chunk(const plans::FDMTPlan& plan,

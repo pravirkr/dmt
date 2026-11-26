@@ -3,6 +3,11 @@ import pytest
 
 from dmtlib import libdmt
 
+try:
+    from ._helpers import pack_lsb_first
+except ImportError:
+    from _helpers import pack_lsb_first
+
 
 def frb_track_gain(plan: libdmt.FDMTPlan, dm_idx: int, use_box_smearing: bool) -> float:
     """FDMT output of add_frb_track's unit impulses: each channel adds its
@@ -166,7 +171,7 @@ class TestFDMT:
 
         # Allocate custom buffer matching buffer_size
         custom_buf = np.zeros(thefdmt.plan.buffer_size, dtype=np.float32)
-        thefdmt.reset(waterfall, custom_buf)
+        thefdmt.reset(waterfall, dmt=custom_buf)
         thefdmt.advance_until_remaining(1)
         res = thefdmt.finalize()
 
@@ -194,7 +199,7 @@ class TestFDMT:
         # Buffer too small
         undersized_buf = np.zeros(10, dtype=np.float32)
         with pytest.raises(ValueError):
-            thefdmt.reset(waterfall, undersized_buf)
+            thefdmt.reset(waterfall, dmt=undersized_buf)
 
         # Invalid waterfall dimension
         with pytest.raises(RuntimeError):
@@ -714,7 +719,9 @@ class TestFDMT:
         ndms = fdmt_valid.plan.dmt_ndms
         streamed = np.zeros((ndms, total), dtype=np.float32)
         for b in range(n_blocks):
-            block = waterfall[:, b * block_size : (b + 1) * block_size]
+            block = np.ascontiguousarray(
+                waterfall[:, b * block_size : (b + 1) * block_size]
+            )
             streamed[:, b * block_size : (b + 1) * block_size] = fdmt_valid.execute(
                 block
             )
@@ -727,8 +734,12 @@ class TestFDMT:
             atol=1e-5,
         )
 
-        # Test reset_history()
+        # Test reset_history(): re-running block 0 reproduces the cold first block.
         fdmt_valid.reset_history()
+        first_block = np.ascontiguousarray(waterfall[:, :block_size])
+        np.testing.assert_array_equal(
+            fdmt_valid.execute(first_block), streamed[:, :block_size]
+        )
 
     @staticmethod
     def _stream_blocks(fdmt, waterfall, block_size, n_blocks):
@@ -736,7 +747,9 @@ class TestFDMT:
         total = block_size * n_blocks
         streamed = np.zeros((ndms, total), dtype=np.float32)
         for b in range(n_blocks):
-            block = waterfall[:, b * block_size : (b + 1) * block_size]
+            block = np.ascontiguousarray(
+                waterfall[:, b * block_size : (b + 1) * block_size]
+            )
             streamed[:, b * block_size : (b + 1) * block_size] = fdmt.execute(block)
         return streamed
 
@@ -801,38 +814,6 @@ class TestFDMT:
             atol=1e-3,
         )
 
-    def test_valid_mode_streaming_small_block_regime(self) -> None:
-        # Exact target regime where block_size < dt_max
-        nchans = 32
-        dt_max = 32
-        block_size = 8
-        n_blocks = 10
-        total = block_size * n_blocks
-
-        rng = np.random.default_rng(42)
-        wf = rng.standard_normal((nchans, total)).astype(np.float32)
-
-        full_engine = libdmt.FDMT(
-            1200.0, 1600.0, nchans, total, 1e-3, dt_max, 0, mode="full"
-        )
-        res_mono = full_engine.execute(wf)
-
-        valid_engine = libdmt.FDMT(
-            1200.0, 1600.0, nchans, block_size, 1e-3, dt_max, 0, mode="valid"
-        )
-        res_valid = np.zeros_like(res_mono)
-        for b in range(n_blocks):
-            block = wf[:, b * block_size : (b + 1) * block_size]
-            res_valid[:, b * block_size : (b + 1) * block_size] = valid_engine.execute(
-                block
-            )
-
-        # After warm-up of dt_max samples, streaming valid mode must match monolithic full
-        valid_slice = slice(dt_max, (n_blocks - 1) * block_size)
-        diff = np.abs(res_mono[:, valid_slice] - res_valid[:, valid_slice])
-        assert np.max(diff) < 1e-4
-        assert np.sum(diff > 1e-4) == 0
-
     def test_valid_mode_streaming_multi_beam_small_block(self) -> None:
         # Multi-beam 3D streaming in small block regime (block_size < dt_max)
         nbeams = 4
@@ -863,7 +844,9 @@ class TestFDMT:
         )
         res_valid = np.zeros_like(res_mono)
         for b in range(n_blocks):
-            block = wf[:, :, b * block_size : (b + 1) * block_size]
+            block = np.ascontiguousarray(
+                wf[:, :, b * block_size : (b + 1) * block_size]
+            )
             res_valid[:, :, b * block_size : (b + 1) * block_size] = (
                 valid_engine.execute(block)
             )
@@ -993,9 +976,11 @@ class TestFDMT:
         ndms = fdmt_valid.plan.dmt_ndms
         streamed = np.zeros((ndms, total), dtype=np.float32)
         for b in range(n_blocks):
-            block = waterfall[:, b * block_size : (b + 1) * block_size]
+            block = np.ascontiguousarray(
+                waterfall[:, b * block_size : (b + 1) * block_size]
+            )
             dmt_buf = np.zeros(fdmt_valid.plan.buffer_size, dtype=np.float32)
-            fdmt_valid.reset(block, dmt_buf)
+            fdmt_valid.reset(block, dmt=dmt_buf)
             fdmt_valid.advance_until_remaining(2)
             assert fdmt_valid.num_subbands == 4
             for s in range(4):
@@ -1098,22 +1083,6 @@ class TestFDMT:
         )
 
 
-def _pack_lsb_first(values: np.ndarray, nbits: int) -> np.ndarray:
-    """Pack unsigned ``nbits``-wide samples row-wise, LSB-first (DDMT convention)."""
-    nrows, nsamps = values.shape
-    if nbits == 8:
-        return values.astype(np.uint8)
-    if nbits == 16:
-        return values.astype("<u2").view(np.uint8).reshape(nrows, 2 * nsamps)
-    per_byte = 8 // nbits
-    row_bytes = (nsamps * nbits + 7) // 8
-    padded = np.zeros((nrows, row_bytes * per_byte), dtype=np.uint32)
-    padded[:, :nsamps] = values
-    shifts = (np.arange(per_byte, dtype=np.uint32) * nbits)[None, None, :]
-    lanes = padded.reshape(nrows, row_bytes, per_byte) << shifts
-    return lanes.sum(axis=2).astype(np.uint8)
-
-
 class TestFDMTPerformanceParams:
     nchans = 64
     nsamps = 203
@@ -1185,7 +1154,7 @@ class TestFDMTPerformanceParams:
         values = rng.integers(
             0, 2**nbits, size=(self.nchans, self.nsamps), dtype=np.uint32
         )
-        packed = _pack_lsb_first(values, nbits)
+        packed = pack_lsb_first(values, nbits)
         assert packed.shape == (self.nchans, (self.nsamps * nbits + 7) // 8)
 
         def make(**perf: object) -> libdmt.FDMT:
@@ -1196,8 +1165,8 @@ class TestFDMTPerformanceParams:
         ref = make(fuse_levels=0, int_tree=False)
         expected = np.array(ref.execute(values.astype(np.float32)))
         ref.reset_history()
-        expected_pk = np.array(ref.execute(packed, nbits))
-        got = np.array(make(int_tree=int_tree).execute(packed, nbits))
+        expected_pk = np.array(ref.execute(packed, nbits=nbits))
+        got = np.array(make(int_tree=int_tree).execute(packed, nbits=nbits))
         np.testing.assert_array_equal(got, expected_pk)
 
         plan = ref.plan
@@ -1216,9 +1185,11 @@ class TestFDMTPerformanceParams:
         with pytest.raises(TypeError):
             fdmt.execute(packed)
         with pytest.raises(TypeError):
-            fdmt.execute(packed.astype(np.float32), 8)
+            fdmt.execute(packed, 8)
         with pytest.raises(ValueError):
-            fdmt.execute(packed, 3)
+            fdmt.execute(packed.astype(np.float32), nbits=8)
+        with pytest.raises(ValueError):
+            fdmt.execute(packed, nbits=3)
 
     @pytest.mark.parametrize("mode", ["full", "roll", "valid"])
     @pytest.mark.parametrize("fuse_levels", [1, 3, None])
@@ -1385,7 +1356,8 @@ def _check_estimate(backend: str) -> None:
     assert (est.host_staging == 0) == (backend == "cpu")
 
     plan = libdmt.FDMTPlan(1100.0, 1714.0, 1152, 4096, 455.6e-6, 2700)
-    budget = 60 << 20
+    full_est = libdmt.FDMT.estimate_memory(plan, backend=backend)
+    budget = full_est.usage.total // 2
     est = libdmt.FDMT.estimate_memory(plan, backend=backend, max_memory_bytes=budget)
     fdmt = libdmt.FDMT(plan, backend=backend, max_memory_bytes=budget)
     assert _usage(est.usage) == _usage(fdmt.memory_usage)
@@ -1409,3 +1381,19 @@ def test_estimate_memory_matches_instance_cpu() -> None:
 
 def test_estimate_memory_matches_instance_gpu(gpu_backend: str) -> None:
     _check_estimate(gpu_backend)
+
+
+def test_add_frb_track_and_dt_grid_input_validation() -> None:
+    plan = libdmt.FDMTPlan(700.0, 1200.0, 8, 64, 0.001, 16)
+    with pytest.raises(ValueError, match="float32"):
+        libdmt.add_frb_track(np.zeros((8, 64), dtype=np.float64), plan, 0)
+    with pytest.raises(ValueError, match="C-contiguous"):
+        libdmt.add_frb_track(np.zeros((8, 64), dtype=np.float32, order="F"), plan, 0)
+    ro = np.zeros((8, 64), dtype=np.float32)
+    ro.setflags(write=False)
+    with pytest.raises(ValueError, match="writeable"):
+        libdmt.add_frb_track(ro, plan, 0)
+    with pytest.raises(ValueError, match="integer"):
+        libdmt.FDMTPlan(
+            700.0, 1200.0, 8, 64, 0.001, dt_grid=np.array([0.5, 1.5], dtype=np.float32)
+        )

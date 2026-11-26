@@ -35,6 +35,7 @@
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/fdmt_box_weights.hpp"
+#include "dmt/fdmt_cpu_mem.hpp"
 #include "dmt/fdmt_history.hpp"
 #include "dmt/fdmt_int_tree.hpp"
 #include "dmt/fdmt_search.hpp"
@@ -43,62 +44,9 @@
 
 namespace dmt::algorithms::detail::fdmt_cpu {
 
-/**
- * @brief A large zero-initialised array for the engine's tree state and
- * tree history: 2 MiB-aligned, with transparent huge pages requested on
- * Linux, and zero-filled by `nthreads` threads with a static schedule.
- *
- * Huge pages: a fused time tile writes short runs of thousands of rows that
- * lie a chunk apart, one 4 KiB page each, so with small pages nearly every
- * run misses the TLB. The parallel fill first-touches the pages across the
- * threads (and so across NUMA nodes) instead of on the constructing thread.
- */
-template <typename T> class FDMTLargeArray {
-public:
-    FDMTLargeArray() = default;
-    ~FDMTLargeArray() { std::free(m_data); } // NOLINT
-    FDMTLargeArray(const FDMTLargeArray&)            = delete;
-    FDMTLargeArray& operator=(const FDMTLargeArray&) = delete;
-    FDMTLargeArray(FDMTLargeArray&&)                 = delete;
-    FDMTLargeArray& operator=(FDMTLargeArray&&)      = delete;
-
-    void assign(SizeType n, int nthreads) {
-        std::free(m_data); // NOLINT
-        m_data = nullptr;
-        m_size = n;
-        if (n == 0) {
-            return;
-        }
-        constexpr SizeType kAlign = SizeType{2} << 20;
-        const SizeType bytes =
-            (((n * sizeof(T)) + kAlign - 1) / kAlign) * kAlign;
-        m_data = static_cast<T*>(std::aligned_alloc(kAlign, bytes)); // NOLINT
-        if (m_data == nullptr) {
-            throw std::bad_alloc();
-        }
-#if defined(__linux__) && defined(MADV_HUGEPAGE)
-        ::madvise(m_data, bytes, MADV_HUGEPAGE); // a hint; failure is harmless
-#endif
-        auto* raw            = reinterpret_cast<std::byte*>(m_data);
-        const SizeType pages = bytes / kAlign;
-#pragma omp parallel for num_threads(nthreads) schedule(static)
-        for (SizeType i = 0; i < pages; ++i) {
-            std::memset(raw + (i * kAlign), 0, kAlign);
-        }
-    }
-    [[nodiscard]] T* data() noexcept { return m_data; }
-    [[nodiscard]] const T* data() const noexcept { return m_data; }
-    [[nodiscard]] SizeType size() const noexcept { return m_size; }
-    [[nodiscard]] bool empty() const noexcept { return m_size == 0; }
-    [[nodiscard]] T* begin() noexcept { return m_data; }
-    [[nodiscard]] T* end() noexcept { return m_data + m_size; }
-    [[nodiscard]] const T* begin() const noexcept { return m_data; }
-    [[nodiscard]] const T* end() const noexcept { return m_data + m_size; }
-
-private:
-    T* m_data{nullptr};
-    SizeType m_size{0};
-};
+using detail::fdmt_stream_add;
+using detail::fdmt_stream_fence;
+using detail::FDMTLargeArray;
 
 /**
  * @brief One merge (or copy) of the engine's tree, from the plan's
@@ -138,26 +86,21 @@ struct FDMTRowLengths {
  * @brief Per-thread scratch carved out of one engine-owned buffer allocated
  * at construction (see FDMTCpuEngine::m_workspace), so execute() never
  * allocates. Thread t's slice starts at base + t * stride and holds, at
- * fixed offsets: one unpacked packed-input row (`unpack`, nsamps samples of
- * <= 4 bytes), two running level-0 box rows for mixed-sign dt grids
- * (`rows`), and the level-fusion ping-pong buffers (`fused_a`/`fused_b`).
+ * fixed offsets: one unpacked packed-input row (`slice(tid)`, nsamps samples
+ * of <= 8 bytes), two running level-0 box rows for mixed-sign dt grids
+ * (`slice(tid) + row_bytes`), and the level-fusion ping-pong buffers
+ * (`fused_a`/`fused_b`).
  * Every parallel region that uses it runs with exactly `nthreads` threads.
  */
 struct FDMTWorkspace {
     std::byte* base{nullptr};
     SizeType stride{0};
-    SizeType row_bytes{0};   ///< one row of nsamps samples, <= 4 bytes each
+    SizeType row_bytes{0};   ///< one row of nsamps samples, <= 8 bytes each
     SizeType fused_bytes{0}; ///< one fusion ping-pong buffer
     int nthreads{1};
 
     [[nodiscard]] std::byte* slice(SizeType tid) const noexcept {
         return base + (tid * stride);
-    }
-    template <typename T> [[nodiscard]] T* unpack(SizeType tid) const noexcept {
-        return reinterpret_cast<T*>(slice(tid));
-    }
-    template <typename T> [[nodiscard]] T* rows(SizeType tid) const noexcept {
-        return reinterpret_cast<T*>(slice(tid) + row_bytes);
     }
     [[nodiscard]] std::byte* fused_a(SizeType tid) const noexcept {
         return slice(tid) + (3 * row_bytes);
@@ -219,7 +162,10 @@ struct FDMTInput {
 class FDMTCpuEngine final : public detail::FDMTEngine {
 public:
     FDMTCpuEngine(const plans::FDMTPlan& plan,
-                  const detail::FDMTEngineConfig& cfg);
+                  const detail::FDMTEngineConfig& cfg,
+                  bool skew,
+                  SizeType chunk,
+                  SizeType skew_leaf = 0);
 
     ~FDMTCpuEngine() override = default;
 
@@ -227,11 +173,10 @@ public:
      * (chunk, leaf level) candidates of the skewed-window engine, fastest
      * first. Measured on parkes_uwl (6656 channels, 8 threads one per CCD
      * on an EPYC 9654, s per 2.1 s block): float ring K=1 4.96 at chunk
-     * 4096 and 7.4 at 2048, K=2 6.6 / 9.4, K=3 8.8 / 11.1, K=4 13.3 /
-     * 15.3, K=1 13.6 at 1024 (levels 1..K-1 of a direct leaf cost double
-     * running-sum gathers, the binary merges above them are cheap); 8-bit
-     * ring K=2 4.08, K=3 4.38, K=4 4.69, K=1 4.77 at 4096, K=4 5.99 and
-     * K=2 6.28 at 2048. Leaf 0: the automatic level (<= 4).
+     * 4096, 7.4 at 2048, 13.6 at 1024 (levels 1..K-1 of a direct leaf cost
+     * double running-sum gathers, the binary merges above them are cheap);
+     * 8-bit ring K=2 4.08 and K=4 4.69 at 4096, K=4 5.99 at 2048. Leaf 0:
+     * the automatic level (<= 4).
      */
     static std::vector<std::pair<SizeType, SizeType>>
     skew_candidates(SizeType ring_elem);
@@ -301,6 +246,9 @@ public:
         }
         m_skew->execute_search_zero(sink);
     }
+    [[nodiscard]] detail::FDMTPath path() const noexcept override {
+        return m_skew ? detail::FDMTPath::kSkewed : detail::FDMTPath::kTree;
+    }
     [[nodiscard]] std::string search_path() const override {
         if (m_skew) {
             return fmt::format(
@@ -314,6 +262,16 @@ public:
 
     [[nodiscard]] FDMTMemoryUsage get_memory_usage() const noexcept override;
     void allocate() override;
+
+    // Automatic fusion budgets (kFDMTAutoFuse): exposed for white-box tests.
+    // "full"/"roll" modes: per-thread scratch fits max(kFuseBudgetTotal /
+    // nthreads, kFuseBudgetPerThread). "valid" mode: time tiles of kFuseTiles
+    // within kFuseTileBudget and >= kFuseGroupsPerThread groups per thread.
+    static constexpr SizeType kFuseBudgetTotal          = SizeType{36} << 20;
+    static constexpr SizeType kFuseBudgetPerThread      = SizeType{8} << 20;
+    static constexpr std::array<SizeType, 2> kFuseTiles = {512, 256};
+    static constexpr SizeType kFuseTileBudget           = SizeType{1792} << 10;
+    static constexpr SizeType kFuseGroupsPerThread      = 2;
 
     void advance(SizeType levels, Stream /*stream*/) override;
 
@@ -582,9 +540,7 @@ private:
     // high-DM plan (1024 channels at 512 us, DM 2000: ~22 rows per channel,
     // 2-8K-sample chunks) fuse at 8 threads, within 1% of its best depth
     // on the ARM64 laptop, where 5 MB fell back to no fusion (+18%).
-    static constexpr SizeType kFuseBudgetTotal     = SizeType{36} << 20;
-    static constexpr SizeType kFuseBudgetPerThread = SizeType{8} << 20;
-
+    //
     // Valid mode fuses in time tiles instead (initialise_fused_tiled): the
     // deepest depth, then the longest tile of kFuseTiles, whose mean
     // per-group working set (fused_tile_working_set) is at most
@@ -595,36 +551,15 @@ private:
     // per core): float input, 512 us, 1024 channels to DM 2000 (F=4, T=512,
     // -31% against the untiled F=1) and 4096 channels to DM 1000 (F=7,
     // T=256, -27%), each within 1% of the best (F, T) measured.
-    static constexpr std::array<SizeType, 2> kFuseTiles = {512, 256};
-    static constexpr SizeType kFuseTileBudget           = SizeType{1792} << 10;
-    static constexpr SizeType kFuseGroupsPerThread      = 2;
+    // (Constants defined in the public section above.)
 
     static constexpr SizeType round_up_64(SizeType n) noexcept {
         return ((n + 63) / 64) * 64;
     }
 
-    /**
-     * Resolves fuse_levels and allocates every buffer execute() and the
-     * stepper use: the merge ops, the state halves and histories, per-level
-     * type tables, the box means and the per-thread workspace (see
-     * FDMTWorkspace). Nothing is allocated after this.
-     */
     /// Fuse level requested of the skewed-window engine (0: automatic).
     [[nodiscard]] SizeType skew_fuse_request(SizeType fuse_levels,
                                              SizeType max_fuse_levels) const;
-
-    /**
-     * Tree path or skewed-window engine (fdmt_skew.hpp), under the memory
-     * budget. Float input: the tree path when its history and state fit
-     * max_memory_bytes, else the skewed engine at the fastest (chunk, leaf
-     * level) of skew_candidates() whose estimate fits. Packed input with an
-     * automatic chunk: the skewed chunks of at least kSkewFirstMinChunk,
-     * then the tree, then the shorter chunks. An explicit chunk_nsamps
-     * takes the tree when it fits, else the skewed engine at that chunk
-     * with the fastest leaf level that fits it. Sets m_chunk and
-     * m_skew_leaf. Throws when nothing fits.
-     */
-    bool choose_skew(const detail::FDMTEngineConfig& cfg);
 
     /// Builds the tables and sizes the working buffers (m_planned, or the
     /// skewed engine's), without allocating them.

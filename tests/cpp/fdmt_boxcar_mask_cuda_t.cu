@@ -22,7 +22,7 @@
 #include "dmt/gpu_utils.cuh"
 
 #include "fdmt_boxcar_reference.hpp"
-#include "skew_subband_search.hpp"
+#include "test_helpers.hpp"
 
 using namespace boxcar_test;
 
@@ -53,7 +53,7 @@ Masks gpu_masks() {
             std::vector<uint8_t>(32, 1),  gpu_random_mask(32, 14, 0.6)};
 }
 
-const Exec kGpu{algorithms::detail::kGPUBackend, 1, 0};
+const Exec kGpu = test::gpu_exec();
 
 // The stream of `blocks` (one beam, nchans rows of `ns` samples each) cut
 // into blocks of `short_ns` samples (the tail that fills no block dropped).
@@ -72,11 +72,6 @@ gpu_reblock(const std::vector<std::vector<float>>& blocks,
         }
     }
     return out;
-}
-
-void copy_device_lags(uint64_t* dst, const uint64_t* src, SizeType n) {
-    gpu_utils::check_gpu_call(
-        cudaMemcpy(dst, src, n * sizeof(uint64_t), cudaMemcpyDeviceToHost));
 }
 
 } // namespace
@@ -242,6 +237,7 @@ TEST_CASE("GPU FDMTBoxcar masks device input without a block copy",
     }
     const auto usage = search.get_memory_usage();
     CHECK(usage.staging == plan.get_nchans());
+    CHECK(usage.budgeted() + usage.host == usage.total());
     CHECK(usage.budgeted() <= budget);
 }
 
@@ -278,8 +274,7 @@ TEST_CASE("GPU FDMTBoxcar per-call masks: memory is accounted",
     CHECK(after.budgeted() <= algorithms::kFDMTDefaultMaxMemory);
 }
 
-TEST_CASE("GPU FDMTBoxcar per-call masks support kKadane, kNone, and "
-          "kKadaneSurrogate",
+TEST_CASE("GPU FDMTBoxcar per-call masks support kKadane and kNone",
           "[gpu][parity][boxcar][kill][mask][kadane]") {
     const auto masks = gpu_masks();
     const auto plan  = gpu_mask_plan(2);
@@ -287,8 +282,7 @@ TEST_CASE("GPU FDMTBoxcar per-call masks support kKadane, kNone, and "
     const auto ctor  = gpu_random_mask(32, 99, 0.25);
 
     for (const auto screen :
-         {BoxcarScreenMode::kKadane, BoxcarScreenMode::kNone,
-          BoxcarScreenMode::kKadaneSurrogate}) {
+         {BoxcarScreenMode::kKadane, BoxcarScreenMode::kNone}) {
         for (const bool trap : {false, true}) {
             BoxcarConfig cfg;
             cfg.max_boxcar       = 37;
@@ -315,59 +309,8 @@ TEST_CASE("GPU FDMTBoxcar per-call masks support kKadane, kNone, and "
             }
             append(expected, cpu.flush());
             append(actual, gpu.flush());
-            if (screen == BoxcarScreenMode::kKadaneSurrogate) {
-                compare_near_threshold(actual, expected, cfg.detect_thresh);
-            } else {
-                compare(actual, expected);
-            }
+            compare(actual, expected);
         }
-    }
-}
-
-TEST_CASE(
-    "GPU FDMTBoxcar zero-copy kill masks and budgeted() accounting across "
-    "Kadane modes",
-    "[gpu][boxcar][kill][mask][kadane]") {
-    const plans::FDMTPlan plan(1200.0F, 1500.0F, 1024, 65536, 0.000256F, 500);
-    const SizeType block_bytes =
-        plan.get_nchans() * plan.get_nsamps() * sizeof(float);
-    std::vector<float> host(plan.get_nchans() * plan.get_nsamps());
-    std::mt19937 rng(7);
-    std::uniform_int_distribution<int> dist(-4, 4);
-    for (auto& v : host) {
-        v = static_cast<float>(dist(rng));
-    }
-    const thrust::device_vector<float> buf(host.begin(), host.end());
-    const DeviceSpan<const float> span(thrust::raw_pointer_cast(buf.data()),
-                                       buf.size(), {kGpu.backend, 0});
-    const auto ctor_mask = gpu_random_mask(plan.get_nchans(), 5, 0.2);
-
-    for (const auto screen :
-         {BoxcarScreenMode::kKadane, BoxcarScreenMode::kNone,
-          BoxcarScreenMode::kKadaneSurrogate}) {
-        BoxcarConfig cfg;
-        cfg.max_boxcar    = 16;
-        cfg.use_trapezoid = true;
-        cfg.screen_mode   = screen;
-        const auto unmasked_usage =
-            FDMTBoxcar(plan, cfg, true, kGpu).get_memory_usage();
-        CHECK(unmasked_usage.budgeted() + unmasked_usage.host ==
-              unmasked_usage.total());
-        CHECK(unmasked_usage.host > 0);
-        const SizeType budget = unmasked_usage.budgeted() + (block_bytes / 2);
-
-        FDMTBoxcar search(plan, cfg, true, kGpu, 1, algorithms::kFDMTAutoFuse,
-                          0, budget, ctor_mask);
-        for (unsigned k = 0; k < 2; ++k) {
-            const auto mask = gpu_random_mask(plan.get_nchans(), 21 + k, 0.1);
-            REQUIRE_NOTHROW(
-                search.execute(span, std::span<const uint8_t>(mask)));
-            (void)search.copy_result();
-        }
-        const auto usage = search.get_memory_usage();
-        CHECK(usage.staging == plan.get_nchans());
-        CHECK(usage.budgeted() + usage.host == usage.total());
-        CHECK(usage.budgeted() <= budget);
     }
 }
 
@@ -451,7 +394,7 @@ TEST_CASE("GPU FDMTBoxcar declared per-call masks: a search latency over one "
     const auto est = FDMTBoxcar::estimate_memory(
         plan, cfg, true, kGpu, 1, algorithms::kFDMTAutoFuse, 0, budget);
     INFO(est.search_path);
-    REQUIRE(est.search_path.find("windowed") != std::string::npos);
+    REQUIRE(est.search_path.find("windowed top") != std::string::npos);
     REQUIRE(est.search_latency > plan.get_nsamps());
     cfg.per_call_masks  = true;
     const auto declared = FDMTBoxcar::estimate_memory(
@@ -511,90 +454,6 @@ TEST_CASE("GPU FDMTBoxcar per-call masks on blocks shorter than a window",
             }
         }
     }
-}
-
-TEST_CASE("GPU FDMTBoxcar windowed top: short blocks use the catch-all",
-          "[gpu][parity][skew][boxcar][kill][mask]") {
-    // Blocks much shorter than the search latency: the two kept entries
-    // are the newest block and the catch-all, which stands for every older
-    // block still searched. Exact (to float rounding) against the CPU
-    // reference given each row's recorded lag.
-    using skew_search_test::require_same_before;
-    using skew_search_test::run_subband_search;
-    skew_search_test::g_copy_device_lags = copy_device_lags;
-    for (const SizeType depth : {SizeType{1}, SizeType{3}}) {
-        for (const SizeType ns : {SizeType{128}, SizeType{512}}) {
-            DYNAMIC_SECTION("depth " << depth << " block " << ns) {
-                const auto grid =
-                    plans::DDMTPlan::generate_levin_dm_grid_piecewise(
-                        0.0F, 600.0F, 455.6e-6F, 455.6e-6F, 1100.0F, 1714.0F,
-                        1152, 1.1F);
-                const plans::FDMTPlan plan(1100.0F, 1714.0F, 1152, ns,
-                                           455.6e-6F, grid, "valid", depth);
-                const SizeType nb = 12288 / ns;
-                const SizeType nc = plan.get_nchans();
-                Masks masks;
-                for (SizeType b = 0; b < nb; ++b) {
-                    std::vector<uint8_t> m(nc, 1);
-                    const auto kill = [&](double lo, double hi) {
-                        for (auto c = static_cast<SizeType>(lo * nc);
-                             c < static_cast<SizeType>(hi * nc); ++c) {
-                            m[c] = 0;
-                        }
-                    };
-                    if (b < nb / 2) {
-                        kill(0.0, 0.3);
-                        if (b % 5 == 0) {
-                            kill(0.5, 0.6);
-                        }
-                    } else {
-                        kill(0.7, 1.0);
-                        if (b % 3 == 0) {
-                            kill(0.0, 0.1);
-                        }
-                    }
-                    masks.push_back(std::move(m));
-                }
-                auto box          = skew_search_test::search_config(false);
-                box.detect_thresh = 3.5F;
-                const auto planes =
-                    algorithms::detail::make_boxcar_plans(plan, box, true);
-                std::vector<uint64_t> lags;
-                const auto gpu = run_subband_search(
-                    plan, kGpu, true, false, nb, 128, 0, true, &masks, 1.5F,
-                    &planes, SIZE_MAX, &box, nullptr, true, &lags);
-                INFO("gpu path: " << gpu.path);
-                REQUIRE(gpu.latency > ns);
-                const SizeType needed =
-                    1 + static_cast<SizeType>((gpu.latency + ns - 1) / ns);
-                REQUIRE(needed > 2);
-                std::vector<std::vector<float>> input;
-                for (SizeType b = 0; b < nb; ++b) {
-                    input.push_back(skew_search_test::search_block(
-                                        nc * ns, 900 + static_cast<unsigned>(b))
-                                        .values);
-                }
-                const auto expected = masked_reference(
-                    plan, box, true, input, {}, masks, lags, 2, needed);
-                require_same_before(gpu.candidates, expected.candidates,
-                                    UINT64_MAX, 2e-5F);
-                // A call failing after its commit leaves the stream as it
-                // was (the replaced front and its slots restored).
-                const auto failed = run_subband_search(
-                    plan, kGpu, true, false, nb, 128, 0, true, &masks, 1.5F,
-                    &planes, nb / 2 + 1, &box);
-                require_same_before(failed.candidates, gpu.candidates,
-                                    UINT64_MAX);
-                // ... and so does one right before drain().
-                const auto last =
-                    run_subband_search(plan, kGpu, true, false, nb, 128, 0,
-                                       true, &masks, 1.5F, &planes, nb, &box);
-                require_same_before(last.candidates, gpu.candidates,
-                                    UINT64_MAX);
-            }
-        }
-    }
-    skew_search_test::g_copy_device_lags = nullptr;
 }
 
 TEST_CASE("GPU FDMTBoxcar per-call mask: the catch-all through the facade",
@@ -684,30 +543,6 @@ gpu_pack(const std::vector<std::vector<float>>& input,
         out.push_back(std::move(p));
     }
     return out;
-}
-
-// Exact equality (every field, S/N bit for bit).
-void same_exact(std::vector<RawCandidate> a, std::vector<RawCandidate> b) {
-    sort(a);
-    sort(b);
-    REQUIRE(a.size() == b.size());
-    SizeType bad = 0;
-    for (SizeType i = 0; i < a.size() && bad < 10; ++i) {
-        if (key(a[i]) == key(b[i]) &&
-            std::bit_cast<uint32_t>(a[i].snr) ==
-                std::bit_cast<uint32_t>(b[i].snr) &&
-            a[i].width == b[i].width) {
-            continue;
-        }
-        ++bad;
-        INFO("candidate " << i << " peak " << a[i].peak_sample << " / "
-                          << b[i].peak_sample << " snr " << a[i].snr << " / "
-                          << b[i].snr);
-        CHECK(key(a[i]) == key(b[i]));
-        CHECK(std::bit_cast<uint32_t>(a[i].snr) ==
-              std::bit_cast<uint32_t>(b[i].snr));
-    }
-    REQUIRE(bad == 0);
 }
 
 BoxcarConfig
@@ -807,8 +642,8 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks equal the CPU",
                                  {SizeType{128}, plan.get_nsamps()}) {
                                 auto gpu =
                                     make_packed(plan, cfg, kGpu, ctor, chunk);
-                                same_exact(host_run(gpu, input, masks, true),
-                                           want);
+                                compare_exact(host_run(gpu, input, masks, true),
+                                              want);
                                 // Device input on a nondefault stream.
                                 cudaStream_t st;
                                 gpu_utils::check_gpu_call(
@@ -839,7 +674,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks equal the CPU",
                                 gpu_utils::check_gpu_call(
                                     cudaStreamSynchronize(st));
                                 append(dev, gpu.drain());
-                                same_exact(dev, want);
+                                compare_exact(dev, want);
                                 gpu_utils::check_gpu_call(
                                     cudaStreamDestroy(st));
                             }
@@ -889,7 +724,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: short blocks at 1-8 bits, "
                     REQUIRE(gpu.get_search_latency() == 0);
                     const auto want = host_run(cpu, input, masks);
                     REQUIRE(want.size() > 20);
-                    same_exact(host_run(gpu, input, masks), want);
+                    compare_exact(host_run(gpu, input, masks), want);
                 }
             }
         }
@@ -935,8 +770,8 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: short blocks at 1-8 bits, "
                 const auto want =
                     host_run(cpu, input, masks, false, &cpu_flags);
                 REQUIRE(want.size() > 20);
-                same_exact(host_run(gpu, input, masks, false, &gpu_flags),
-                           want);
+                compare_exact(host_run(gpu, input, masks, false, &gpu_flags),
+                              want);
                 CHECK(gpu_flags == cpu_flags);
                 if (c.keep) {
                     CHECK(std::ranges::count(cpu_flags, true) > 0);
@@ -959,7 +794,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: short blocks at 1-8 bits, "
         auto gpu        = make_packed(plan, cfg, kGpu, ctor);
         const auto want = host_run(cpu, input, masks, true);
         REQUIRE(want.size() > 20);
-        same_exact(host_run(gpu, input, masks, true), want);
+        compare_exact(host_run(gpu, input, masks, true), want);
     }
 }
 
@@ -1070,7 +905,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: the screens skip tiles",
                             .empty());
                     const auto want = host_run(cpu, input, masks, true);
                     REQUIRE(want.size() > 20);
-                    same_exact(host_run(gpu, input, masks, true), want);
+                    compare_exact(host_run(gpu, input, masks, true), want);
                 }
             }
         }
@@ -1140,13 +975,6 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: the catch-all",
             kd.screen_mode      = BoxcarScreenMode::kKadane;
             auto pf             = pk;
             pf.screen_mode      = BoxcarScreenMode::kPrefix;
-            // The surrogate's catch-all and lagged rows (tiles across a
-            // table change): packed against float on centred codes, to near
-            // the threshold (its S/N is approximate either way).
-            auto sp        = pk;
-            sp.screen_mode = BoxcarScreenMode::kKadaneSurrogate;
-            auto sf        = fl;
-            sf.screen_mode = BoxcarScreenMode::kKadaneSurrogate;
             // The skewed path (search latency) on every engine: an explicit
             // (shortest) chunk keeps the path the budget gives (an automatic
             // one takes the faster direct path where it fits).
@@ -1160,7 +988,6 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: the catch-all",
             for (const auto& [c, smear] :
                  {std::pair{pk, false}, std::pair{fl, false},
                   std::pair{kd, false}, std::pair{kd, true},
-                  std::pair{sp, false}, std::pair{sf, false},
                   std::pair{pf, true}}) {
                 budget = std::max(budget, minimum(c, smear).max_memory_bytes);
             }
@@ -1168,10 +995,6 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: the catch-all",
                          chunk, budget);
             FDMTBoxcar b(plan, fl, false, kGpu, 1, algorithms::kFDMTAutoFuse,
                          chunk, budget);
-            FDMTBoxcar sa(plan, sp, false, kGpu, 1, algorithms::kFDMTAutoFuse,
-                          chunk, budget);
-            FDMTBoxcar sb(plan, sf, false, kGpu, 1, algorithms::kFDMTAutoFuse,
-                          chunk, budget);
             // The Kadane gate's catch-all cuts: exact against the prefix
             // screen (both exact searches), with box smearing too.
             FDMTBoxcar ka(plan, kd, false, kGpu, 1, algorithms::kFDMTAutoFuse,
@@ -1180,8 +1003,6 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: the catch-all",
                           chunk, budget);
             FDMTBoxcar ps(plan, pf, true, kGpu, 1, algorithms::kFDMTAutoFuse,
                           chunk, budget);
-            REQUIRE(sa.get_search_latency() == sb.get_search_latency());
-            REQUIRE(sa.get_search_latency() > ns);
             INFO(min.search_path);
             REQUIRE(a.get_search_latency() > ns);
             REQUIRE(b.get_search_latency() == a.get_search_latency());
@@ -1193,8 +1014,6 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: the catch-all",
             std::vector<RawCandidate> kad;
             std::vector<RawCandidate> ksm;
             std::vector<RawCandidate> psm;
-            std::vector<RawCandidate> spk;
-            std::vector<RawCandidate> sfl;
             for (SizeType k = 0; k < nb; ++k) {
                 const std::span<const uint8_t> in(packed[k]);
                 if (k == 0) {
@@ -1203,8 +1022,6 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: the catch-all",
                     append(kad, ka.execute(in));
                     append(ksm, ks.execute(in));
                     append(psm, ps.execute(in));
-                    append(spk, sa.execute(in));
-                    append(sfl, sb.execute(std::span<const float>(centred[k])));
                     continue;
                 }
                 const std::span<const uint8_t> m(masks[k]);
@@ -1213,23 +1030,17 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: the catch-all",
                 append(kad, ka.execute(in, m));
                 append(ksm, ks.execute(in, m));
                 append(psm, ps.execute(in, m));
-                append(spk, sa.execute(in, m));
-                append(sfl, sb.execute(std::span<const float>(centred[k]), m));
             }
             append(got, a.drain());
             append(want, b.drain());
             append(kad, ka.drain());
             append(ksm, ks.drain());
             append(psm, ps.drain());
-            append(spk, sa.drain());
-            append(sfl, sb.drain());
             REQUIRE(want.size() > 50);
             compare(got, want);
-            same_exact(kad, got);
+            compare_exact(kad, got);
             REQUIRE(psm.size() > 50);
-            same_exact(ksm, psm);
-            REQUIRE(sfl.size() > 50);
-            compare_near_threshold(spk, sfl, sp.detect_thresh);
+            compare_exact(ksm, psm);
         }
     }
 }
@@ -1269,7 +1080,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: queued calls, memory and "
             append(got, gpu.copy_result(Stream{st}));
         }
         append(got, gpu.flush());
-        same_exact(got, want);
+        compare_exact(got, want);
         gpu_utils::check_gpu_call(cudaStreamDestroy(st));
     }
 
@@ -1286,9 +1097,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: queued calls, memory and "
              {std::pair{true, BoxcarScreenMode::kPrefix},
               std::pair{false, BoxcarScreenMode::kPrefix},
               std::pair{true, BoxcarScreenMode::kKadane},
-              std::pair{false, BoxcarScreenMode::kKadane},
-              std::pair{true, BoxcarScreenMode::kKadaneSurrogate},
-              std::pair{false, BoxcarScreenMode::kKadaneSurrogate}}) {
+              std::pair{false, BoxcarScreenMode::kKadane}}) {
             INFO("gpu " << on_gpu << " screen " << static_cast<int>(screen));
             const Exec ex           = on_gpu ? kGpu : Exec::cpu();
             auto base               = cfg;
@@ -1327,67 +1136,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: queued calls, memory and "
             append(want, lazy.drain());
             CHECK(search.get_memory_usage().total() == est.usage.total());
             REQUIRE(want.size() > 20);
-            same_exact(got, want);
-        }
-    }
-}
-
-TEST_CASE("GPU FDMTBoxcar packed per-call masks: kKadaneSurrogate",
-          "[gpu][parity][boxcar][kill][mask][packed][surrogate]") {
-    const auto plan   = gpu_mask_plan(2);
-    const auto masks  = packed_masks();
-    const auto stream = waterfalls(plan, 1, masks.size());
-    const auto input  = gpu_pack(stream, 32, 400, 8, 128, 10.0F);
-    const auto ctor   = gpu_random_mask(32, 99, 0.25);
-
-    SECTION("the CPU's candidates, to near the threshold") {
-        // The GPU surrogate emits its own (approximate) S/N, as on float
-        // input; the first block takes no mask, so excursions are open when
-        // the per-call masks start.
-        for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
-                                PeakFindingMode::kContiguousPeakAcrossWidths,
-                                PeakFindingMode::kAllAboveThreshold}) {
-            DYNAMIC_SECTION("mode " << static_cast<int>(mode)) {
-                auto cfg        = packed_cfg(mode);
-                cfg.screen_mode = BoxcarScreenMode::kKadaneSurrogate;
-                auto cpu        = make_packed(plan, cfg, Exec::cpu(), ctor);
-                auto gpu        = make_packed(plan, cfg, kGpu, ctor);
-                const auto want = host_run(cpu, input, masks, true);
-                REQUIRE(want.size() > 20);
-                compare_near_threshold(host_run(gpu, input, masks, true), want,
-                                       cfg.detect_thresh);
-            }
-        }
-    }
-
-    SECTION("killed channels never reach the sums") {
-        // A constant per-call mask over loud killed channels: the result is
-        // the quiet stream's, bit for bit.
-        const auto m = gpu_random_mask(32, 7, 0.4);
-        auto loud    = stream;
-        for (auto& block : loud) {
-            for (SizeType c = 0; c < 32; ++c) {
-                if (m[c] == 0) {
-                    for (SizeType t = 0; t < 400; ++t) {
-                        block[(c * 400) + t] = 12.0F; // clamps at 255
-                    }
-                }
-            }
-        }
-        const auto noisy = gpu_pack(loud, 32, 400, 8, 128, 10.0F);
-        const Masks first(input.size(), m);
-        for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
-                                PeakFindingMode::kContiguousPeakAcrossWidths,
-                                PeakFindingMode::kAllAboveThreshold}) {
-            DYNAMIC_SECTION("mode " << static_cast<int>(mode)) {
-                auto cfg        = packed_cfg(mode);
-                cfg.screen_mode = BoxcarScreenMode::kKadaneSurrogate;
-                auto a          = make_packed(plan, cfg, kGpu);
-                auto b          = make_packed(plan, cfg, kGpu);
-                const auto base = host_run(a, input, first, true);
-                REQUIRE(base.size() > 20);
-                same_exact(host_run(b, noisy, first, true), base);
-            }
+            compare_exact(got, want);
         }
     }
 }

@@ -13,10 +13,15 @@
 #include "dmt/algorithms/fdmt_boxcar.hpp"
 
 #include "dmt/boxcar_noise.hpp"
+#include "dmt/device_macros.hpp"
 #include "dmt/engines.hpp"
 #include "dmt/fdmt_variance.hpp"
 
 namespace dmt::algorithms::detail {
+
+/// Device memory cap for GPU wide-boxcar (> 4096) prefix rings: blocks are
+/// launched in batches whose rings fit within this budget (at least one block).
+inline constexpr SizeType kGlobalRingBytes = SizeType{256} << 20;
 
 /// Search planes of `plan`. Channels with kill_mask[c] == 0 are excluded
 /// from the noise model (empty: keep all); `extra_warmup` is added to every
@@ -401,8 +406,9 @@ struct BoxcarKeepEntry {
 };
 
 /// OverflowPolicy::kKeepBrightest order: higher S/N first; ties to the
-/// earlier peak, then beam, subband, DM row, width, begin sample and end
-/// sample. A strict total order on distinct candidates of one call.
+/// earlier peak, then beam, subband, DM row, width and begin sample. A
+/// strict total order on the candidates of one call (a row emits at most
+/// one candidate per peak sample and width).
 DMT_HD inline bool brighter(const RawCandidate& a, const RawCandidate& b) {
     if (a.snr != b.snr) {
         return a.snr > b.snr;
@@ -428,13 +434,7 @@ DMT_HD inline bool brighter(const RawCandidate& a, const RawCandidate& b) {
     if (a.filter_idx != b.filter_idx) {
         return a.filter_idx < b.filter_idx;
     }
-    if (a.begin_sample != b.begin_sample) {
-        return a.begin_sample < b.begin_sample;
-    }
-    if (a.end_sample != b.end_sample) {
-        return a.end_sample < b.end_sample;
-    }
-    return a.width < b.width;
+    return a.begin_sample < b.begin_sample;
 }
 
 /// The transform feeding a boxcar engine: FDMT (merged root rows) or
@@ -485,6 +485,9 @@ public:
     [[nodiscard]] virtual FDMTMemoryUsage memory() const noexcept = 0;
     [[nodiscard]] virtual SizeType chunk_nsamps() const noexcept  = 0;
     [[nodiscard]] virtual SizeType fuse_levels() const noexcept   = 0;
+    [[nodiscard]] virtual FDMTPath path() const noexcept {
+        return FDMTPath::kTree;
+    }
     [[nodiscard]] virtual std::string search_path() const { return {}; }
     /// Input samples a searched sample waits for (FDMTEngine::search_latency).
     [[nodiscard]] virtual uint64_t search_latency() const noexcept { return 0; }
@@ -495,36 +498,16 @@ make_boxcar_driver(std::unique_ptr<FDMTEngine> fdmt);
 [[nodiscard]] std::unique_ptr<BoxcarDriver>
 make_boxcar_driver(std::unique_ptr<FDMTFFTEngine> fft);
 
-/**
- * @brief Noise model of one block under FDMTBoxcar's per-call kill mask.
- *
- * Endpoints of the block (stream samples from first_sample to the next
- * block's) use the `steady` tables, except, when `transition` is set, the
- * first S_r + W - 1 of each row r and width W (S_r: the row's support with
- * every channel active), whose input windows also reach earlier blocks:
- * they use `transition_tables`, the variance of the history mask (the
- * block's channels and every channel live within the largest reach before
- * it; for blocks at least that long, the OR of this and the previous
- * block's masks). A null table pointer means the constructor tables (the
- * search planes). The block's input rows of the `kill_runs` channels are
- * zeroed.
- *
- * `catch_all`: set when blocks are shorter than the engine's ring needs
- * (FDMTBoxcarEngine::noise_catch_all_begin()). The engine keeps the latest
- * one and gives it, as steady and transition tables, to the oldest entry
- * of a full ring, which then also stands for the evicted blocks still
- * searched. It covers every channel live from that oldest endpoint's reach
- * up to this block's end, so it stays valid for drain() padding.
- */
-struct BlockNoise {
-    uint64_t first_sample = 0;
-    std::shared_ptr<const NoiseTables> steady;
-    bool transition = false;
-    std::shared_ptr<const NoiseTables> transition_tables;
-    std::vector<std::pair<SizeType, SizeType>> kill_runs;
-    bool has_catch_all = false; ///< catch_all set (null: constructor)
-    std::shared_ptr<const NoiseTables> catch_all;
-};
+/// Test seam (internal tests only; null otherwise): when set,
+/// make_boxcar_driver() hands every driver it builds to this function and
+/// returns its result, so a test can wrap the transform of a public
+/// FDMTBoxcar (fail a call after the engine committed its block noise,
+/// record the skewed path's row lags). Read once per construction.
+using BoxcarDriverWrap =
+    std::unique_ptr<BoxcarDriver> (*)(std::unique_ptr<BoxcarDriver>);
+inline BoxcarDriverWrap g_boxcar_driver_wrap = nullptr; // NOLINT
+
+/// Per-call kill-mask entries live in `dmt/boxcar_noise.hpp` (`BlockNoise`).
 
 class FDMTBoxcarEngine : public FDMTSearchSink {
 public:
@@ -551,9 +534,10 @@ public:
     virtual CandidateResultView execute_zero() {
         throw std::logic_error("FDMTBoxcar: no zero-block execute here");
     }
-    virtual SizeType chunk_nsamps() const noexcept = 0;
-    virtual SizeType fuse_levels() const noexcept  = 0;
-    virtual std::string search_path() const        = 0;
+    virtual SizeType chunk_nsamps() const noexcept       = 0;
+    virtual SizeType fuse_levels() const noexcept        = 0;
+    [[nodiscard]] virtual FDMTPath path() const noexcept = 0;
+    virtual std::string search_path() const              = 0;
     /// drain(): endpoints at or after `stop` are not searched (UINT64_MAX:
     /// none); reset_history() clears it.
     virtual void set_search_stop(uint64_t stop) noexcept = 0;

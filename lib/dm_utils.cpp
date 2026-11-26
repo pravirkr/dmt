@@ -17,12 +17,6 @@ float cff(float f_start, float f_end, float f_min, float f_max) {
            (std::pow(f_min, kDispCoeff) - std::pow(f_max, kDispCoeff));
 }
 
-SizeType calculate_dt_sub(
-    float f_start, float f_end, float f_min, float f_max, SizeType dt) {
-    const float ratio = cff(f_start, f_end, f_min, f_max);
-    return static_cast<SizeType>(std::ceil(static_cast<float>(dt) * ratio));
-}
-
 float get_dmconv(float f_min, float f_max, float tsamp) {
     const float dm_conv = kDispConst * (std::pow(f_min, kDispCoeff) -
                                         std::pow(f_max, kDispCoeff));
@@ -310,6 +304,9 @@ std::vector<float> generate_levin_dm_grid_piecewise(float dm_start,
             count = min_run;
         }
         count = std::max<SizeType>(count, 1);
+        while (a + (step * static_cast<double>(count)) < b) {
+            ++count;
+        }
         for (SizeType q = 0; q < count; ++q) {
             out.push_back(
                 static_cast<float>(a + (step * static_cast<double>(q))));
@@ -326,13 +323,7 @@ SizeType next_fft_size(SizeType n) {
     // symmetry FFTW exploits. Search m = 2 * (7-smooth) >= n.
     const SizeType half = std::max<SizeType>(1, (n + 1) / 2);
     for (SizeType m = half;; ++m) {
-        SizeType r = m;
-        for (const SizeType p : {2U, 3U, 5U, 7U}) {
-            while (r % p == 0) {
-                r /= p;
-            }
-        }
-        if (r == 1) {
+        if (is_smooth7(m)) {
             return 2 * m;
         }
     }

@@ -22,6 +22,7 @@
 #include "dmt/bit_pack_utils.hpp"
 
 #include "ddmt_estimate_cases.hpp"
+#include "test_helpers.hpp"
 #include "test_random.hpp"
 #include "test_sized.hpp"
 
@@ -610,57 +611,25 @@ TEST_CASE("DDMT execute_time_major matches channel-major packed",
             const auto dm_count       = dms.size();
 
             // Prepare pseudo-random samples in range [0, (1<<nbits)-1]
-            const auto mask = (1ULL << nbits) - 1;
-            std::vector<uint64_t> raw_data(nchans * nsamps);
+            const auto mask = test::max_sample_value(nbits);
+            std::vector<uint32_t> raw_data(nchans * nsamps);
             for (size_t i = 0; i < raw_data.size(); ++i) {
-                raw_data[i] = (i * 37 + 11) & mask;
+                raw_data[i] = static_cast<uint32_t>((i * 37 + 11) & mask);
             }
 
             // 1. Channel-major packing: row per channel
-            const auto chan_row_bytes = (nsamps * nbits + 7) / 8;
-            std::vector<uint8_t> chan_major(nchans * chan_row_bytes, 0);
-            for (SizeType c = 0; c < nchans; ++c) {
-                for (SizeType s = 0; s < nsamps; ++s) {
-                    const auto val        = raw_data[(c * nsamps) + s];
-                    const auto bit_offset = s * nbits;
-                    const auto byte_idx   = bit_offset / 8;
-                    const auto bit_sub    = bit_offset % 8;
-                    if (nbits == 8) {
-                        chan_major[(c * chan_row_bytes) + s] =
-                            static_cast<uint8_t>(val);
-                    } else if (nbits == 16) {
-                        auto* ptr = reinterpret_cast<uint16_t*>(
-                            &chan_major[c * chan_row_bytes]);
-                        ptr[s] = static_cast<uint16_t>(val);
-                    } else {
-                        chan_major[(c * chan_row_bytes) + byte_idx] |=
-                            static_cast<uint8_t>(val << bit_sub);
-                    }
-                }
-            }
+            const auto chan_major =
+                test::pack_rows(raw_data, nchans, nsamps, nbits);
 
             // 2. Time-major packing: channels packed per time sample
-            const auto time_samp_bytes = (nchans * nbits + 7) / 8;
-            std::vector<uint8_t> time_major(nsamps * time_samp_bytes, 0);
+            std::vector<uint32_t> raw_tm(nchans * nsamps);
             for (SizeType s = 0; s < nsamps; ++s) {
                 for (SizeType c = 0; c < nchans; ++c) {
-                    const auto val        = raw_data[(c * nsamps) + s];
-                    const auto bit_offset = c * nbits;
-                    const auto byte_idx   = bit_offset / 8;
-                    const auto bit_sub    = bit_offset % 8;
-                    if (nbits == 8) {
-                        time_major[(s * time_samp_bytes) + c] =
-                            static_cast<uint8_t>(val);
-                    } else if (nbits == 16) {
-                        auto* ptr = reinterpret_cast<uint16_t*>(
-                            &time_major[s * time_samp_bytes]);
-                        ptr[c] = static_cast<uint16_t>(val);
-                    } else {
-                        time_major[(s * time_samp_bytes) + byte_idx] |=
-                            static_cast<uint8_t>(val << bit_sub);
-                    }
+                    raw_tm[(s * nchans) + c] = raw_data[(c * nsamps) + s];
                 }
             }
+            const auto time_major =
+                test::pack_rows(raw_tm, nsamps, nchans, nbits);
 
             std::vector<int32_t> out_chan(dm_count * nsamps_reduced, 0);
             std::vector<int32_t> out_time(dm_count * nsamps_reduced, 0);

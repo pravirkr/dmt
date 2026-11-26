@@ -112,8 +112,8 @@ public:
           m_ctx(m_model.context()) {
         m_deferred.defer(cfg.defer_allocation);
         m_seg_n = ddmt_fft::max_segment_length(m_ctx, m_nact, kMaxSpectraBytes);
-        if (const auto cap = detail::fft_segment_cap(); cap > 0) {
-            m_seg_n = std::min(m_seg_n, cap); // testing hook
+        if (cfg.max_segment > 0) {
+            m_seg_n = std::min(m_seg_n, cfg.max_segment);
         }
         m_deferred.assign(m_hist, history_state_size(), 0.0F);
         m_deferred.assign(m_hist_next, history_state_size(), 0.0F);
@@ -133,8 +133,8 @@ public:
             }
             auto& plan_r = m_plans[r.count];
             if (!plan_r) {
-                plan_r = std::make_unique<nufft::Type1Plan>(
-                    r.count, m_opts.tolerance, m_nthreads);
+                plan_r = std::make_unique<nufft::Type1Plan>(r.count,
+                                                            m_opts.tolerance);
             }
             m_runs.push_back({r, plan_r.get()});
             std::fill_n(by_nufft.begin() + static_cast<std::ptrdiff_t>(r.begin),
@@ -170,10 +170,6 @@ public:
     }
     [[nodiscard]] SizeType max_delay() const noexcept override {
         return m_model.max_delay;
-    }
-    void set_gulp_size(SizeType gulp_size) override { m_gulp = gulp_size; }
-    [[nodiscard]] SizeType get_gulp_size() const noexcept override {
-        return m_gulp == 0 ? 65536 : m_gulp;
     }
     [[nodiscard]] std::string_view method_used() const noexcept override {
         return detail::ddmt_fft_method_used(m_runs.size(), m_brute_dms.size());
@@ -343,7 +339,6 @@ private:
     SizeType m_nact;
     SizeType m_ctx;     // guard + max_delay
     SizeType m_seg_n{}; // longest transform (memory cap)
-    SizeType m_gulp{0};
 
     std::vector<float> m_hist; // [beam][chan][ctx], first m_hist_len valid
     std::vector<float> m_hist_next;
@@ -351,6 +346,7 @@ private:
     std::vector<float> m_unpacked;
 
     std::map<SizeType, std::unique_ptr<Geometry>> m_geos;
+    std::vector<SizeType> m_geo_lru;
     FFTVector<float> m_spectra;        // [tile][nact][kBinsFl]
     FFTVector<ComplexType> m_out_spec; // [ndm][bins_stride]
     std::vector<Workspace> m_ws;
@@ -439,15 +435,26 @@ private:
     Geometry& geometry(SizeType n) {
         // One entry per transform length seen (warm-up, steady state, odd
         // final blocks); a stream of ever-changing block sizes must not grow
-        // the plan cache without bound.
+        // the plan cache without bound. Evict only the least recently used
+        // entry so an occasional odd block does not thrash hot lengths.
         constexpr SizeType kMaxGeometries = 4;
-        if (!m_geos.contains(n) && m_geos.size() >= kMaxGeometries) {
-            m_geos.clear();
+        auto it                           = m_geos.find(n);
+        if (it != m_geos.end()) {
+            if (const auto lru =
+                    std::find(m_geo_lru.begin(), m_geo_lru.end(), n);
+                lru != m_geo_lru.end()) {
+                std::rotate(lru, lru + 1, m_geo_lru.end());
+            }
+        } else {
+            if (m_geos.size() >= kMaxGeometries && !m_geo_lru.empty()) {
+                m_geos.erase(m_geo_lru.front());
+                m_geo_lru.erase(m_geo_lru.begin());
+            }
+            auto built = std::make_unique<Geometry>(n, !m_deferred.deferring());
+            it         = m_geos.emplace(n, std::move(built)).first;
+            m_geo_lru.push_back(n);
         }
-        auto& g = m_geos[n];
-        if (!g) {
-            g = std::make_unique<Geometry>(n, !m_deferred.deferring());
-        }
+        auto& g                = it->second;
         const auto spec_floats = g->n_tiles * m_nact * kBinsFl;
         if (m_deferred.size(m_spectra) < spec_floats) {
             m_deferred.assign(m_spectra, spec_floats, 0.0F);
@@ -555,29 +562,33 @@ private:
     void forward(Geometry& g, const Source& data, SizeType b, SizeType p0) {
         const auto nblocks =
             static_cast<std::int64_t>((m_nact + kFwdBatch - 1) / kFwdBatch);
-#pragma omp parallel for schedule(static) num_threads(m_nthreads)
-        for (std::int64_t bi = 0; bi < nblocks; ++bi) {
-            auto& w       = ws();
-            const auto a0 = static_cast<SizeType>(bi) * kFwdBatch;
-            const auto na = std::min(kFwdBatch, m_nact - a0);
-            for (SizeType i = 0; i < na; ++i) {
-                fill_row(w.time.data(), g.n_fft, data, b,
-                         m_model.active[a0 + i], p0);
-                g.r2c->r2c(w.time.data(), w.batch.data() + (i * g.bins_stride));
-            }
-            constexpr auto kTB = static_cast<SizeType>(TB);
-            const auto ntb     = (g.n_bins + kTB - 1) / kTB;
-            float* dst         = m_spectra.data() + (a0 * 2 * kTB);
-            for (SizeType t = 0; t < ntb; ++t) {
-                float* d = dst + (t * m_nact * 2 * kTB);
+#pragma omp parallel num_threads(m_nthreads)
+        {
+#pragma omp for schedule(static) nowait
+            for (std::int64_t bi = 0; bi < nblocks; ++bi) {
+                auto& w       = ws();
+                const auto a0 = static_cast<SizeType>(bi) * kFwdBatch;
+                const auto na = std::min(kFwdBatch, m_nact - a0);
                 for (SizeType i = 0; i < na; ++i) {
-                    fft_cpu::stream_split<TB>(
-                        d + (i * 2 * kTB),
-                        w.batch.data() + (i * g.bins_stride) + (t * kTB));
+                    fill_row(w.time.data(), g.n_fft, data, b,
+                             m_model.active[a0 + i], p0);
+                    g.r2c->r2c(w.time.data(),
+                               w.batch.data() + (i * g.bins_stride));
+                }
+                constexpr auto kTB = static_cast<SizeType>(TB);
+                const auto ntb     = (g.n_bins + kTB - 1) / kTB;
+                float* dst         = m_spectra.data() + (a0 * 2 * kTB);
+                for (SizeType t = 0; t < ntb; ++t) {
+                    float* d = dst + (t * m_nact * 2 * kTB);
+                    for (SizeType i = 0; i < na; ++i) {
+                        fft_cpu::stream_split<TB>(
+                            d + (i * 2 * kTB),
+                            w.batch.data() + (i * g.bins_stride) + (t * kTB));
+                    }
                 }
             }
+            fft_cpu::stream_fence();
         }
-        fft_cpu::stream_fence();
     }
 
     // ---- brute force ----
@@ -592,13 +603,16 @@ private:
         const double inv_n = 1.0 / static_cast<double>(g.n_fft);
         // Items tile-major: threads running concurrently share a tile's
         // spectra in the last-level cache.
-#pragma omp parallel for schedule(dynamic, 1) num_threads(m_nthreads)
-        for (std::int64_t it = 0; it < items; ++it) {
-            const auto t = static_cast<SizeType>(it) / nblk;
-            const auto k = static_cast<SizeType>(it) % nblk;
-            brute_item<TB>(ws(), g, t, k * kDmBlock, inv_n);
+#pragma omp parallel num_threads(m_nthreads)
+        {
+#pragma omp for schedule(dynamic, 1) nowait
+            for (std::int64_t it = 0; it < items; ++it) {
+                const auto t = static_cast<SizeType>(it) / nblk;
+                const auto k = static_cast<SizeType>(it) % nblk;
+                brute_item<TB>(ws(), g, t, k * kDmBlock, inv_n);
+            }
+            fft_cpu::stream_fence();
         }
-        fft_cpu::stream_fence();
     }
 
     template <int TB>

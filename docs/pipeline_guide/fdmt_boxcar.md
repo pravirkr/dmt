@@ -203,9 +203,10 @@ plan bounds every tree value below 2^32, else uint64. On the GPU the packed
 search computes levels 0–3 directly from integer running sums and, where the
 plan allows, sums the upper levels' rows straight from a lower level (the
 direct top of the float transform, see the performance guide), all in exact
-integers. 8-bit input then takes about the float32 search time (0.94–1.05×
+integers. 8-bit input then takes about the float32 search time (0.99–1.08×
 on the three presets, L40S). The CPU packed search does not fuse the lower
-levels and takes 1.3× the float32 time on 8 threads (1.1–1.2× on one).
+levels and takes 1.1–1.7× the float32 time on 8 threads (the most on
+`cryopaf_lband`; 1.1–1.2× on one).
 
 ## Running a search
 
@@ -341,10 +342,6 @@ tiles are rejected before per-width scoring:
   Used when groups plus range-minimum levels are fewer than half the widths
   (dense `wtsp=1` grids); `wtsp >= 1.5` and `use_trapezoid` widths stay
   ungrouped.
-- `KADANE_SURROGATE` (approximate, `max_boxcar` up to 4096): standalone
-  multi-bias Kadane excursion detector with local lookback replay, skipping
-  the full-stream Stage-2 prefix scan. Candidate counts and S/N are
-  approximate rather than exact.
 - `NONE` (lossless, `max_boxcar` up to $2^{20}$): disables Stage-1 screening
   and scores every width on every tile directly (`AUTO`, `KADANE`, `PREFIX`
   and `NONE` emit identical candidates).
@@ -618,9 +615,9 @@ a fast path that fits in the rest (rule 3 above):
   windows ([](skewed_window_fdmt.md)), at the longest automatic chunk
   (4096 down to 256 samples) that fits; a longer chunk is faster.
 - **GPU subband searches** (`subband_depth > 0`) take the first that fits
-  of a short list: the plan's L2-cache chunk on the direct path, the direct
-  path at chunks 4096 down to `max_boxcar / 8`, the skewed path at 4096
-  down to 256, then shorter direct chunks
+  of a short list: the plan's 96 MiB cache-target chunk on the direct path,
+  the direct path at chunks 4096 down to `max_boxcar / 8`, the skewed path
+  at 4096 down to 256, then shorter direct chunks
   ([details](skewed_window_fdmt.md#memory-budget-and-chunk-length)).
 - Construction raises `ValueError` (`std::invalid_argument`) when nothing
   fits.
@@ -675,9 +672,7 @@ tile stops after Stage 1.
   with sparse range-minimum screening on dense banks. Width and threshold
   tables are staged in shared memory, and tiles with a crossing or an open
   excursion run the exact ordered run summaries. Explicit `KADANE` runs a
-  warp/block tropical-monoid Kadane gate before Stage-2 prefix scoring, and
-  `KADANE_SURROGATE` runs multi-strip Kadane excursion detection with local
-  replay.
+  warp/block tropical-monoid Kadane gate before Stage-2 prefix scoring.
 :::
 
 ```{note}
@@ -701,9 +696,11 @@ cmake -S . -B build-cuda -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DDMT_GPU=CUDA -DDMT_BUILD_TESTING=ON -DDMT_BUILD_PYTHON=OFF
 cmake --build build-cuda -j
 ctest --test-dir build-cuda --output-on-failure
-compute-sanitizer --tool memcheck build-cuda/tests/cpp/dmt_tests '[gpu][boxcar]'
-compute-sanitizer --tool racecheck build-cuda/tests/cpp/dmt_tests '[gpu][boxcar]'
-compute-sanitizer --tool synccheck build-cuda/tests/cpp/dmt_tests '[gpu][boxcar]'
+for bin in dmt_tests dmt_internal_tests; do
+  compute-sanitizer --tool memcheck "build-cuda/tests/cpp/$bin" '[gpu][boxcar]'
+  compute-sanitizer --tool racecheck "build-cuda/tests/cpp/$bin" '[gpu][boxcar]'
+  compute-sanitizer --tool synccheck "build-cuda/tests/cpp/$bin" '[gpu][boxcar]'
+done
 ```
 :::
 
@@ -722,18 +719,19 @@ L40S, device-resident; AMD EPYC 9654, 8 threads one per CCD; median of 3):
 
 | preset, backend | `FDMT` (writes the plane) | `FDMTBoxcar`, wtsp 1.5 | `FDMTBoxcar`, wtsp 1.0 |
 | :--- | ---: | ---: | ---: |
-| `meerkat_lband` (4057 trials), GPU | 25.9 ms | 27.8 ms (13 widths) | 29.4 ms (163 widths) |
-| `cryopaf_lband` (1941 trials), GPU | 11.6 ms | 12.8 ms (14 widths) | 13.6 ms (219 widths) |
-| `cryopaf_lband`, subband depth 1, GPU | – | 15.1 ms | 18.0 ms |
-| `cryopaf_low` (1545 trials), GPU | 21.8 ms | 22.5 ms (13 widths) | 23.2 ms (195 widths) |
-| `meerkat_lband`, CPU | 362 ms | 515 ms | 559 ms |
-| `cryopaf_lband`, subband depth 1, CPU | 139 ms | 486 ms | 545 ms |
-| `cryopaf_low`, CPU | 252 ms | 315 ms | 339 ms |
+| `meerkat_lband` (4057 trials), GPU | 25.7 ms | 27.8 ms (13 widths) | 29.4 ms (163 widths) |
+| `cryopaf_lband` (1941 trials), GPU | 11.6 ms | 12.8 ms (14 widths) | 13.8 ms (219 widths) |
+| `cryopaf_lband`, subband depth 1, GPU | – | 15.1 ms | 18.5 ms |
+| `cryopaf_low` (1545 trials), GPU | 21.8 ms | 22.5 ms (13 widths) | 23.4 ms (195 widths) |
+| `meerkat_lband`, CPU | 353 ms | 373 ms | 372 ms |
+| `cryopaf_lband`, subband depth 1, CPU | 141 ms | 185 ms | 208 ms |
+| `cryopaf_low`, CPU | 255 ms | 259 ms | 298 ms |
 
 On the GPU the root merge the search saves costs about as much as scoring a
-dozen widths, so the full-band search adds 3–10%; a depth-1 subband search
+dozen widths, so the full-band search adds 3–11%; a depth-1 subband search
 on `cryopaf_lband` adds a fifth (wtsp 1.5) to a third (wtsp 1.0) more. On the CPU the scorer is a separate
-pass over each chunk's searched rows (1.3–3.5× the transform), still well
+pass over each chunk's searched rows; the search takes 1.0–1.5× the
+transform time (the depth-1 `cryopaf_lband` search the most), still well
 faster than real time on 8 threads. Thanks to the width screen, scoring
 every integer width up to 100 ms costs about the same as a dozen widths on
 both backends. `working_bytes` in the results is the allocation plus the
@@ -747,8 +745,8 @@ blocks, subband depth 4: 218k searched rows, wtsp 1.5) runs within the
 | :--- | :--- | ---: | ---: | ---: | ---: | ---: |
 | GPU | uint8 | 4096 | 1.17 s | 1.80× | 9.8 GiB | 9.6 GiB |
 | GPU | float32 | 1024 | 2.34 s | 0.90× | 9.6 GiB | 9.5 GiB |
-| CPU, 8 threads | uint8 | 4096 | 15.5 s | 0.14× | 6.6 GiB | 6.7 GiB |
-| CPU, 8 threads | float32 | 2048 | 22.0 s | 0.10× | 9.7 GiB | 9.8 GiB |
+| CPU, 8 threads | uint8 | 4096 | 6.21 s | 0.34× | 6.6 GiB | 6.7 GiB |
+| CPU, 8 threads | float32 | 2048 | 9.89 s | 0.21× | 9.7 GiB | 9.8 GiB |
 
 *working memory* is the library's accounting plus the input block; *peak* is
 the measured device memory (GPU) or process resident set (CPU) in the same
@@ -759,8 +757,8 @@ just below real time (0.90×); the 8-bit tree is narrower and fits 4096.
 
 The full band alone takes 0.36 s on the GPU (5.8× real time, 2.1–2.7 GiB).
 Searching at a coarser resolution is much cheaper: at 256 µs the GPU runs
-depth 4 at 39–41× real time and 8 CPU threads keep up (1.11–1.31×), and at
-512 µs the CPU is 6× faster than real time (the real-time sweep on the
+depth 4 at 44–46× real time and 8 CPU threads keep up (3.5–4.2×), and at
+512 µs the CPU is 13–18× faster than real time (the real-time sweep on the
 [Benchmarks](../benchmarks.md#parkes-uwl-search) page).
 
 ## FDMTFFTBoxcar

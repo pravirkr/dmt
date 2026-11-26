@@ -90,9 +90,9 @@ stream_waterfall = generate_frb(
     noise_rms=1.0,
 )
 
-# Split into Block 0 and Block 1
-block0 = stream_waterfall[:, :nsamps_block]
-block1 = stream_waterfall[:, nsamps_block:]
+# Split into C-contiguous Block 0 and Block 1
+block0 = stream_waterfall[:, :nsamps_block].copy()
+block1 = stream_waterfall[:, nsamps_block:].copy()
 
 # Stream through FDMT
 fdmt.reset_history()  # Ensure a clean starting state

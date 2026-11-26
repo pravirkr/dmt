@@ -45,28 +45,6 @@ std::span<const uint8_t> byte_view(const py::array& arr) {
             static_cast<SizeType>(arr.size())};
 }
 
-py::array_t<float, py::array::c_style>
-output_buffer(const CohFDMT& coh, const std::optional<py::array>& out) {
-    const auto needed = coh.get_dmt_size();
-    if (!out.has_value()) {
-        return py::array_t<float, py::array::c_style>(
-            static_cast<py::ssize_t>(needed));
-    }
-    const auto& arr = *out;
-    if (arr.dtype().kind() != 'f' || arr.itemsize() != 4 ||
-        (arr.flags() & py::array::c_style) == 0 || !arr.writeable()) {
-        throw py::type_error("CohFDMT.execute: out must be a writeable, "
-                             "C-contiguous float32 array");
-    }
-    if (static_cast<SizeType>(arr.size()) < needed) {
-        throw std::invalid_argument(
-            fmt::format("CohFDMT.execute: out has {} elements, needs at least "
-                        "dmt_size = {}",
-                        arr.size(), needed));
-    }
-    return py::reinterpret_borrow<py::array_t<float, py::array::c_style>>(arr);
-}
-
 // Device-memory execute(): every group a C-contiguous 1-byte device array on
 // the instance's device; the result is a device array of the first group's
 // library (or a view of `out`).
@@ -152,9 +130,10 @@ py::object coh_execute(const CohFDMT& coh,
         throw py::type_error("CohFDMT.execute: out must be a NumPy array for "
                              "host data");
     }
-    auto buf = output_buffer(
-        coh, out.is_none() ? std::nullopt
-                           : std::optional<py::array>(out.cast<py::array>()));
+    auto buf = float_output_buffer(
+        coh.get_dmt_size(), "CohFDMT", "dmt_size",
+        out.is_none() ? std::nullopt
+                      : std::optional<py::array>(out.cast<py::array>()));
     {
         const py::gil_scoped_release release;
         coh.execute<uint8_t>(std::span<const std::span<const uint8_t>>(groups),
@@ -171,7 +150,8 @@ py::object coh_execute(const CohFDMT& coh,
 py::dict coh_memory_dict(const plans::CohFDMTMemoryUsage& m) {
     return py::dict("spectrum"_a = m.spectrum, "waterfall"_a = m.waterfall,
                     "fdmt"_a = m.fdmt, "workspace"_a = m.workspace,
-                    "output"_a = m.output, "total"_a = m.total());
+                    "output"_a = m.output, "pinned"_a = m.pinned,
+                    "host_pinned"_a = m.host_pinned, "total"_a = m.total());
 }
 
 } // namespace
@@ -179,8 +159,8 @@ py::dict coh_memory_dict(const plans::CohFDMTMemoryUsage& m) {
 void bind_cfdmt(py::module_& mod) {
     mod.def(
         "generate_pure_frb",
-        [](SizeType nchans, SizeType nsamps, float f_min, float f_max,
-           SizeType dt, float pulse_toa, float amplitude = 1.0F) {
+        [](SizeType nchans, SizeType nsamps, float f_min, float f_max, float dt,
+           float pulse_toa, float amplitude = 1.0F) {
             auto [arr, nsamps_dispersed] = utils::generate_pure_frb(
                 nchans, nsamps, f_min, f_max, dt, pulse_toa, amplitude);
             return std::make_tuple(as_pyarray(std::move(arr)),
@@ -197,7 +177,7 @@ void bind_cfdmt(py::module_& mod) {
             Waterfall shape.
         f_min, f_max : float
             Band edges in MHz.
-        dt : int
+        dt : float
             Total delay across the band, in samples.
         pulse_toa : float
             Pulse time of arrival at the lowest channel, in samples.
@@ -359,7 +339,7 @@ void bind_cfdmt(py::module_& mod) {
         config : CohFDMTConfig
             The search.
         nthreads : int, optional
-            OpenMP threads on the CPU backend.
+            OpenMP threads (CPU) or host-staging worker cap (GPU; default 1).
         backend : {'cpu', 'cuda', 'hip'}, optional
             Keyword-only. Where to run (default ``'cpu'``).
         device : int, optional
@@ -502,11 +482,11 @@ void bind_cfdmt(py::module_& mod) {
 
     mod.def(
         "pack_baseband",
-        [](const py::array_t<std::complex<float>,
-                             py::array::c_style | py::array::forcecast>&
-               voltages,
-           const BasebandFormat& format, float scale, SizeType sub_begin,
-           SizeType sub_count, SizeType t_begin, SizeType t_count) {
+        [](const py::array& voltages_obj, const BasebandFormat& format,
+           float scale, SizeType sub_begin, SizeType sub_count,
+           SizeType t_begin, SizeType t_count) {
+            const auto voltages = require_contiguous_array<std::complex<float>>(
+                voltages_obj, "pack_baseband", "complex64");
             if (voltages.ndim() != 3 || voltages.shape(0) != 2) {
                 throw std::invalid_argument(
                     "pack_baseband: voltages must have shape (2, nsub, "
@@ -520,8 +500,9 @@ void bind_cfdmt(py::module_& mod) {
                 t_count);
             return as_pyarray(std::move(bytes));
         },
-        "voltages"_a, "format"_a = BasebandFormat{}, "scale"_a = 1.0F,
-        "sub_begin"_a = 0, "sub_count"_a = 0, "t_begin"_a = 0, "t_count"_a = 0,
+        "voltages"_a.noconvert(), "format"_a = BasebandFormat{},
+        "scale"_a = 1.0F, "sub_begin"_a = 0, "sub_count"_a = 0, "t_begin"_a = 0,
+        "t_count"_a = 0,
         R"doc(
         Quantise ``(2, nsub, nsamps)`` voltages into a baseband block.
 

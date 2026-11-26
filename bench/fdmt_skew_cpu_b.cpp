@@ -85,18 +85,11 @@ void bm_skew(benchmark::State& state,
         }
     };
     run();
-    skew.reset_profile();
     for (auto _ : state) {
         run();
     }
-    const auto prof              = skew.profile();
-    const double iters           = static_cast<double>(state.iterations());
-    state.counters["ms_ring"]    = 1e3 * prof.ring / iters;
-    state.counters["ms_stripes"] = 1e3 * prof.stripes / iters;
-    state.counters["ms_rows"]    = 1e3 * prof.rows / iters;
-    state.counters["ms_merges"]  = 1e3 * prof.merges / iters;
-    state.counters["chunk"]      = static_cast<double>(chunk);
-    state.counters["level"]      = static_cast<double>(level);
+    state.counters["chunk"] = static_cast<double>(chunk);
+    state.counters["level"] = static_cast<double>(level);
     state.counters["engine_MB"] =
         static_cast<double>(skew.memory_usage().total()) / (1024.0 * 1024.0);
     set_counters(state, plan, p, nthreads);
@@ -139,18 +132,11 @@ void bm_skew_env(benchmark::State& state) {
         }
     };
     run();
-    skew.reset_profile();
     for (auto _ : state) {
         run();
     }
-    const auto prof              = skew.profile();
-    const double iters           = static_cast<double>(state.iterations());
-    state.counters["ms_ring"]    = 1e3 * prof.ring / iters;
-    state.counters["ms_stripes"] = 1e3 * prof.stripes / iters;
-    state.counters["ms_rows"]    = 1e3 * prof.rows / iters;
-    state.counters["ms_merges"]  = 1e3 * prof.merges / iters;
-    state.counters["level"]      = static_cast<double>(skew.get_leaf_level());
-    state.counters["fuse"]       = static_cast<double>(skew.get_fuse_level());
+    state.counters["level"] = static_cast<double>(skew.get_leaf_level());
+    state.counters["fuse"]  = static_cast<double>(skew.get_fuse_level());
     state.counters["engine_MB"] =
         static_cast<double>(skew.memory_usage().total()) / (1024.0 * 1024.0);
 }

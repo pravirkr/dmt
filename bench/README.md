@@ -93,10 +93,10 @@ working memory, chunk length and candidates per block. `DMT_BENCH_CHUNK`
 overrides the automatic chunk length (tuning). Unset `DMT_BENCH_SCREEN`
 benchmarks `kAuto` (`kadane` on CPU, `prefix` on GPU) without changing the
 published benchmark names; `--screen-mode` (`DMT_BENCH_SCREEN`:
-comma-separated from `auto`, `prefix`, `kadane`, `kadane_surrogate`, `none`,
-or `all`) and `--trapezoid` (`DMT_BENCH_TRAPEZOID`: `0`, `1` or `both`)
-sweep Stage-1 tile screening and `{1, 2, 1}` trapezoid filters on both CPU
-and GPU. For focused A/B timing and candidate-parity tables, run
+comma-separated from `auto`, `prefix`, `kadane`, `none`, or `all`) and
+`--trapezoid` (`DMT_BENCH_TRAPEZOID`: `0`, `1` or `both`) sweep Stage-1 tile
+screening and `{1, 2, 1}` trapezoid filters on both CPU and GPU. For focused
+A/B timing and candidate-parity tables, run
 `python bench/scripts/bench_boxcar_screen.py`.
 
 **Peak memory** is measured next to every `main` and `boxcar` timing, in the
@@ -202,13 +202,33 @@ smoke tests only.
 --no-cpu / --no-gpu (alias --no-cuda)
 --quick            1 repetition, short minimum time
 --filter REGEX     extra filter AND-ed with the suite (e.g. 'FDMT/')
---screen-mode SPEC boxcar screen mode(s): auto, prefix, kadane, kadane_surrogate, none, all (unset: auto)
+--screen-mode SPEC boxcar screen mode(s): auto, prefix, kadane, none, all (unset: auto)
 --trapezoid MODE   boxcar trapezoid sweep: 0, 1, both
 ```
 
 The raw binary can also be run directly, e.g.
 `DMT_BENCH_CONFIG=parkes_uwl build/bench/dmt_bench_suite
 --benchmark_filter='^BM_fdmt_boxcar_rt/'`.
+
+## Scripts
+
+`bench/scripts/` holds the suite driver and plotters, A/B and study tools,
+and a guard for the archived results:
+
+| Script | Role |
+|---|---|
+| `run_suite.py` | Runs the published suites (`--suite main\|boxcar\|cfdmt`) |
+| `plot_suite.py`, `plot_uwl.py`, `plot_cfdmt.py` | Published plots and `summary.md` tables |
+| `golden_outputs.py` | Captures and compares outputs bit for bit (A/B checks of refactors) |
+| `bench_boxcar_screen.py` | Boxcar screen-mode A/B timing and candidate parity |
+| `bench_chunking.py`, `fdmt_cache_benchmark.py` | FDMT `chunk_nsamps` and cache-locality studies (`docs/pipeline_guide/performance.md`) |
+| `fdmt_operations_costs.py` | FDMT operation counts and scaling (the operation-count plot) |
+| `run_sensitivity.py`, `plot_sensitivity.py`, `validate_tail_threshold.py` | S/N-recovery study, its plots, and a check of its false-alarm threshold fit |
+| `fdmt_sensitivity.py` | S/N recovery against delay and sub-sample phase |
+| `fdmt_noise.py`, `tone_recovery.py` | Noise statistics and smeared-tone recovery studies (docs tutorials) |
+| `fdmt_correction_redundancy.py` | Study of the classic FDMT midpoint correction |
+
+The study scripts import `dmtlib` from `src/` and expect an editable build.
 
 ## Developer microbenchmarks
 

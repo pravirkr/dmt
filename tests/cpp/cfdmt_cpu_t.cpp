@@ -179,6 +179,18 @@ TEST_CASE("CohFDMTPlan rejects invalid configurations", "[cfdmt][cpu]") {
     bad                = small_config();
     bad.filter_leakage = 0.0F;
     CHECK_THROWS_AS(CohFDMTPlan(bad), std::invalid_argument);
+    // Automatic nbin: filter overlap exceeding the 2^20 mbin search cap must
+    // throw instead of leaving m_mbin == 0 and dividing by zero.
+    CohFDMTConfig huge_overlap;
+    huge_overlap.f_center     = 150.0F;
+    huge_overlap.bw_sub       = 20.0F;
+    huge_overlap.nsub         = 1;
+    huge_overlap.t_p          = 5.0E-8F;
+    huge_overlap.dm_min       = 2000.0F;
+    huge_overlap.dm_max       = 2000.0F;
+    huge_overlap.nbin         = 0;
+    huge_overlap.block_nsamps = 0;
+    CHECK_THROWS_AS(CohFDMTPlan(huge_overlap), std::invalid_argument);
 }
 
 TEST_CASE("CohFDMT recovers an injected dispersed impulse", "[cfdmt][cpu]") {

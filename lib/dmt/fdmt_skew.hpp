@@ -31,6 +31,7 @@
 
 #include "dmt/bit_pack_utils.hpp"
 #include "dmt/fdmt_box_weights.hpp"
+#include "dmt/fdmt_cpu_mem.hpp"
 #include "dmt/fdmt_direct.hpp"
 #include "dmt/fdmt_history.hpp"
 #include "dmt/fdmt_search.hpp"
@@ -74,6 +75,15 @@
 // running sums and agrees within float rounding (as the GPU direct path).
 
 namespace dmt::algorithms::detail {
+
+/// A skewed-window layout whose compact tables would overflow their 32-bit
+/// offsets (FDMTSkewCpu::plan_buffers): that (chunk, leaf) candidate does not
+/// exist, so the path chooser skips it. Its own type, so the chooser catches
+/// nothing else.
+class SkewLayoutTooLarge : public std::length_error {
+public:
+    using std::length_error::length_error;
+};
 
 /// Automatic group-fusion materialization level F >= level.
 inline SizeType auto_skew_fuse_level(const plans::FDMTPlan& plan,
@@ -145,409 +155,7 @@ inline SizeType skew_leaf_level(const plans::FDMTPlan& plan,
     return auto_skew_leaf_level(plan, w, level, fuse_ring, chunk);
 }
 
-/// Memory of the skewed-window engine for `plan` at level K and chunk
-/// length `chunk`, from the plan alone (bytes): the raw ring (`ring_elem`
-/// bytes per sample), the two state halves, the per-row rings and the
-/// per-thread running-sum stripes. Also the tree engine's streaming state
-/// for comparison: its two chunk halves and its level-0 + tree history.
-struct FDMTSkewEstimate {
-    SizeType ring_nsamps{0};
-    SizeType ring{0};
-    SizeType state{0};
-    SizeType rings{0};
-    SizeType stripes{0};
-    SizeType tree_state{0};
-    SizeType tree_history{0};
-    /// Samples recomputed per chunk per row at levels >= K if the overlap
-    /// were recomputed instead of kept: sum of spreads / (rows * chunk).
-    double recompute_fraction{0.0};
-    [[nodiscard]] SizeType total() const noexcept {
-        return ring + state + rings + stripes;
-    }
-    [[nodiscard]] SizeType tree_total() const noexcept {
-        return tree_state + tree_history;
-    }
-};
-
-inline FDMTSkewEstimate estimate_skew_memory(const plans::FDMTPlan& plan,
-                                             SizeType level,
-                                             SizeType chunk,
-                                             SizeType ring_elem,
-                                             int nthreads,
-                                             bool smear            = true,
-                                             SizeType fuse         = 0,
-                                             SizeType search_depth = 0,
-                                             SizeType leaf         = 0) {
-    const auto& pc  = plan.get_container();
-    const auto root = plan.get_niters();
-    const auto w    = compute_skew_windows(plan, 1, search_depth);
-    const auto f_lvl =
-        auto_skew_fuse_level(plan, w, level, chunk, nthreads, fuse);
-    const auto f_ring = f_lvl;
-    const auto k_leaf = skew_leaf_level(plan, w, level, f_ring, chunk, leaf);
-    const auto lw     = compute_local_skew_windows(plan, w, k_leaf, f_ring);
-    std::vector<float> box_w;
-    if (smear) {
-        const auto weights = plan.get_box_weights();
-        const float unit =
-            std::ldexp(1.0F, -static_cast<int>(plan.get_box_fraction_bits()));
-        for (const auto v : weights) {
-            box_w.push_back(static_cast<float>(v) * unit);
-        }
-    }
-    const auto direct = build_fdmt_direct_plan(plan, k_leaf, smear, box_w);
-    FDMTSkewEstimate e;
-    SizeType need_back        = 0;
-    SizeType sub_stripe_elems = 0;
-    std::vector<SizeType> chan_reach(plan.get_nchans(), 0);
-    constexpr int64_t kMaxStripeSpan = 16384;
-    constexpr SizeType kMaxSubRows   = 1024;
-    for (const auto& sub : direct.subs) {
-        for (int32_t i = 0; i < sub.nrows; ++i) {
-            const auto row = static_cast<SizeType>(sub.row0 + i);
-            if (!lw.used(k_leaf, row)) {
-                continue;
-            }
-            const auto s_hi = lw.s_hi[k_leaf][row];
-            for (auto m = direct.leaf_off[row]; m < direct.leaf_off[row + 1];
-                 ++m) {
-                const auto& lf  = direct.leaves[static_cast<SizeType>(m)];
-                const auto c    = static_cast<SizeType>(sub.c0 + lf.c);
-                const auto need = s_hi + static_cast<SizeType>(lf.shift + lf.s);
-                chan_reach[c]   = std::max(chan_reach[c], need);
-                need_back       = std::max(need_back, need);
-            }
-        }
-        const bool at_f = (f_ring == k_leaf);
-        std::vector<int64_t> min_j(static_cast<SizeType>(sub.nc), INT64_MAX);
-        std::vector<int64_t> max_j(static_cast<SizeType>(sub.nc), 0);
-        SizeType sub_rows    = 0;
-        const auto flush_est = [&]() {
-            if (sub_rows == 0) {
-                return;
-            }
-            SizeType p_off = 0;
-            for (int32_t ci = 0; ci < sub.nc; ++ci) {
-                const auto uci = static_cast<SizeType>(ci);
-                if (min_j[uci] <= max_j[uci]) {
-                    p_off += static_cast<SizeType>(max_j[uci] - min_j[uci]) + 1;
-                }
-            }
-            sub_stripe_elems = std::max(sub_stripe_elems, p_off);
-            std::fill(min_j.begin(), min_j.end(), INT64_MAX);
-            std::fill(max_j.begin(), max_j.end(), int64_t{0});
-            sub_rows = 0;
-        };
-        for (int32_t i = 0; i < sub.nrows; ++i) {
-            const auto row = static_cast<SizeType>(sub.row0 + i);
-            if (!lw.used(k_leaf, row)) {
-                continue;
-            }
-            const auto s_hi   = static_cast<int64_t>(lw.s_hi[k_leaf][row]);
-            const auto loc_sp = at_f ? SizeType{0} : lw.spread(k_leaf, row);
-            const auto rlen   = static_cast<int64_t>(chunk + loc_sp);
-            const int64_t limit =
-                std::max<int64_t>(kMaxStripeSpan, rlen + 4096);
-            bool split = (sub_rows >= kMaxSubRows);
-            if (sub_rows > 0 && !split) {
-                for (auto m = direct.leaf_off[row];
-                     m < direct.leaf_off[row + 1]; ++m) {
-                    const auto& lf  = direct.leaves[static_cast<SizeType>(m)];
-                    const auto c    = static_cast<SizeType>(sub.c0 + lf.c);
-                    const int64_t a = static_cast<int64_t>(chan_reach[c]) -
-                                      s_hi - lf.shift + 1;
-                    const int64_t b = a - lf.s - 1;
-                    const auto ci   = static_cast<SizeType>(lf.c);
-                    const int64_t nmin = std::min(min_j[ci], b);
-                    const int64_t nmax = std::max(max_j[ci], a - 1 + rlen);
-                    if (nmax - nmin > limit) {
-                        split = true;
-                        break;
-                    }
-                }
-            }
-            if (split) {
-                flush_est();
-            }
-            for (auto m = direct.leaf_off[row]; m < direct.leaf_off[row + 1];
-                 ++m) {
-                const auto& lf = direct.leaves[static_cast<SizeType>(m)];
-                const auto c   = static_cast<SizeType>(sub.c0 + lf.c);
-                const int64_t a =
-                    static_cast<int64_t>(chan_reach[c]) - s_hi - lf.shift + 1;
-                const int64_t b = a - lf.s - 1;
-                const auto ci   = static_cast<SizeType>(lf.c);
-                min_j[ci]       = std::min(min_j[ci], b);
-                max_j[ci]       = std::max(max_j[ci], a - 1 + rlen);
-            }
-            ++sub_rows;
-        }
-        flush_est();
-    }
-    e.ring_nsamps = need_back + chunk;
-    e.ring        = 0;
-    for (SizeType c = 0; c < plan.get_nchans(); ++c) {
-        e.ring += (chan_reach[c] + chunk) * ring_elem;
-    }
-    // Tiling decision as build_tables(); stripes allocated for double sums.
-    const SizeType one_sub_b =
-        sub_stripe_elems * (ring_elem == sizeof(float) ? 8 : 4);
-    SizeType max_loc_sp = 0;
-    for (SizeType l = k_leaf; l < f_ring; ++l) {
-        max_loc_sp = std::max(max_loc_sp, lw.stats(l).max_spread);
-    }
-    const SizeType tile =
-        (f_lvl > k_leaf && f_ring == f_lvl && chunk > 512 &&
-         max_loc_sp <= 128 && one_sub_b <= (SizeType{512} << 10))
-            ? SizeType{512}
-            : chunk;
-    const SizeType stripe_subs =
-        (tile < chunk) ? (SizeType{1} << (f_lvl - k_leaf)) : SizeType{1};
-    SizeType grp_a_elems   = 0;
-    SizeType grp_b_elems   = 0;
-    const SizeType ngroups = pc.state_shape[f_lvl].nchans;
-    std::vector<SizeType> need_a(ngroups, 0);
-    std::vector<SizeType> need_b(ngroups, 0);
-    std::vector<SizeType> out_end(ngroups, 0);
-    if (f_lvl > k_leaf) {
-        SizeType f_off = 0;
-        for (SizeType g = 0; g < ngroups; ++g) {
-            const auto [fcb, fce] = fdmt_group_coords(pc, f_lvl, g, f_lvl);
-            for (SizeType r = fcb; r < fce; ++r) {
-                if (w.used(f_lvl, r)) {
-                    f_off += w.spread(f_lvl, r) + chunk;
-                }
-            }
-            out_end[g] = f_off;
-            for (SizeType l = k_leaf; l < f_lvl; ++l) {
-                const auto [cb, ce] = fdmt_group_coords(pc, f_lvl, g, l);
-                SizeType off        = 0;
-                for (SizeType r = cb; r < ce; ++r) {
-                    const bool used =
-                        (l < f_ring) ? lw.used(l, r) : w.used(l, r);
-                    if (used) {
-                        const SizeType sp =
-                            (l < f_ring) ? lw.spread(l, r) : w.spread(l, r);
-                        off += sp + tile;
-                    }
-                }
-                if ((l - k_leaf) % 2 == 0) {
-                    need_a[g]   = std::max(need_a[g], off);
-                    grp_a_elems = std::max(grp_a_elems, off);
-                } else {
-                    need_b[g]   = std::max(need_b[g], off);
-                    grp_b_elems = std::max(grp_b_elems, off);
-                }
-            }
-        }
-    }
-    const SizeType stripe_b =
-        ((stripe_subs * sub_stripe_elems * sizeof(double)) + 63) / 64 * 64;
-    const SizeType nt      = static_cast<SizeType>(std::max(1, nthreads));
-    const SizeType grp_a_b = ((grp_a_elems * sizeof(float)) + 63) / 64 * 64;
-    const SizeType grp_b_b = ((grp_b_elems * sizeof(float)) + 63) / 64 * 64;
-    const SizeType group_b = grp_a_b + grp_b_b;
-    SizeType half0         = 0;
-    SizeType half1         = 0;
-    SizeType rows          = 0;
-    SizeType spread_sum    = 0;
-    SizeType tree_rows     = 0;
-    for (SizeType l = k_leaf; l < root; ++l) {
-        const auto st = w.stats(l);
-        if (l >= f_lvl) {
-            const SizeType len = st.sum_spread + (st.used * chunk);
-            if (l % 2 == 0) {
-                half0 = std::max(half0, len);
-            } else {
-                half1 = std::max(half1, len);
-            }
-        }
-        rows += st.used;
-        spread_sum += (l < f_ring) ? lw.stats(l).sum_spread
-                                   : (l == f_ring ? 0 : st.sum_spread);
-    }
-    half0                  = ((half0 + 15) / 16) * 16;
-    half1                  = ((half1 + 15) / 16) * 16;
-    const SizeType out_cap = (f_lvl % 2 == 0) ? half0 : half1;
-    SizeType idle_cap      = ((f_lvl + 1) % 2 == 0) ? half0 : half1;
-    constexpr SizeType kIdleGroupThreshold = SizeType{64} << 20;
-    constexpr SizeType kIdleGroupMax       = SizeType{768} << 20;
-    const bool group_in_idle =
-        (f_lvl > k_leaf) && (nt * group_b > kIdleGroupThreshold) &&
-        (nt * group_b <= std::max(idle_cap * sizeof(float), kIdleGroupMax));
-    constexpr SizeType kSharedGroupThreshold = SizeType{256} << 20;
-    const bool shared_group = (f_lvl > k_leaf) && !group_in_idle &&
-                              (tile == chunk) &&
-                              ((nt * group_b > kSharedGroupThreshold) ||
-                               (group_b > (SizeType{64} << 20)));
-    e.stripes =
-        nt * (stripe_b + ((shared_group || group_in_idle) ? 0 : group_b));
-    if (group_in_idle) {
-        const SizeType need_idle = (nt * group_b) / sizeof(float);
-        if ((f_lvl + 1) % 2 == 0) {
-            half0 = std::max(half0, need_idle);
-        } else {
-            half1 = std::max(half1, need_idle);
-        }
-    } else if (shared_group) {
-        for (SizeType g = 0; g < ngroups; ++g) {
-            const bool fit_idle = (need_a[g] + need_b[g] <= idle_cap);
-            const bool fit_b_tail =
-                (need_a[g] <= idle_cap) && (out_end[g] + need_b[g] <= out_cap);
-            const bool fit_a_tail =
-                (need_b[g] <= idle_cap) && (out_end[g] + need_a[g] <= out_cap);
-            if (!fit_idle && !fit_b_tail && !fit_a_tail) {
-                idle_cap = std::max(idle_cap, need_a[g] + need_b[g]);
-            }
-        }
-        if ((f_lvl + 1) % 2 == 0) {
-            half0 = std::max(half0, idle_cap);
-        } else {
-            half1 = std::max(half1, idle_cap);
-        }
-    }
-    e.rings = w.stats(f_ring).sum_spread * sizeof(float);
-    for (SizeType l = 0; l < root; ++l) {
-        tree_rows = std::max(tree_rows, pc.state_shape[l].ncoords);
-    }
-    e.state = (half0 + half1) * sizeof(float);
-    e.recompute_fraction =
-        rows == 0
-            ? 0.0
-            : static_cast<double>(spread_sum) /
-                  (static_cast<double>(rows) * static_cast<double>(chunk));
-    e.tree_state   = 2 * tree_rows * chunk * sizeof(float);
-    e.tree_history = (plan.get_history_size() + plan.get_tree_history_size()) *
-                     sizeof(float);
-    return e;
-}
-
 /// 2 MiB-aligned hugepage-backed array zero-filled in parallel across threads.
-template <typename T> class SkewLargeArray {
-public:
-    SkewLargeArray() = default;
-    ~SkewLargeArray() { std::free(m_data); } // NOLINT
-    SkewLargeArray(const SkewLargeArray&)            = delete;
-    SkewLargeArray& operator=(const SkewLargeArray&) = delete;
-    SkewLargeArray(SkewLargeArray&&)                 = delete;
-    SkewLargeArray& operator=(SkewLargeArray&&)      = delete;
-
-    void assign(SizeType n, int nthreads) {
-        std::free(m_data); // NOLINT
-        m_data = nullptr;
-        m_size = n;
-        if (n == 0) {
-            return;
-        }
-        constexpr SizeType kAlign = SizeType{2} << 20;
-        const SizeType bytes =
-            (((n * sizeof(T)) + kAlign - 1) / kAlign) * kAlign;
-        m_data = static_cast<T*>(std::aligned_alloc(kAlign, bytes)); // NOLINT
-        if (m_data == nullptr) {
-            throw std::bad_alloc();
-        }
-#if defined(__linux__) && defined(MADV_HUGEPAGE)
-        ::madvise(m_data, bytes, MADV_HUGEPAGE);
-#endif
-        auto* raw            = reinterpret_cast<std::byte*>(m_data);
-        const SizeType pages = bytes / kAlign;
-#pragma omp parallel for num_threads(nthreads) schedule(static)
-        for (SizeType i = 0; i < pages; ++i) {
-            std::memset(raw + (i * kAlign), 0, kAlign);
-        }
-    }
-    void swap(SkewLargeArray& other) noexcept {
-        std::swap(m_data, other.m_data);
-        std::swap(m_size, other.m_size);
-    }
-    [[nodiscard]] T* data() noexcept { return m_data; }
-    [[nodiscard]] const T* data() const noexcept { return m_data; }
-    [[nodiscard]] SizeType size() const noexcept { return m_size; }
-    [[nodiscard]] T* begin() noexcept { return m_data; }
-    [[nodiscard]] T* end() noexcept { return m_data + m_size; }
-
-private:
-    T* m_data{nullptr};
-    SizeType m_size{0};
-};
-
-template <typename StateT>
-inline void skew_stream_add(const StateT* __restrict__ a,
-                            const StateT* __restrict__ b,
-                            StateT* __restrict__ out,
-                            SizeType m) noexcept {
-    // NOLINTNEXTLINE(bugprone-branch-clone): SIMD path when AVX is on
-    if constexpr (std::is_same_v<StateT, float>) {
-#if defined(__AVX512F__) || defined(__AVX__)
-#if defined(__AVX512F__)
-        constexpr SizeType kLanes = 16;
-#else
-        constexpr SizeType kLanes = 8;
-#endif
-        constexpr std::uintptr_t kAlign = kLanes * sizeof(float);
-        SizeType i                      = 0;
-        for (;
-             i < m && (reinterpret_cast<std::uintptr_t>(out + i) % kAlign) != 0;
-             ++i) {
-            out[i] = a[i] + b[i];
-        }
-        for (; i + kLanes <= m; i += kLanes) {
-#if defined(__AVX512F__)
-            _mm512_stream_ps(out + i, _mm512_add_ps(_mm512_loadu_ps(a + i),
-                                                    _mm512_loadu_ps(b + i)));
-#else
-            _mm256_stream_ps(out + i, _mm256_add_ps(_mm256_loadu_ps(a + i),
-                                                    _mm256_loadu_ps(b + i)));
-#endif
-        }
-        for (; i < m; ++i) {
-            out[i] = a[i] + b[i];
-        }
-#else
-#pragma omp simd
-        for (SizeType i = 0; i < m; ++i) {
-            out[i] = a[i] + b[i];
-        }
-#endif
-    } else {
-#if defined(__AVX512F__)
-        if constexpr (std::is_same_v<StateT, uint32_t>) {
-            constexpr SizeType kLanes       = 16;
-            constexpr std::uintptr_t kAlign = kLanes * sizeof(uint32_t);
-            SizeType i                      = 0;
-            for (; i < m &&
-                   (reinterpret_cast<std::uintptr_t>(out + i) % kAlign) != 0;
-                 ++i) {
-                out[i] = a[i] + b[i];
-            }
-            for (; i + kLanes <= m; i += kLanes) {
-                _mm512_stream_si512(
-                    reinterpret_cast<__m512i*>(out + i),
-                    _mm512_add_epi32(
-                        _mm512_loadu_si512(
-                            reinterpret_cast<const __m512i*>(a + i)),
-                        _mm512_loadu_si512(
-                            reinterpret_cast<const __m512i*>(b + i))));
-            }
-            for (; i < m; ++i) {
-                out[i] = a[i] + b[i];
-            }
-            return;
-        }
-#endif
-#pragma omp simd
-        for (SizeType i = 0; i < m; ++i) {
-            out[i] = a[i] + b[i];
-        }
-    }
-}
-
-inline void skew_stream_fence() noexcept {
-#if defined(__AVX__)
-    _mm_sfence();
-#endif
-}
-
 /**
  * @brief Streaming FDMT on skewed windows (see the file comment). Valid
  * mode only; float or packed (1, 2, 4, 8, 16 bit) input, one beam.
@@ -610,11 +218,8 @@ public:
         m_search_from = m_win.search_from;
         m_fuse =
             auto_skew_fuse_level(plan, m_win, level, m_chunk, m_nthreads, fuse);
-        m_fuse_ring = m_fuse;
-        m_level =
-            skew_leaf_level(plan, m_win, level, m_fuse_ring, m_chunk, leaf);
-        m_loc_win =
-            compute_local_skew_windows(plan, m_win, m_level, m_fuse_ring);
+        m_level   = skew_leaf_level(plan, m_win, level, m_fuse, m_chunk, leaf);
+        m_loc_win = compute_local_skew_windows(plan, m_win, m_level, m_fuse);
         build_tables();
         plan_buffers();
         if (!defer_allocation) {
@@ -776,23 +381,19 @@ public:
                 history_state_size(), out.size()));
         }
         std::fill_n(out.begin(), kHistHeader, 0.0F);
-        const auto put16 = [&](SizeType at, uint64_t v, SizeType words) {
-            for (SizeType i = 0; i < words; ++i) {
-                out[at + i] = static_cast<float>((v >> (16 * i)) & 0xFFFFU);
-            }
-        };
-        put16(0, kHistMagic, 1);
-        put16(1, kHistVersion, 1);
-        put16(2, layout_hash(), 4);
-        put16(6, m_stream_pos, 4);
-        put16(10,
-              m_nonint_until > m_stream_pos ? m_nonint_until - m_stream_pos : 0,
-              4);
-        put16(14, m_ring_elem, 1);
+        detail::put16(out, 0, kHistMagic, 1);
+        detail::put16(out, 1, kHistVersion, 1);
+        detail::put16(out, 2, layout_hash(), 4);
+        detail::put16(out, 6, m_stream_pos, 4);
+        detail::put16(
+            out, 10,
+            m_nonint_until > m_stream_pos ? m_nonint_until - m_stream_pos : 0,
+            4);
+        detail::put16(out, 14, m_ring_elem, 1);
         float* ring          = out.data() + kHistHeader;
         const SizeType tot   = m_chan_ring_off[m_nchans];
         const SizeType words = hist_ring_words(m_ring_elem);
-        if (m_ring.size() == 0) {
+        if (m_ring.empty()) {
             std::fill_n(ring, words, 0.0F);
         } else if (m_ring_elem != sizeof(float)) {
             ring_dispatch(m_ring_elem, [&](auto tag) {
@@ -810,25 +411,16 @@ public:
     }
 
     void load_history(std::span<const float> in) {
-        const auto get16 = [&](SizeType at, SizeType words) {
-            uint64_t v = 0;
-            for (SizeType i = 0; i < words; ++i) {
-                const float x = in[at + i];
-                if (!(x >= 0.0F && x <= 65535.0F) || x != std::floor(x)) {
-                    throw std::invalid_argument(
-                        "FDMT::load_history: not a skewed-window history");
-                }
-                v |= static_cast<uint64_t>(x) << (16 * i);
-            }
-            return v;
-        };
-        if (in.size() < kHistHeader || get16(0, 1) != kHistMagic ||
-            get16(1, 1) != kHistVersion) {
+        constexpr const char* kBadSkewHeader =
+            "FDMT::load_history: not a skewed-window history";
+        if (in.size() < kHistHeader ||
+            detail::get16(in, 0, 1, kBadSkewHeader) != kHistMagic ||
+            detail::get16(in, 1, 1, kBadSkewHeader) != kHistVersion) {
             throw std::invalid_argument(
                 "FDMT::load_history: not a skewed-window history (it was "
                 "saved by a different engine path)");
         }
-        uint64_t elem = get16(14, 1);
+        uint64_t elem = detail::get16(in, 14, 1, kBadSkewHeader);
         if (elem == 0) { // written before the format word: a float ring
             elem = sizeof(float);
         }
@@ -841,14 +433,14 @@ public:
                 "FDMT::load_history: Invalid input size. Expected {}, got {}",
                 history_size_for(elem), in.size()));
         }
-        if (get16(2, 4) != layout_hash()) {
+        if (detail::get16(in, 2, 4, kBadSkewHeader) != layout_hash()) {
             throw std::invalid_argument(
                 "FDMT::load_history: the history was saved by an engine with "
                 "a different skewed-window layout (plan, chunk_nsamps or "
                 "fusion depth)");
         }
-        const uint64_t pos   = get16(6, 4);
-        const uint64_t rem   = get16(10, 4);
+        const uint64_t pos   = detail::get16(in, 6, 4, kBadSkewHeader);
+        const uint64_t rem   = detail::get16(in, 10, 4, kBadSkewHeader);
         const float* ring    = in.data() + kHistHeader;
         const SizeType tot   = m_chan_ring_off[m_nchans];
         const SizeType words = hist_ring_words(elem);
@@ -889,7 +481,7 @@ public:
                 need = 2;
             }
         }
-        if (m_ring.size() == 0) { // float-built, before any input
+        if (m_ring.empty()) { // float-built, before any input
             alloc_ring(need);
         } else if (need > m_ring_elem) {
             if (m_nbits != 32) {
@@ -955,18 +547,6 @@ public:
         return lag;
     }
 
-    /// Wall-clock seconds spent per phase since construction (or the last
-    /// reset_profile()): writing the ring, the level-K running-sum stripes
-    /// and rows (+ fused group merges), and the global merges above F.
-    struct Profile {
-        double ring{0.0};
-        double stripes{0.0};
-        double rows{0.0};
-        double merges{0.0};
-    };
-    [[nodiscard]] Profile profile() const noexcept { return m_prof; }
-    void reset_profile() noexcept { m_prof = {}; }
-
     std::string summary() const {
         std::string s = fmt::format(
             "FDMTSkewCpu: level {} (fuse {}) of {}, chunk {}, ring {} samples "
@@ -1028,7 +608,6 @@ private:
     struct KSub {
         int32_t c0;
         int32_t nc;
-        int64_t need_back;
         std::vector<KRow> rows;
         std::vector<StripeSpan> spans;
     };
@@ -1077,23 +656,12 @@ private:
         const auto& pc = m_plan.get_container();
         // Box-mean weights (float) and recipes (packed).
         if (m_smear) {
-            const auto weights = m_plan.get_box_weights();
-            const auto scale_f = m_plan.get_box_mean_bits();
-            const float w_unit = std::ldexp(
-                1.0F, -static_cast<int>(m_plan.get_box_fraction_bits()));
-            m_int_unit = m_search_int
-                             ? 1.0F
-                             : std::ldexp(1.0F, -static_cast<int>(scale_f));
-            m_box_w.resize(weights.size());
-            m_box_round.resize(weights.size());
-            for (SizeType s = 0; s < weights.size(); ++s) {
-                m_box_w[s]     = static_cast<float>(weights[s]) * w_unit;
-                m_box_round[s] = m_search_int ? FDMTBoxRound{.mul = weights[s],
-                                                             .add = 0U,
-                                                             .rshift = 0U,
-                                                             .lshift = 0U}
-                                              : box_round(s + 1, scale_f);
-            }
+            auto tables = make_fdmt_box_tables(
+                m_plan.get_box_weights(), m_plan.get_box_fraction_bits(),
+                m_plan.get_box_mean_bits(), m_search_int);
+            m_int_unit  = tables.int_unit;
+            m_box_w     = std::move(tables.w_f32);
+            m_box_round = std::move(tables.round);
             const SizeType box_max =
                 (pc.level0_boxes.empty() ? pc.state_shape[0].dt_max
                                          : pc.level0_max_box_s) +
@@ -1117,7 +685,7 @@ private:
 
         const SizeType k      = m_level;
         const SizeType f      = m_fuse;
-        const SizeType f_ring = m_fuse_ring;
+        const SizeType f_ring = m_fuse;
         m_row_off.assign(m_root + 1, {});
         m_level_len.assign(m_root + 1, 0);
         for (SizeType l = k; l < m_root; ++l) {
@@ -1225,10 +793,9 @@ private:
             SizeType r_begin      = 0;
             const auto flush_ksub = [&](SizeType r_end) {
                 KSub ks{
-                    .c0        = sub.c0,
-                    .nc        = sub.nc,
-                    .need_back = sub_need_back,
-                    .rows      = std::vector<KRow>(
+                    .c0   = sub.c0,
+                    .nc   = sub.nc,
+                    .rows = std::vector<KRow>(
                         all_rows.begin() + static_cast<std::ptrdiff_t>(r_begin),
                         all_rows.begin() + static_cast<std::ptrdiff_t>(r_end)),
                     .spans =
@@ -1658,7 +1225,7 @@ private:
             m_group_b_elems > kU32 ||
             m_stripe_subs * m_sub_stripe_elems >
                 static_cast<SizeType>(INT32_MAX)) {
-            throw std::length_error(
+            throw SkewLayoutTooLarge(
                 "FDMT skew: plan too large for 32-bit table offsets");
         }
         // Sized for 8-byte (double) running sums whatever the ring's type:
@@ -1705,7 +1272,7 @@ private:
     /// so the stream history) in place.
     void widen_ring(SizeType elem) {
         const SizeType tot = m_chan_ring_off[m_nchans];
-        SkewLargeArray<std::byte> wide;
+        FDMTLargeArray<std::byte> wide;
         wide.assign(tot * elem, m_nthreads);
         ring_dispatch(m_ring_elem, [&](auto from_tag) {
             using From      = decltype(from_tag);
@@ -1729,7 +1296,7 @@ private:
     /// input type arrives; narrower input is converted on write. The stream
     /// history survives any change of input type.
     void ensure_ring(SizeType ring_elem) {
-        if (m_ring.size() == 0) {
+        if (m_ring.empty()) {
             alloc_ring(ring_elem);
         } else if (ring_elem > m_ring_elem) {
             widen_ring(ring_elem);
@@ -1810,7 +1377,7 @@ private:
         mix(m_nchans);
         mix(m_level);
         mix(m_fuse);
-        mix(m_fuse_ring);
+        mix(m_fuse); // historical ring-level slot (keeps saved hashes stable)
         mix(m_chunk);
         mix(m_search_from);
         mix(m_smear ? 1 : 0);
@@ -1872,15 +1439,11 @@ private:
         const BlockKind kind = block_kind(in);
         for (SizeType t0 = 0; t0 < m_nsamps; t0 += m_chunk) {
             const SizeType n = std::min(m_chunk, m_nsamps - t0);
-            double t         = omp_get_wtime();
             write_ring(in, t0, n);
-            m_prof.ring += omp_get_wtime() - t;
             level_k_for<float>(in, kind, n);
-            t = omp_get_wtime();
             for (SizeType l = m_fuse + 1; l <= m_root; ++l) {
                 merge_level<float>(l, n, dmt, t0);
             }
-            m_prof.merges += omp_get_wtime() - t;
             m_stream_pos += n;
         }
         end_block(in, kind);
@@ -1921,19 +1484,15 @@ private:
         const SizeType ntrials = m_plan.get_dmt_ndms();
         for (SizeType t0 = 0; t0 < m_nsamps; t0 += m_chunk) {
             const SizeType n = std::min(m_chunk, m_nsamps - t0);
-            double t         = omp_get_wtime();
             write_ring(in, t0, n);
-            m_prof.ring += omp_get_wtime() - t;
             if (!m_search_int) {
                 level_k_for<float>(in, kind, n);
-                t = omp_get_wtime();
                 for (SizeType l = m_fuse + 1; l <= m_root; ++l) {
                     merge_level<float>(l, n, nullptr, 0);
                     if (l >= m_search_from && l < m_root) {
                         consume_level(sink, l, n, {.state = half<float>(l)});
                     }
                 }
-                m_prof.merges += omp_get_wtime() - t;
                 sink.consume(m_root, {.state             = half<float>(m_root),
                                       .row_stride        = m_chunk,
                                       .beam_stride       = ntrials * m_chunk,
@@ -1942,7 +1501,6 @@ private:
                                       .materialized_root = true});
             } else if (m_search_u32) {
                 level_k_for<uint32_t>(in, kind, n);
-                t = omp_get_wtime();
                 for (SizeType l = m_fuse + 1; l <= m_root; ++l) {
                     merge_level<uint32_t>(l, n, nullptr, 0);
                     if (l >= m_search_from && l < m_root) {
@@ -1950,7 +1508,6 @@ private:
                                       {.integer32_state = half<uint32_t>(l)});
                     }
                 }
-                m_prof.merges += omp_get_wtime() - t;
                 sink.consume(m_root,
                              {.row_stride        = m_chunk,
                               .beam_stride       = ntrials * m_chunk,
@@ -1960,7 +1517,6 @@ private:
                               .integer32_state   = half<uint32_t>(m_root)});
             } else {
                 level_k_for<uint64_t>(in, kind, n);
-                t = omp_get_wtime();
                 for (SizeType l = m_fuse + 1; l <= m_root; ++l) {
                     merge_level<uint64_t>(l, n, nullptr, 0);
                     if (l >= m_search_from && l < m_root) {
@@ -1968,7 +1524,6 @@ private:
                                       {.integer_state = half<uint64_t>(l)});
                     }
                 }
-                m_prof.merges += omp_get_wtime() - t;
                 sink.consume(m_root, {.row_stride        = m_chunk,
                                       .beam_stride       = ntrials * m_chunk,
                                       .nsamps            = n,
@@ -2083,19 +1638,16 @@ private:
               bool Packed,
               typename StateT = float>
     void level_k(SizeType n) {
-        double t_stripes = 0.0;
-        double t_rows    = 0.0;
         StateT* out_f    = half<StateT>(m_fuse);
         StateT* rings_f  = reinterpret_cast<StateT*>(m_ring_f.data());
         const int64_t T  = static_cast<int64_t>(m_stream_pos);
         const bool fused = (m_fuse > m_level);
 
-        const auto build_stripes = [&](SizeType s, AccT* P, double& ts_acc) {
+        const auto build_stripes = [&](SizeType s, AccT* P) {
             const auto& sub = m_subs[s];
             if (sub.rows.empty()) {
                 return;
             }
-            const double t0 = omp_get_wtime();
             for (int32_t ci = 0; ci < sub.nc; ++ci) {
                 const auto c          = static_cast<SizeType>(sub.c0 + ci);
                 const int64_t rch     = m_chan_reach[c];
@@ -2190,7 +1742,6 @@ private:
                     t += run;
                 }
             }
-            ts_acc += omp_get_wtime() - t0;
         };
 
         const auto eval_op_tile = [&](const Op& op, const StateT* in,
@@ -2209,7 +1760,7 @@ private:
 
         if (m_shared_group) {
             StateT* idle_half = half<StateT>(m_fuse + 1);
-#pragma omp parallel num_threads(m_nthreads) reduction(+ : t_stripes, t_rows)
+#pragma omp parallel num_threads(m_nthreads)
             {
                 auto* P = reinterpret_cast<AccT*>(
                     m_scratch.data() +
@@ -2226,24 +1777,20 @@ private:
                     const SizeType sub_hi = m_groups[batch.g_hi - 1].sub_hi;
 #pragma omp for schedule(dynamic, 1)
                     for (SizeType s = sub_lo; s < sub_hi; ++s) {
-                        build_stripes(s, P, t_stripes);
-                        const double t1 = omp_get_wtime();
+                        build_stripes(s, P);
                         for (const auto& kr : m_subs[s].rows) {
                             row_k<AccT, Packed, StateT>(
                                 P, kr, n + kr.local_spread, grp_a + kr.out);
                         }
-                        t_rows += omp_get_wtime() - t1;
                     }
                     for (SizeType l = m_level + 1; l <= m_fuse; ++l) {
-                        const double t1 = omp_get_wtime();
                         const StateT* in =
                             ((l - 1 - m_level) % 2 == 0) ? grp_a : grp_b;
-                        StateT* dst_half = (l == m_fuse)              ? out_f
-                                           : ((l - m_level) % 2 == 0) ? grp_a
-                                                                      : grp_b;
-                        const bool at_f  = (l == m_fuse);
-                        const bool stream =
-                            !at_f && !batch.in_l3 && (l != m_fuse_ring);
+                        StateT* dst_half  = (l == m_fuse)              ? out_f
+                                            : ((l - m_level) % 2 == 0) ? grp_a
+                                                                       : grp_b;
+                        const bool at_f   = (l == m_fuse);
+                        const bool stream = !at_f && !batch.in_l3;
                         const auto* ops   = m_ops[l].data();
                         const SizeType lo = m_groups[batch.g_lo].op_lo[l];
                         const SizeType hi = m_groups[batch.g_hi - 1].op_hi[l];
@@ -2260,7 +1807,7 @@ private:
                             if (op.head == kOpNone) {
                                 std::copy_n(tail, m, out);
                             } else if (stream) {
-                                skew_stream_add(tail, in + op.head, out, m);
+                                fdmt_stream_add(tail, in + op.head, out, m);
                             } else {
                                 eval_op_tile(op, in, out, m);
                             }
@@ -2272,17 +1819,14 @@ private:
                         // Each thread fences its own non-temporal stores
                         // before the barrier that publishes them.
                         if (stream) {
-                            skew_stream_fence();
+                            fdmt_stream_fence();
                         }
 #pragma omp barrier
-                        t_rows += omp_get_wtime() - t1;
                     }
                 }
             }
         } else {
-            const bool ring_at_f = (m_fuse_ring == m_fuse);
-#pragma omp parallel for num_threads(m_nthreads) schedule(dynamic, 1)          \
-    reduction(+ : t_stripes, t_rows)
+#pragma omp parallel for num_threads(m_nthreads) schedule(dynamic, 1)
             for (SizeType g = 0; g < m_groups.size(); ++g) {
                 const auto& fg = m_groups[g];
                 const auto tid = static_cast<SizeType>(omp_get_thread_num());
@@ -2300,7 +1844,7 @@ private:
                     reinterpret_cast<StateT*>(grp_base + m_group_a_bytes);
 
                 // Pre-copy level-F carry-in before the tile loop.
-                if (fused && ring_at_f) {
+                if (fused) {
                     const auto* ops_f = m_ops[m_fuse].data();
                     for (SizeType k = fg.op_lo[m_fuse]; k < fg.op_hi[m_fuse];
                          ++k) {
@@ -2310,7 +1854,7 @@ private:
                                         out_f + op.out - op.spread);
                         }
                     }
-                } else if (!fused) {
+                } else {
                     for (SizeType s = fg.sub_lo; s < fg.sub_hi; ++s) {
                         for (const auto& kr : m_subs[s].rows) {
                             if (kr.spread > 0) {
@@ -2329,19 +1873,16 @@ private:
                                 ? (P + ((s - fg.sub_lo) * m_sub_stripe_elems))
                                 : P;
                         if (ts == 0) {
-                            build_stripes(s, P_sub, t_stripes);
+                            build_stripes(s, P_sub);
                         }
-                        const double t1 = omp_get_wtime();
                         for (const auto& kr : m_subs[s].rows) {
                             StateT* dst = fused ? (grp_a + kr.out)
                                                 : (out_f + kr.out + ts);
                             row_k<AccT, Packed, StateT>(
                                 P_sub + ts, kr, tn + kr.local_spread, dst);
                         }
-                        t_rows += omp_get_wtime() - t1;
                     }
                     if (fused) {
-                        const double t1 = omp_get_wtime();
                         for (SizeType l = m_level + 1; l <= m_fuse; ++l) {
                             const StateT* in =
                                 ((l - 1 - m_level) % 2 == 0) ? grp_a : grp_b;
@@ -2356,23 +1897,14 @@ private:
                                 const Op& op = ops[k];
                                 StateT* out  = at_f ? (dst_half + op.out + ts)
                                                     : (dst_half + op.out);
-                                if (!ring_at_f && op.spread > 0) {
-                                    std::copy_n(rings_f + op.ring_off,
-                                                op.spread, out - op.spread);
-                                }
                                 eval_op_tile(op, in, out, tn + op.local_spread);
-                                if (!ring_at_f && op.spread > 0) {
-                                    std::copy_n(out - op.spread + tn, op.spread,
-                                                rings_f + op.ring_off);
-                                }
                             }
                         }
-                        t_rows += omp_get_wtime() - t1;
                     }
                 }
 
                 // Post-copy level-F carry-out after the tile loop.
-                if (fused && ring_at_f) {
+                if (fused) {
                     const auto* ops_f = m_ops[m_fuse].data();
                     for (SizeType k = fg.op_lo[m_fuse]; k < fg.op_hi[m_fuse];
                          ++k) {
@@ -2382,7 +1914,7 @@ private:
                                         op.spread, rings_f + op.ring_off);
                         }
                     }
-                } else if (!fused) {
+                } else {
                     for (SizeType s = fg.sub_lo; s < fg.sub_hi; ++s) {
                         for (const auto& kr : m_subs[s].rows) {
                             if (kr.spread > 0) {
@@ -2394,8 +1926,6 @@ private:
                 }
             }
         }
-        m_prof.stripes += t_stripes / m_nthreads;
-        m_prof.rows += t_rows / m_nthreads;
     }
 
     /// A ring sample as a running-sum term: integer-valued float to the
@@ -2666,11 +2196,11 @@ private:
                     }
                 } else {
                     const StateT* __restrict__ head = in + op.head;
-                    skew_stream_add(tail, head, out, m);
+                    fdmt_stream_add(tail, head, out, m);
                 }
             }
             if (!search_out) {
-                skew_stream_fence();
+                fdmt_stream_fence();
             }
         }
     }
@@ -2679,7 +2209,6 @@ private:
     bool m_smear;
     int m_nthreads;
     SizeType m_fuse;
-    SizeType m_fuse_ring{0};
     SizeType m_level;
     SizeType m_root;
     SizeType m_nchans;
@@ -2729,9 +2258,9 @@ private:
     SizeType m_group_b_elems{0};
     bool m_shared_group{false};
     bool m_group_in_idle{false};
-    SkewLargeArray<float> m_state;
-    SkewLargeArray<std::byte> m_ring;
-    SkewLargeArray<std::byte> m_scratch;
+    FDMTLargeArray<float> m_state;
+    FDMTLargeArray<std::byte> m_ring;
+    FDMTLargeArray<std::byte> m_scratch;
     SizeType m_stripe_bytes{0};
     SizeType m_group_a_bytes{0};
     SizeType m_group_b_bytes{0};
@@ -2739,7 +2268,6 @@ private:
     SizeType m_stream_pos{0};
     Memory m_mem;
     bool m_allocated{false};
-    Profile m_prof;
 };
 
 } // namespace dmt::algorithms::detail

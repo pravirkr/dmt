@@ -67,6 +67,9 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+# dmt uses no C++20 modules. CMake >= 3.28 would otherwise scan every source
+# for them on GCC >= 14, and ccache cannot cache those compiles.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Default to Release when no build type is specified (packaging-friendly).
@@ -125,8 +128,8 @@ message(STATUS "CPU target (Release): ${DMT_MARCH_FLAG}")
 # Compiler flags (Interface target to hold global compile options)
 set(DMT_COMPILE_OPTIONS ${PROJECT_NAME}_COMPILE_OPTIONS)
 add_library(${DMT_COMPILE_OPTIONS} INTERFACE)
-# Host-compiler flags; HIP sources get their own (dmt_gpu_options): no
-# -ffast-math or -march=native reaches device code there.
+# Host-compiler flags; HIP sources get their own (dmt_gpu_options in
+# cmake/dmtGPU.cmake), so host -march=native does not reach device code.
 set(_dmt_not_hip "$<NOT:$<COMPILE_LANGUAGE:HIP>>")
 # No -Wpedantic on CUDA: nvcc forwards it to the host compiler, which then
 # flags the line directives in nvcc's own generated code.
@@ -134,14 +137,34 @@ target_compile_options(
   ${DMT_COMPILE_OPTIONS} INTERFACE $<${_dmt_not_hip}:-Wall;-Wextra>
                                    $<$<NOT:$<COMPILE_LANGUAGE:CUDA,HIP>>:-Wpedantic>
 )
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag(
+  "-Wno-missing-designated-field-initializers" DMT_HAS_WNO_MISSING_DESIGNATED_FIELD_INITIALIZERS
+)
+if(DMT_HAS_WNO_MISSING_DESIGNATED_FIELD_INITIALIZERS)
+  target_compile_options(
+    ${DMT_COMPILE_OPTIONS}
+    INTERFACE $<$<NOT:$<COMPILE_LANGUAGE:CUDA,HIP>>:-Wno-missing-designated-field-initializers>
+  )
+endif()
+if(DMT_ENABLE_COVERAGE)
+  set(DMT_CXX_CONFIG_FLAGS_DEBUG -O0 -g)
+else()
+  set(DMT_CXX_CONFIG_FLAGS_DEBUG -O1 -g)
+endif()
+set(DMT_CXX_CONFIG_FLAGS_RELEASE -O3 -DNDEBUG -ffast-math)
+if(DMT_MARCH_FLAG)
+  list(APPEND DMT_CXX_CONFIG_FLAGS_RELEASE "${DMT_MARCH_FLAG}")
+endif()
+set(DMT_CXX_CONFIG_FLAGS_RELWITHDEBINFO -O2 -DNDEBUG -g)
+set(DMT_CXX_CONFIG_FLAGS_MINSIZEREL -Os -DNDEBUG)
 target_compile_options(
   ${DMT_COMPILE_OPTIONS}
   INTERFACE
-    $<${_dmt_not_hip}:$<$<CONFIG:Debug>:$<IF:$<BOOL:${DMT_ENABLE_COVERAGE}>,-O0,-O1>;-g>>
-    $<${_dmt_not_hip}:$<$<CONFIG:Release>:-O3;-DNDEBUG;-ffast-math>>
-    $<${_dmt_not_hip}:$<$<CONFIG:Release>:${DMT_MARCH_FLAG}>>
-    $<${_dmt_not_hip}:$<$<CONFIG:RelWithDebInfo>:-O2;-DNDEBUG;-g>>
-    $<${_dmt_not_hip}:$<$<CONFIG:MinSizeRel>:-Os;-DNDEBUG>>
+    $<${_dmt_not_hip}:$<$<CONFIG:Debug>:${DMT_CXX_CONFIG_FLAGS_DEBUG}>>
+    $<${_dmt_not_hip}:$<$<CONFIG:Release>:${DMT_CXX_CONFIG_FLAGS_RELEASE}>>
+    $<${_dmt_not_hip}:$<$<CONFIG:RelWithDebInfo>:${DMT_CXX_CONFIG_FLAGS_RELWITHDEBINFO}>>
+    $<${_dmt_not_hip}:$<$<CONFIG:MinSizeRel>:${DMT_CXX_CONFIG_FLAGS_MINSIZEREL}>>
 )
 
 # OpenMP detection

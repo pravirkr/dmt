@@ -247,18 +247,15 @@ public:
     // The stepper (always unfused) runs whole blocks only.
     void check_stepper_block() const;
 
-    // `fuse`: execute() only -- replace level 0 and the first merges by the
-    // fused kernel (see configure_fusion()); the stepper stays unfused.
+    // Unfused stepper entry points.
     void reset_impl(cuda::std::span<const uint8_t> d_waterfall,
                     SizeType nbits,
                     cuda::std::span<float> d_dmt,
-                    cudaStream_t stream,
-                    bool fuse);
+                    cudaStream_t stream);
 
     void reset_impl(cuda::std::span<const float> d_waterfall,
                     cuda::std::span<float> d_dmt,
-                    cudaStream_t stream,
-                    bool fuse);
+                    cudaStream_t stream);
 
     /// Levels below which execute() does not materialise the tree: the
     /// tile fusion's depth, or the direct levels' (fdmt_direct.hpp).
@@ -277,6 +274,18 @@ public:
 
     [[nodiscard]] uint64_t search_latency() const noexcept override {
         return m_top && m_top->windowed ? m_top->max_lag : 0;
+    }
+    [[nodiscard]] detail::FDMTPath path() const noexcept override {
+        if (m_top && m_top->windowed) {
+            return detail::FDMTPath::kWindowed;
+        }
+        if (m_direct && m_direct->skewed) {
+            return detail::FDMTPath::kSkewed;
+        }
+        if (m_direct || m_top) {
+            return detail::FDMTPath::kDirect;
+        }
+        return detail::FDMTPath::kTree;
     }
     [[nodiscard]] std::string search_path() const override;
 
@@ -429,15 +438,15 @@ private:
     //   only its newest samples, and no history is shifted or doubled.
     // The level-0 input history and the FIFOs flip on m_parity per chunk.
     std::array<gpu_utils::PlannedVector<float>, 2> m_tree_fifo_d;
-    mutable gpu_utils::PlannedVector<float> m_tree_ring_d;
+    gpu_utils::PlannedVector<float> m_tree_ring_d;
     SizeType m_fifo_levels{0};
     SizeType m_fifo_size{0};
-    mutable SizeType m_ring_size{0};
+    SizeType m_ring_size{0};
     SizeType m_ring_low_base{0};
     SizeType m_ring_low_size{0};
     SizeType m_ring_high_orig_base{0};
     SizeType m_ring_high_size{0};
-    mutable bool m_full_tree_ring{false};
+    bool m_full_tree_ring{false};
     std::vector<SizeType> m_level_max_extra;
     bool m_parity{false};
     float* m_fifo_in_ptr{nullptr};
@@ -574,9 +583,8 @@ private:
     std::unique_ptr<DirectTopD> m_top;
     bool m_search_upper{false};
     SizeType m_max_memory{kFDMTDefaultMaxMemory}; // FDMTEngineConfig
-    // FDMTEngineConfig::gpu_path
-    detail::FDMTEngineConfig::GPUPath m_path{
-        detail::FDMTEngineConfig::GPUPath::kAuto};
+    // FDMTEngineConfig::path
+    detail::FDMTPath m_path{detail::FDMTPath::kAuto};
     bool m_search_only{false}; // FDMTEngineConfig::search_only
     // set_search_keep(): level-0 rows the search reads as zero.
     const uint8_t* m_search_keep{nullptr};
@@ -609,7 +617,6 @@ private:
     bool m_is_initialized{false};
     SizeType m_current_level{0};
     std::vector<LevelBufD> m_levels_d;
-    float* m_dmt_target_ptr{nullptr};
     cudaStream_t m_stream{nullptr};
     // End of the latest device-memory call; host-memory calls wait for it.
     mutable gpu_utils::DeviceWorkFence m_device_work;
@@ -647,12 +654,11 @@ private:
     void check_root_output() const;
 
     /// Tree history offsets are unsigned 32-bit (plans_cuda.cuh), taken from
-    /// the full tree layout. Checked against the highest offset an active
-    /// FIFO or ring level reads (`ring_elems` per beam): levels covered by
-    /// the direct levels or the direct top are never indexed, so a plan
-    /// whose full tree exceeds the range still runs when they cover it.
-    /// Checked again when ensure_full_tree_history() expands to the full
-    /// tree.
+    /// the full tree layout. Checked at construction against the highest
+    /// offset any active FIFO or ring level can read (`ring_elems` per beam):
+    /// levels covered by the direct levels or the direct top are never
+    /// indexed on search-only or skewed engines, while ordinary non-skewed
+    /// FDMT allocates the full tree ring upfront for stepper / history use.
     static void check_tree_ring_extent(SizeType ring_elems);
 
     void check_inputs(SizeType waterfall_size, SizeType dmt_size) const;
@@ -662,8 +668,6 @@ private:
                              SizeType dmt_size) const;
 
     void check_subband_idx(SizeType subband_idx) const;
-
-    void ensure_full_tree_history(cudaStream_t stream) const;
 
     // ---- skewed-window streaming history (m_direct->skewed) -------------
     //
@@ -691,6 +695,9 @@ private:
     [[nodiscard]] std::vector<SkewHistBuffer> skew_hist_buffers() const;
 
     [[nodiscard]] uint64_t skew_layout_hash() const;
+
+    [[nodiscard]] uint64_t
+    check_skew_history_header(std::span<const float> hdr) const;
 
     void save_skew_history_d(float* dst, cudaStream_t stream) const;
 
@@ -990,8 +997,75 @@ private:
                  int out_row_stride,
                  cudaStream_t stream);
 
+    template <typename T>
+    void launch_top_ring_update(const T* level_state,
+                                int64_t level_stride,
+                                cudaStream_t stream);
+
+    template <typename T>
+    void run_top_impl(const T* level_state,
+                      int64_t level_stride,
+                      T* out,
+                      int64_t out_beam_stride,
+                      int out_row_stride,
+                      cudaStream_t stream,
+                      bool update_meta);
+
     /// Level k's newest samples of this chunk into its rings.
     void update_top_rings(cudaStream_t stream);
+
+    /// Zeroes all persistent streaming history buffers and resets stream
+    /// counters (shared by `reset_history()` and `reset_search_history()`).
+    void zero_history(cudaStream_t stream, bool throw_on_error);
+
+    /// Single launch helper for `kernel_execute_iter` across all FDMT paths.
+    /// Returns true when the ring advance was fused into the merge kernel.
+    template <FDMTMode Mode,
+              typename TIn,
+              typename TOut,
+              typename THist = float>
+    static bool launch_execute_iter(const TIn* in_ptr,
+                                    TOut* out_ptr,
+                                    const plans::FDMTCoordDPtrs& sums,
+                                    const plans::FDMTCoordCopyDPtrs& copies,
+                                    THist* hist_ptr,
+                                    int nsamps,
+                                    int nsum,
+                                    int ncopy,
+                                    int in_beam_stride,
+                                    int out_beam_stride,
+                                    int64_t hist_stride,
+                                    int64_t hist_base,
+                                    uint64_t hist_ring,
+                                    float int_unit,
+                                    int active,
+                                    SizeType nbeams,
+                                    bool allow_fuse_ring,
+                                    int skew_stride,
+                                    cudaStream_t stream) {
+        constexpr int kBlockSamps = kIterThreads * kIterSampsPerTh;
+        const int count           = std::max(nsum, ncopy);
+        const dim3 block(kIterThreads, 1);
+        const dim3 grid((nsamps + kBlockSamps - 1) / kBlockSamps,
+                        std::min(count, kMaxGridY), nbeams);
+        gpu_utils::check_kernel_launch_params(grid, block);
+        const bool fuse_ring = allow_fuse_ring && grid.x == 1;
+        if constexpr (Mode == FDMTMode::kValid) {
+            kernel_execute_iter<Mode, TIn, TOut, THist>
+                <<<grid, block, 0, stream>>>(
+                    in_ptr, out_ptr, sums, copies, hist_ptr, nsamps, nsum,
+                    ncopy, in_beam_stride, out_beam_stride, hist_stride,
+                    hist_base, hist_ring, int_unit, active, fuse_ring,
+                    skew_stride);
+        } else {
+            kernel_execute_iter<Mode, TIn, TOut, THist>
+                <<<grid, block, 0, stream>>>(
+                    in_ptr, out_ptr, sums, copies, hist_ptr, nsamps, nsum,
+                    ncopy, in_beam_stride, out_beam_stride, hist_stride,
+                    hist_base, hist_ring, int_unit, active);
+        }
+        return fuse_ring;
+    }
 
     /// Rewrites the tree histories of levels k+1..root from the rings at the
     /// current stream position, after top chunks left them behind.

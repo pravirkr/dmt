@@ -13,6 +13,7 @@
 #include "dmt/common/types.hpp"
 
 #include "dmt/bit_pack_utils.hpp"
+#include "dmt/device_macros.hpp"
 #include "dmt/fdmt_box_weights.hpp"
 #include "dmt/fdmt_tree.hpp"
 

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <tuple>
@@ -124,41 +125,11 @@ cudaStream_t to_cuda(Stream stream) {
     return static_cast<cudaStream_t>(stream.native);
 }
 
-bool is_packed_width(SizeType nbits) {
-    return nbits == 1 || nbits == 2 || nbits == 4 || nbits == 8 || nbits == 16;
-}
+using bit_pack_utils::is_packed_width;
+using bit_pack_utils::row_bytes_for;
 
-/// Calls f.template operator()<NBITS>() for the runtime width (1..16, 32).
 template <typename F> void dispatch_nbits(SizeType nbits, F&& f) {
-    switch (nbits) {
-    case 1:
-        f.template operator()<1>();
-        break;
-    case 2:
-        f.template operator()<2>();
-        break;
-    case 4:
-        f.template operator()<4>();
-        break;
-    case 8:
-        f.template operator()<8>();
-        break;
-    case 16:
-        f.template operator()<16>();
-        break;
-    case 32:
-        f.template operator()<32>();
-        break;
-    default:
-        throw std::invalid_argument(
-            fmt::format("DDMT (gpu): unsupported nbits={}", nbits));
-    }
-}
-
-/// Bytes of one channel row holding @p nsamps samples (float when 32).
-SizeType row_bytes_for(SizeType nsamps, SizeType nbits) {
-    return nbits == 32 ? nsamps * sizeof(float)
-                       : bit_pack_utils::packed_row_bytes(nsamps, nbits);
+    bit_pack_utils::dispatch_nbits(nbits, std::forward<F>(f), "DDMT (gpu)");
 }
 
 class DDMTCudaEngine final : public detail::DDMTEngine {
@@ -168,8 +139,10 @@ public:
                    bool shared_sums)
         : m_plan(plan),
           m_device_id(cfg.exec.device),
+          m_nthreads(std::max(1, cfg.exec.nthreads)),
           m_nbeams(cfg.nbeams),
           m_shared_sums(shared_sums),
+          m_force_shared_sums(cfg.force_shared_sums),
           m_estimate_only(cfg.defer_allocation) {
         init();
     }
@@ -314,6 +287,7 @@ public:
         }
         const auto nsamps = d_waterfall.size() / rows;
         check_size(d_dmt.size(), out_size(nsamps), "execute (output)");
+        check_int32_extents(nsamps, "execute(device float)");
         const auto s = to_cuda(stream);
         core<32>(reinterpret_cast<const uint8_t*>(d_waterfall.data()),
                  nsamps * sizeof(float), nsamps, d_dmt.data(), s);
@@ -331,6 +305,7 @@ public:
         check_size(d_waterfall_packed.size(), rows * row_bytes,
                    "execute (packed input bytes)");
         check_size(d_dmt.size(), out_size(nsamps), "execute (output)");
+        check_int32_extents(nsamps, "execute(device packed)");
         const auto s = to_cuda(stream);
         dispatch_nbits(nbits, [&]<unsigned NBITS>() {
             if constexpr (NBITS != 32) {
@@ -353,6 +328,7 @@ public:
                    "execute_time_major (input bytes)");
         check_size(d_dmt.size(), out_size(nsamps),
                    "execute_time_major (output)");
+        check_int32_extents(nsamps, "execute_time_major(device)");
         const auto s         = to_cuda(stream);
         const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
         // The transpose scratch is reused by the next call: order this
@@ -391,7 +367,7 @@ public:
                 const auto cnt = n1 - n0;
                 bytes          = rows * cnt * sizeof(float);
                 auto* dst      = reinterpret_cast<float*>(h_dst);
-                parallel_rows(rows, bytes, [&](SizeType r) {
+                parallel_rows(rows, bytes, m_nthreads, [&](SizeType r) {
                     std::memcpy(dst + (r * cnt), &waterfall[(r * nsamps) + n0],
                                 cnt * sizeof(float));
                 });
@@ -423,7 +399,7 @@ public:
                             bit_pack_utils::packed_row_bytes(n1, NBITS);
                         const auto cnt = b1 - b0;
                         bytes          = rows * cnt;
-                        parallel_rows(rows, bytes, [&](SizeType r) {
+                        parallel_rows(rows, bytes, m_nthreads, [&](SizeType r) {
                             std::memcpy(h_dst + (r * cnt),
                                         &waterfall_packed[(r * row_bytes) + b0],
                                         cnt);
@@ -453,13 +429,15 @@ public:
                         SizeType& bytes) {
                         const auto cnt = (n1 - n0) * samp_bytes;
                         bytes          = m_nbeams * cnt;
-                        parallel_rows(m_nbeams, bytes, [&](SizeType b) {
-                            std::memcpy(
-                                h_dst + (b * cnt),
-                                &filterbank_packed[(b * nsamps * samp_bytes) +
-                                                   (n0 * samp_bytes)],
-                                cnt);
-                        });
+                        parallel_rows(
+                            m_nbeams, bytes, m_nthreads, [&](SizeType b) {
+                                std::memcpy(
+                                    h_dst + (b * cnt),
+                                    &filterbank_packed[(b * nsamps *
+                                                        samp_bytes) +
+                                                       (n0 * samp_bytes)],
+                                    cnt);
+                            });
                         // Time-major chunk: transposed on the device.
                         return SizeType{0};
                     },
@@ -476,8 +454,10 @@ protected:
 private:
     const plans::DDMTPlan& m_plan; // owned by the DDMT facade
     int m_device_id;
+    int m_nthreads;
     SizeType m_nbeams;
-    bool m_shared_sums; // SDMT: use the shared-sum kernel when it pays
+    bool m_shared_sums;       // SDMT: use the shared-sum kernel when it pays
+    bool m_force_shared_sums; // SDMT: use shared-sum kernel whenever it fits
     // Estimate-only: plan tables and history are sized into m_planned,
     // never uploaded.
     bool m_estimate_only;
@@ -641,6 +621,18 @@ private:
                             what, expected, got));
         }
     }
+    void check_int32_extents(SizeType nsamps, std::string_view what) const {
+        constexpr auto kMax =
+            static_cast<SizeType>(std::numeric_limits<int>::max());
+        if (nsamps > kMax || m_history_len > kMax - nsamps) {
+            throw std::invalid_argument(fmt::format(
+                "{} (gpu): {} history ({}) + samples ({}) exceeds the 32-bit "
+                "sample index range ({}); split the device call into smaller "
+                "chunks",
+                m_shared_sums ? "SDMT" : "DDMT", what, m_history_len, nsamps,
+                kMax));
+        }
+    }
 
     void save_history_bytes(uint8_t* d_dst,
                             SizeType bytes,
@@ -694,7 +686,6 @@ private:
         std::vector<int> delays(pc.delay_table.size());
         std::ranges::transform(pc.delay_table, delays.begin(),
                                [](SizeType v) { return static_cast<int>(v); });
-        upload(m_delay_d, delays.begin(), delays.end());
         std::vector<int> active;
         for (SizeType c = 0; c < nchans; ++c) {
             if (pc.kill_mask[c] != 0) {
@@ -702,14 +693,19 @@ private:
             }
         }
         m_nact = static_cast<int>(active.size());
-        upload(m_active_d, active.begin(), active.end());
 
+        // Decide the kernel first so only its plan tables are uploaded.
         dispatch_nbits(nbits, [&]<unsigned NBITS>() {
-            select_kernel<NBITS>(delays, active);
-            if (m_shared_sums) {
-                select_shared<NBITS>(delays, active);
+            if (!m_shared_sums || !select_shared<NBITS>(delays, active)) {
+                select_kernel<NBITS>(delays, active);
             }
         });
+        if (m_kind != KernelKind::kShared) {
+            upload(m_active_d, active.begin(), active.end());
+            if (m_kind == KernelKind::kDirect) {
+                upload(m_delay_d, delays.begin(), delays.end());
+            }
+        }
 
         if (m_estimate_only) {
             return; // estimates create no streams or events
@@ -864,10 +860,10 @@ private:
      * Either way the sums are the same.
      */
     template <unsigned NBITS>
-    void select_shared(const std::vector<int>& delays,
+    bool select_shared(const std::vector<int>& delays,
                        const std::vector<int>& active) {
         if (m_ndm == 0 || active.empty()) {
-            return;
+            return false;
         }
         using E   = sdmt_gpu::Elem<NBITS>;
         int optin = 0;
@@ -907,7 +903,7 @@ private:
             logging::debug("SDMT ({}): no shared-sum program fits; running "
                            "the DDMT kernel",
                            DMT_GPU_NAME);
-            return;
+            return false;
         }
         // Estimated times from sustained rates measured on an L40S at the
         // reference point (4096 channels, 2049 trials): ~3.4e12 arena
@@ -921,11 +917,11 @@ private:
                                                      : 9.6e12;
         const double speedup =
             (best->ddmt / kDdmtRate) / (best->ops / kSharedRate);
-        if (speedup < 1.1 && !detail::sdmt_gpu_always_shared()) {
+        if (speedup < 1.1 && !m_force_shared_sums) {
             logging::debug("SDMT ({}): shared sums do not pay (estimated "
                            "{:.2f}x); running the DDMT kernel",
                            DMT_GPU_NAME, speedup);
-            return;
+            return false;
         }
         logging::debug("SDMT ({}): shared-sum kernel, DM tiles of {}, {} "
                        "programs, arena {} elements, estimated {:.2f}x "
@@ -950,6 +946,7 @@ private:
                     cudaFuncAttributeMaxDynamicSharedMemorySize, optin),
                 "SDMT: setting kernel shared memory failed");
         });
+        return true;
     }
 
     template <unsigned NBITS, class Cfg>
@@ -1109,6 +1106,7 @@ private:
                   SizeType n_new,
                   DDMTAcc<NBITS>* d_out,
                   cudaStream_t stream) {
+        check_int32_extents(n_new, "execute");
         gpu_utils::check_gpu_call(cudaStreamWaitEvent(stream, m_hist_ready, 0));
         const auto hist_len = m_history_len;
         const auto total    = hist_len + n_new;
@@ -1180,11 +1178,12 @@ private:
             const auto* src =
                 reinterpret_cast<const Acc*>(m_h_out[p.buf].data());
             const auto out_rows = m_nbeams * m_ndm;
-            parallel_rows(
-                out_rows, out_rows * p.n_out * sizeof(Acc), [&](SizeType r) {
-                    std::memcpy(h_out + (r * n_total) + p.pos,
-                                src + (r * p.n_out), p.n_out * sizeof(Acc));
-                });
+            parallel_rows(out_rows, out_rows * p.n_out * sizeof(Acc),
+                          m_nthreads, [&](SizeType r) {
+                              std::memcpy(h_out + (r * n_total) + p.pos,
+                                          src + (r * p.n_out),
+                                          p.n_out * sizeof(Acc));
+                          });
         };
 
         for (SizeType k = 0; k < nchunk; ++k) {

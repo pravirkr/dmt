@@ -37,8 +37,9 @@ using algorithms::SDMT;
 bool skip_if_over_budget(benchmark::State& state,
                          Algo algo,
                          const plans::FDMTPlan& plan,
-                         const Point& p) {
-    const double need   = estimate_bytes(algo, plan, p);
+                         const Point& p,
+                         int nthreads) {
+    const double need   = estimate_bytes(algo, plan, p, Exec::cpu(nthreads));
     const double budget = memory_budget_bytes();
     if (need > budget) {
         state.SkipWithError(
@@ -54,7 +55,7 @@ void bench_fdmt(benchmark::State& state, Point p, int nthreads) {
     PeakRss mem;
     mem.begin();
     const auto plan = make_plan(p);
-    if (skip_if_over_budget(state, Algo::kFDMT, plan, p)) {
+    if (skip_if_over_budget(state, Algo::kFDMT, plan, p, nthreads)) {
         return;
     }
     FDMT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, dm_grid(p), true,
@@ -79,18 +80,16 @@ void bench_fdmt(benchmark::State& state, Point p, int nthreads) {
     mem.report(state);
 }
 
-template <bool kFrac>
 void bench_fdmt_fft(benchmark::State& state, Point p, int nthreads) {
     PeakRss mem;
     mem.begin();
     const auto plan = make_plan(p);
-    if (skip_if_over_budget(state, kFrac ? Algo::kFDMTFFTFrac : Algo::kFDMTFFT,
-                            plan, p)) {
+    if (skip_if_over_budget(state, Algo::kFDMTFFTFrac, plan, p, nthreads)) {
         return;
     }
     try {
         FDMTFFT fdmt(kFMin, kFMax, kNchans, p.nsamps, kTsamp, dm_grid(p), true,
-                     "valid", Exec::cpu(nthreads), 1, kFrac);
+                     "valid", Exec::cpu(nthreads), 1, true);
         const auto wf = make_float_input(kNchans * p.nsamps);
         std::vector<float> dmt(plan.get_dmt_size());
         fdmt.execute(wf, dmt);
@@ -112,7 +111,7 @@ void bench_ddmt(benchmark::State& state, Point p, int nthreads) {
     PeakRss mem;
     mem.begin();
     const auto plan = make_plan(p);
-    if (skip_if_over_budget(state, kAlgo, plan, p)) {
+    if (skip_if_over_budget(state, kAlgo, plan, p, nthreads)) {
         return;
     }
     const auto dms = dm_grid(p);
@@ -147,23 +146,20 @@ void bench_ddmt(benchmark::State& state, Point p, int nthreads) {
     set_ddmt_rate(state, plan, p);
 }
 
-/// DDMT-FFT (NUFFT or brute force) on the FDMT plan's DM grid (uniform, so
-/// the NUFFT applies), exact fractional delays.
-template <DDMTFFTMethod kMethod>
+/// DDMT-FFT (NUFFT) on the FDMT plan's DM grid (uniform, so the NUFFT
+/// applies), exact fractional delays.
 void bench_ddmt_fft(benchmark::State& state, Point p, int nthreads) {
     PeakRss mem;
     mem.begin();
-    constexpr auto kAlgo =
-        kMethod == DDMTFFTMethod::kBrute ? Algo::kDDMTFFTBrute : Algo::kDDMTFFT;
     const auto plan = make_plan(p);
-    if (skip_if_over_budget(state, kAlgo, plan, p)) {
+    if (skip_if_over_budget(state, Algo::kDDMTFFT, plan, p, nthreads)) {
         return;
     }
     try {
         const auto dms = dm_grid(p);
         DDMTFFT eng(kFMin, kFMax, kNchans, kTsamp, std::span<const float>(dms),
                     Exec::cpu(nthreads), p.nbits, {}, 1,
-                    DDMTFFTOptions{.method = kMethod});
+                    DDMTFFTOptions{.method = DDMTFFTMethod::kNUFFT});
         const auto ndms = dms.size();
         std::vector<float> dmt(ndms * p.nsamps);
         if (p.nbits == 32) {
@@ -232,10 +228,10 @@ void register_cpu() {
                 add(bench_name(Algo::kFDMT, cpu_label(t), p), bench_fdmt, p, t);
             }
             add(bench_name(Algo::kFDMTFFTFrac, cpu_label(multi), p),
-                bench_fdmt_fft<true>, p, multi);
+                bench_fdmt_fft, p, multi);
             add_ddmt(p, multi);
-            add(bench_name(Algo::kDDMTFFT, cpu_label(multi), p),
-                bench_ddmt_fft<DDMTFFTMethod::kNUFFT>, p, multi);
+            add(bench_name(Algo::kDDMTFFT, cpu_label(multi), p), bench_ddmt_fft,
+                p, multi);
         }
     }
     for (const auto& p : sweep_points(Sweep::kNbits)) {
@@ -243,8 +239,8 @@ void register_cpu() {
             add(bench_name(Algo::kFDMT, cpu_label(t), p), bench_fdmt, p, t);
         }
         add_ddmt(p, multi);
-        add(bench_name(Algo::kDDMTFFT, cpu_label(multi), p),
-            bench_ddmt_fft<DDMTFFTMethod::kNUFFT>, p, multi);
+        add(bench_name(Algo::kDDMTFFT, cpu_label(multi), p), bench_ddmt_fft, p,
+            multi);
     }
 }
 

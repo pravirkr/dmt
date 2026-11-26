@@ -17,15 +17,15 @@
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
 
-#include "dmt/fdmt_variance.hpp"
 #include "dmt/kadane_cuda.cuh"
 #include "dmt/kadane_plan.hpp"
 #include "dmt/kadane_simd.hpp"
 
+#include "kadane_test_tables.hpp"
+
 namespace dmt {
 namespace {
 
-using algorithms::detail::fdmt_trapezoid_variance;
 using kadane::clamp_kadane_i32;
 using kadane::compute_bucket_cut_hd_f32;
 using kadane::kadane_apply;
@@ -35,14 +35,13 @@ using kadane::kadane_identity_i64;
 using kadane::KadaneGatePlan;
 using kadane::KadaneSegF32;
 using kadane::KadaneSegI64;
-using kadane::KadaneSurrogateDeviceView;
-using kadane::KadaneSurrogatePlan;
 using kadane::kKadaneInt32Cap;
 using kadane::LagWindow;
 using kadane::make_kadane_seg_f32;
 using kadane::make_kadane_seg_i64;
 using kadane::ScalarBackend;
 using kadane::trapezoid_edge_width;
+using kadane_test::make_synthetic_tables;
 
 constexpr int kItems = 4;
 constexpr int kWarp  = 32;
@@ -163,81 +162,6 @@ KadaneSegI64 emulate_gpu_block_scan_i64(std::span<const uint32_t> tile,
     return w_acc[kBlockWarps - 1];
 }
 
-struct MonoidSyntheticTables {
-    std::vector<uint32_t> widths;
-    std::vector<float> raw_thresh;
-    std::vector<float> inv_sigma;
-    std::vector<double> int_mean;
-    std::vector<uint64_t> int_thresh;
-    SizeType n_rows     = 0;
-    double integer_unit = 1.0;
-};
-
-MonoidSyntheticTables
-make_tables(std::span<const uint32_t> widths,
-            bool use_trapezoid,
-            float detect_thresh,
-            float noise_sigma,
-            std::span<const std::pair<SizeType, SizeType>> row_specs,
-            bool packed       = false,
-            double input_mean = 0.0,
-            int scale_bits    = 0) {
-    MonoidSyntheticTables out;
-    out.widths.assign(widths.begin(), widths.end());
-    out.n_rows         = row_specs.size();
-    out.integer_unit   = std::ldexp(1.0, -scale_bits);
-    const double scale = std::ldexp(1.0, scale_bits);
-    const SizeType nf  = widths.size();
-
-    out.raw_thresh.resize(out.n_rows * nf);
-    out.inv_sigma.resize(out.n_rows * nf);
-    if (packed) {
-        out.int_mean.resize(out.n_rows * nf);
-        out.int_thresh.resize(out.n_rows * nf);
-    }
-
-    for (SizeType r = 0; r < out.n_rows; ++r) {
-        const auto [leaf_len, n_chans] = row_specs[r];
-        if (n_chans == 0) {
-            for (SizeType f = 0; f < nf; ++f) {
-                out.inv_sigma[(r * nf) + f] = 0.0F;
-                out.raw_thresh[(r * nf) + f] =
-                    std::numeric_limits<float>::max();
-                if (packed) {
-                    out.int_mean[(r * nf) + f]   = 0.0;
-                    out.int_thresh[(r * nf) + f] = UINT64_MAX;
-                }
-            }
-            continue;
-        }
-        for (SizeType f = 0; f < nf; ++f) {
-            const uint32_t w    = widths[f];
-            const uint32_t edge = use_trapezoid ? trapezoid_edge_width(w) : 0U;
-            const double var_1 =
-                fdmt_trapezoid_variance(leaf_len, w, edge, 1.0) *
-                static_cast<double>(n_chans) *
-                static_cast<double>(noise_sigma) *
-                static_cast<double>(noise_sigma);
-            const auto inv_s = static_cast<float>(1.0 / std::sqrt(var_1));
-            out.inv_sigma[(r * nf) + f]  = inv_s;
-            out.raw_thresh[(r * nf) + f] = detect_thresh / inv_s;
-            if (packed) {
-                const uint32_t tw = edge == 0U ? w : 2U * (w - edge);
-                const double mu   = input_mean * static_cast<double>(n_chans) *
-                                    static_cast<double>(leaf_len) *
-                                    static_cast<double>(tw) * scale;
-                const double thr_d =
-                    mu +
-                    (static_cast<double>(out.raw_thresh[(r * nf) + f]) * scale);
-                out.int_mean[(r * nf) + f] = mu;
-                out.int_thresh[(r * nf) + f] =
-                    static_cast<uint64_t>(std::max(1.0, std::ceil(thr_d)));
-            }
-        }
-    }
-    return out;
-}
-
 } // namespace
 
 TEST_CASE("KadaneSegF32 and KadaneSegI64 satisfy tropical monoid laws",
@@ -346,7 +270,8 @@ TEST_CASE("GPU block/warp KadaneSegF32 tree scan matches Stage-2 sequential "
     const std::vector<std::pair<SizeType, SizeType>> specs = {{1, 16}, {3, 32}};
 
     for (const bool use_trap : {false, true}) {
-        const auto tbl  = make_tables(widths, use_trap, 5.5F, 1.0F, specs);
+        const auto tbl =
+            make_synthetic_tables(widths, use_trap, 5.5F, 1.0F, specs);
         const auto plan = kadane::make_kadane_gate_plan(
             widths, use_trap, specs.size(), tbl.raw_thresh);
         REQUIRE(plan.num_buckets >= 1);
@@ -475,8 +400,8 @@ TEST_CASE("GPU block/warp KadaneSegI64 tree scan is bit-exact and "
     const std::vector<std::pair<SizeType, SizeType>> specs = {{1, 8}, {2, 16}};
 
     for (const bool use_trap : {false, true}) {
-        const auto tbl =
-            make_tables(widths, use_trap, 5.0F, 15.0F, specs, true, 128.0, 0);
+        const auto tbl = make_synthetic_tables(widths, use_trap, 5.0F, 15.0F,
+                                               specs, true, 128.0, 0);
         const uint64_t max_samp = 255ULL * 32ULL;
         const auto plan         = kadane::make_kadane_gate_plan(
             widths, use_trap, specs.size(), tbl.raw_thresh, tbl.int_mean,
@@ -658,8 +583,7 @@ TEST_CASE("Shared DMT_HD LagWindow is chunk-size-invariant across small and "
     }
 }
 
-TEST_CASE("DMT_HD BlockNoise cut recomputation and surrogate S/N view match "
-          "host plans bit-for-bit",
+TEST_CASE("DMT_HD BlockNoise cut recomputation matches host plans bit-for-bit",
           "[kadane_monoid][kadane][monoid][boxcar][cpu]") {
     const std::vector<uint32_t> widths = {1,  2,  3,  5,   8,   13,  21,
                                           34, 55, 89, 144, 233, 377, 610};
@@ -667,7 +591,8 @@ TEST_CASE("DMT_HD BlockNoise cut recomputation and surrogate S/N view match "
         {1, 32}, {4, 64}, {2, 0}};
 
     for (const bool use_trap : {false, true}) {
-        const auto tbl = make_tables(widths, use_trap, 6.0F, 1.25F, specs);
+        const auto tbl =
+            make_synthetic_tables(widths, use_trap, 6.0F, 1.25F, specs);
         const KadaneGatePlan gplan = kadane::make_kadane_gate_plan(
             widths, use_trap, specs.size(), tbl.raw_thresh);
 
@@ -695,54 +620,6 @@ TEST_CASE("DMT_HD BlockNoise cut recomputation and surrogate S/N view match "
                       std::bit_cast<uint32_t>(host_cuts[k]));
             }
         }
-
-        // Surrogate device view S/N evaluator parity (float & integer)
-        for (const bool packed : {false, true}) {
-            const auto stbl = make_tables(widths, use_trap, 6.0F, 1.25F, specs,
-                                          packed, 64.0, 2);
-            const KadaneSurrogatePlan splan =
-                packed ? kadane::make_kadane_surrogate_plan(
-                             widths, use_trap, specs.size(), stbl.raw_thresh,
-                             stbl.inv_sigma, stbl.int_mean, stbl.integer_unit)
-                       : kadane::make_kadane_surrogate_plan(
-                             widths, use_trap, specs.size(), stbl.raw_thresh,
-                             stbl.inv_sigma);
-
-            KadaneSurrogateDeviceView view{};
-            view.num_passes    = splan.num_passes;
-            view.n_rows        = splan.n_rows;
-            view.row_stride    = splan.row_stride;
-            view.n_filters     = widths.size();
-            view.max_width     = splan.max_width;
-            view.is_integer    = splan.is_integer;
-            view.integer_unit  = splan.integer_unit;
-            view.bias          = splan.bias.data();
-            view.trigger       = splan.trigger.data();
-            view.box_inv_sigma = splan.box_inv_sigma_lut.data();
-            view.row_mean_1 =
-                splan.row_mean_1.empty() ? nullptr : splan.row_mean_1.data();
-            view.disabled_row = splan.disabled_row.data();
-            view.w_nearest    = splan.width_nearest_filter.data();
-            view.w_bracket_lo = splan.width_bracket_lo.data();
-            view.w_bracket_hi = splan.width_bracket_hi.data();
-            view.w_log_lerp   = splan.width_log_lerp.data();
-
-            for (SizeType r = 0; r < specs.size(); ++r) {
-                for (uint32_t w :
-                     {1U, 2U, 4U, 7U, 19U, 64U, 200U, 610U, 750U}) {
-                    const double raw_sum =
-                        packed ? (64.0 * 4.0 * 64.0 * w + 500.0) : 42.5;
-                    uint32_t host_f = 0U;
-                    uint32_t dev_f  = 0U;
-                    const float host_snr =
-                        splan.eval_surrogate_snr(r, raw_sum, w, &host_f);
-                    const float dev_snr = view.eval_surrogate_snr(
-                        r, raw_sum, w, widths[0], dev_f);
-                    CHECK(dev_f == host_f);
-                    CHECK(std::abs(dev_snr - host_snr) <= 1.0e-5F);
-                }
-            }
-        }
     }
 }
 
@@ -754,8 +631,8 @@ TEST_CASE("DMT_HD wide-boxcar BlockNoise cut bit-parity up to 2^20 and "
 
     // 1. Wide-boxcar (max_boxcar = 16384 and 1048576) bit-identical parity
     // between compute_bucket_cut_hd_f32 and KadaneGatePlan::recompute_row_cuts
-    // / recompute_cuts_for_biases across normal, clamped-zero, near-overflow,
-    // and dead-row threshold profiles.
+    // across normal, clamped-zero, near-overflow, and dead-row threshold
+    // profiles.
     for (const SizeType max_boxcar : {SizeType{16384}, SizeType{1048576}}) {
         for (const float wtsp : {2.0F, 1.5F}) {
             const auto widths =
@@ -764,7 +641,7 @@ TEST_CASE("DMT_HD wide-boxcar BlockNoise cut bit-parity up to 2^20 and "
 
             for (const bool use_trap : {false, true}) {
                 const auto tbl =
-                    make_tables(widths, use_trap, 6.0F, 1.0F, specs);
+                    make_synthetic_tables(widths, use_trap, 6.0F, 1.0F, specs);
                 const KadaneGatePlan gplan = kadane::make_kadane_gate_plan(
                     widths, use_trap, specs.size(), tbl.raw_thresh);
                 REQUIRE(gplan.num_buckets == 3);
@@ -816,53 +693,6 @@ TEST_CASE("DMT_HD wide-boxcar BlockNoise cut bit-parity up to 2^20 and "
                             CHECK(std::bit_cast<uint32_t>(hd_cut) == 0U);
                         }
                     }
-                }
-
-                // (c) Marginal bias (0 < tau_raw < margin) and extreme near-
-                // kDeadFloor / huge-bias finiteness checks at w_hi = max_boxcar
-                const SizeType nf     = widths.size();
-                const uint32_t f_last = static_cast<uint32_t>(nf - 1);
-                const uint32_t w_last = widths[f_last];
-                const uint32_t we_last =
-                    use_trap ? trapezoid_edge_width(w_last) : 0U;
-                const auto tilde_last = static_cast<double>(w_last - we_last);
-                const double tilde_thr =
-                    static_cast<double>(tbl.raw_thresh[f_last]) *
-                    (we_last == 0U ? 1.0 : 0.5);
-
-                std::vector<float> test_biases = {
-                    gplan.row_bias(0, 0),
-                    gplan.row_bias(1, 0),
-                    static_cast<float>((tilde_thr - 1.0e-3) / tilde_last),
-                };
-                const std::span<const float> row0_thr(tbl.raw_thresh.data(),
-                                                      nf);
-                std::vector<float> host_custom(gplan.num_buckets, -1.0F);
-                kadane::recompute_cuts_for_biases(gplan, test_biases, row0_thr,
-                                                  host_custom);
-                for (SizeType k = 0; k < gplan.num_buckets; ++k) {
-                    const float hd_cut = compute_bucket_cut_hd_f32(
-                        gplan.buckets[k], widths.data(), nf, use_trap,
-                        test_biases[k],
-                        [&](SizeType f) { return row0_thr[f]; });
-                    CHECK(std::bit_cast<uint32_t>(hd_cut) ==
-                          std::bit_cast<uint32_t>(host_custom[k]));
-                }
-                CHECK(std::bit_cast<uint32_t>(host_custom[2]) == 0U);
-
-                // Near-kDeadFloor finite thresholds + huge bias overflow guard
-                std::vector<float> huge_thr(nf, 9.0e34F);
-                std::vector<float> huge_biases(gplan.num_buckets, 1.0e38F);
-                kadane::recompute_cuts_for_biases(gplan, huge_biases, huge_thr,
-                                                  host_custom);
-                for (SizeType k = 0; k < gplan.num_buckets; ++k) {
-                    const float hd_cut = compute_bucket_cut_hd_f32(
-                        gplan.buckets[k], widths.data(), nf, use_trap,
-                        huge_biases[k],
-                        [&](SizeType f) { return huge_thr[f]; });
-                    CHECK(std::bit_cast<uint32_t>(hd_cut) ==
-                          std::bit_cast<uint32_t>(host_custom[k]));
-                    CHECK(std::bit_cast<uint32_t>(hd_cut) == 0U);
                 }
             }
         }

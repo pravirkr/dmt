@@ -5,6 +5,7 @@
 #include "dmt/common/types.hpp"
 
 #include "dmt/ddmt_kernel.cuh"
+#include "dmt/device_macros.hpp"
 #include "dmt/sdmt_gpu_plan.hpp"
 
 /**

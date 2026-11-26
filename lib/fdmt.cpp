@@ -218,6 +218,8 @@ FDMTMemoryEstimate estimate_fdmt(const plans::FDMTPlan& plan,
         e.host_staging =
             (nbeams * plan.get_nchans() * plan.get_nsamps() * sizeof(float)) +
             e.usage.output;
+        e.host_pinned =
+            detail::host_staging_pinned_bytes(e.usage.output, exec.nthreads);
     }
     return e;
 }
@@ -308,7 +310,7 @@ const plans::FDMTPlan& FDMT::get_plan() const noexcept {
 SizeType FDMT::get_nbeams() const noexcept { return m_impl->m_cfg.nbeams; }
 Backend FDMT::backend() const noexcept { return m_impl->m_cfg.exec.backend; }
 int FDMT::nthreads() const noexcept {
-    return m_impl->on_cpu() ? std::max(1, m_impl->m_cfg.exec.nthreads) : 1;
+    return std::max(1, m_impl->m_cfg.exec.nthreads);
 }
 int FDMT::device() const noexcept {
     return m_impl->on_cpu() ? -1 : m_impl->m_cfg.exec.device;

@@ -55,6 +55,9 @@ public:
     [[nodiscard]] SizeType fuse_levels() const noexcept override {
         return m_fdmt->get_fuse_levels();
     }
+    [[nodiscard]] FDMTPath path() const noexcept override {
+        return m_fdmt->path();
+    }
     [[nodiscard]] std::string search_path() const override {
         return m_fdmt->search_path();
     }
@@ -95,14 +98,22 @@ private:
 
 } // namespace
 
+namespace {
+std::unique_ptr<BoxcarDriver> wrapped(std::unique_ptr<BoxcarDriver> driver) {
+    return g_boxcar_driver_wrap != nullptr
+               ? g_boxcar_driver_wrap(std::move(driver))
+               : std::move(driver);
+}
+} // namespace
+
 std::unique_ptr<BoxcarDriver>
 make_boxcar_driver(std::unique_ptr<FDMTEngine> fdmt) {
-    return std::make_unique<FDMTDriver>(std::move(fdmt));
+    return wrapped(std::make_unique<FDMTDriver>(std::move(fdmt)));
 }
 
 std::unique_ptr<BoxcarDriver>
 make_boxcar_driver(std::unique_ptr<FDMTFFTEngine> fft) {
-    return std::make_unique<FDMTFFTDriver>(std::move(fft));
+    return wrapped(std::make_unique<FDMTFFTDriver>(std::move(fft)));
 }
 
 } // namespace dmt::algorithms::detail

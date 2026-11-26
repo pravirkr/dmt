@@ -14,21 +14,22 @@ from dmtlib import (
     add_frb_track,
 )
 
+try:
+    from ._helpers import sorted_candidates
+except ImportError:
+    from _helpers import sorted_candidates
+
 NCHANS = 64
 NSAMPS = 2048
 GRID = list(range(0, 120, 3))
 
 
 def backends() -> list[str]:
-    # The GPU backend only with a device for it (conftest's probe), so these
-    # cases skip, rather than fail, on a GPU build without a GPU.
     try:
-        from .conftest import _usable  # noqa: PLC0415
+        from .conftest import gpu_backends  # noqa: PLC0415
     except ImportError:
-        from conftest import _usable  # noqa: PLC0415
-    names = ["cpu"]
-    names += [b for b in ("cuda", "hip") if _usable(b)]
-    return names
+        from conftest import gpu_backends  # noqa: PLC0415
+    return ["cpu", *gpu_backends()]
 
 
 def best(candidates: np.ndarray) -> np.void:
@@ -261,21 +262,6 @@ def test_candidate_frontier(backend: str) -> None:
     assert search.get_candidate_frontier() == search.searched_nsamps
 
 
-def _sorted_fft_cands(parts: list[np.ndarray]) -> np.ndarray:
-    data = np.concatenate(parts)
-    fields = [
-        "beam_idx",
-        "subband_level",
-        "subband_idx",
-        "dm_idx",
-        "filter_idx",
-        "begin_sample",
-        "end_sample",
-        "peak_sample",
-    ]
-    return np.sort(data, order=fields)
-
-
 @pytest.mark.parametrize("backend", backends())
 @pytest.mark.parametrize("frac", [False, True])
 @pytest.mark.parametrize("trapezoid", [False, True])
@@ -318,7 +304,7 @@ def test_fft_boxcar_exact_screen_modes_parity(
         assert eng.config.screen_mode == screen
         parts = [eng.execute(b).candidates for b in blocks]
         parts.append(eng.drain().candidates)
-        results[screen] = _sorted_fft_cands(parts)
+        results[screen] = sorted_candidates(parts)
 
     ref = results[BoxcarScreenMode.PREFIX]
     assert len(ref) > 0
@@ -328,72 +314,6 @@ def test_fft_boxcar_exact_screen_modes_parity(
         for name in ref.dtype.names:
             np.testing.assert_array_equal(got[name], ref[name])
     assert "BoxcarScreenMode" in dmtlib.FDMTFFTBoxcar.__doc__
-
-
-@pytest.mark.parametrize("backend", backends())
-@pytest.mark.parametrize("trapezoid", [False, True])
-def test_fft_boxcar_kadane_surrogate_pulse_and_quiet_noise(
-    backend: str, trapezoid: bool
-) -> None:
-    rng = np.random.default_rng(53)
-    plan = FDMTPlan(1100, 1500, NCHANS, NSAMPS, 0.001, dt_grid=GRID)
-    kill = np.ones(NCHANS, dtype=np.uint8)
-    kill[4:8] = 0
-
-    # Quiet noise stream at 6.5 sigma yields zero candidates.
-    quiet_cfg = BoxcarConfig(
-        64,
-        wtsp=1.5,
-        detect_thresh=6.5,
-        use_trapezoid=trapezoid,
-        screen_mode=BoxcarScreenMode.KADANE_SURROGATE,
-    )
-    quiet = FDMTFFTBoxcar(plan, quiet_cfg, nthreads=1, kill_mask=kill, backend=backend)
-    quiet_parts = [
-        quiet.execute(
-            rng.standard_normal((NCHANS, NSAMPS), dtype=np.float32)
-        ).candidates
-        for _ in range(2)
-    ]
-    quiet_parts.append(quiet.drain().candidates)
-    assert len(np.concatenate(quiet_parts)) == 0
-
-    # Dispersed pulse arriving inside the final output_latency window, recovered
-    # via multi-block execute() + drain().
-    blocks = [rng.standard_normal((NCHANS, NSAMPS), dtype=np.float32) for _ in range(2)]
-    add_frb_track(blocks[1], plan, 25, 3.2, NSAMPS - 18, 6)
-
-    found = {}
-    for screen in (BoxcarScreenMode.PREFIX, BoxcarScreenMode.KADANE_SURROGATE):
-        cfg = BoxcarConfig(
-            64,
-            wtsp=1.5,
-            detect_thresh=7.5,
-            use_trapezoid=trapezoid,
-            screen_mode=screen,
-        )
-        eng = FDMTFFTBoxcar(plan, cfg, nthreads=1, kill_mask=kill, backend=backend)
-        frontier = eng.get_candidate_frontier()
-        parts = []
-        for blk in blocks:
-            res = eng.execute(blk)
-            assert np.all(res.candidates["begin_sample"] >= frontier)
-            frontier = eng.get_candidate_frontier()
-            parts.append(res.candidates)
-        last = eng.drain()
-        assert np.all(last.candidates["begin_sample"] >= frontier)
-        assert eng.get_candidate_frontier() == eng.searched_nsamps
-        found[screen] = np.concatenate([*parts, last.candidates])
-
-    ref_best = best(found[BoxcarScreenMode.PREFIX])
-    sur_best = best(found[BoxcarScreenMode.KADANE_SURROGATE])
-    assert abs(int(sur_best["dm_idx"]) - int(ref_best["dm_idx"])) <= 1
-    assert abs(int(sur_best["peak_sample"]) - int(ref_best["peak_sample"])) <= 6
-    assert (
-        0.90 * float(ref_best["snr"])
-        <= float(sur_best["snr"])
-        <= (1.15 * float(ref_best["snr"]))
-    )
 
 
 def _usage(u: dmtlib.FDMTBoxcarMemoryUsage) -> tuple:

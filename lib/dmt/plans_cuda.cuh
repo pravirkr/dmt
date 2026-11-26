@@ -1,7 +1,6 @@
 #pragma once
 
 #include <algorithm>
-#include <numeric>
 #include <vector>
 
 #include "dmt/common/plans.hpp"
@@ -11,22 +10,6 @@
 #include "dmt/gpu_utils.cuh"
 
 namespace dmt::plans {
-
-// Static helper functions
-template <typename T>
-std::vector<T> flatten(const std::vector<std::vector<T>>& vec_2d) {
-    std::vector<T> flattened;
-    for (const auto& vec : vec_2d) {
-        flattened.insert(flattened.end(), vec.begin(), vec.end());
-    }
-    return flattened;
-}
-
-template <typename T> std::vector<T> cumulative_sum(const std::vector<T>& vec) {
-    std::vector<T> result(vec.size() + 1, 0);
-    std::partial_sum(vec.begin(), vec.end(), result.begin() + 1);
-    return result;
-}
 
 struct FDMTShapeD {
     gpu_utils::PlannedVector<int> nchans;
@@ -83,6 +66,35 @@ struct FDMTCoordD {
     }
 };
 
+struct FDMTCoordCopyDPtrs {
+    const int* nsamps;
+    const int* buf_offset;
+    const int* tail_buf_offset;
+    const int* tail_nsamps;
+
+    __host__ __device__ void update_offsets(int offset_value) {
+        nsamps += offset_value;
+        buf_offset += offset_value;
+        tail_buf_offset += offset_value;
+        tail_nsamps += offset_value;
+    }
+};
+
+struct FDMTCoordCopyD {
+    gpu_utils::PlannedVector<int> nsamps;
+    gpu_utils::PlannedVector<int> buf_offset;
+    gpu_utils::PlannedVector<int> tail_buf_offset;
+    gpu_utils::PlannedVector<int> tail_nsamps;
+
+    __host__ FDMTCoordCopyDPtrs get_raw_ptrs() const {
+        return {.nsamps     = thrust::raw_pointer_cast(nsamps.data()),
+                .buf_offset = thrust::raw_pointer_cast(buf_offset.data()),
+                .tail_buf_offset =
+                    thrust::raw_pointer_cast(tail_buf_offset.data()),
+                .tail_nsamps = thrust::raw_pointer_cast(tail_nsamps.data())};
+    }
+};
+
 struct FDMTCoordGridD {
     gpu_utils::PlannedVector<int> dt_grid;
     gpu_utils::PlannedVector<int> ndt;
@@ -93,7 +105,7 @@ struct FDMTPlanContainerD {
     FDMTShapeD state_shape;
     FDMTCoordGridD grids0;
     FDMTCoordD coordinates_sum;
-    FDMTCoordD coordinates_copy;
+    FDMTCoordCopyD coordinates_copy;
 };
 
 namespace detail {
@@ -144,6 +156,36 @@ transfer_coords_impl(const std::vector<std::vector<FDMTCoord>>& host_coords,
     device_coords.head_nsamps     = head_nsamps;
     device_coords.hist_offset     = hist_offset;
 }
+
+__host__ inline void transfer_copy_coords_impl(
+    const std::vector<std::vector<FDMTCoord>>& host_coords,
+    FDMTCoordCopyD& device_coords) {
+    std::vector<int> nsamps, buf_offset, tail_buf_offset, tail_nsamps;
+
+    size_t total_size = 0;
+    for (const auto& host_coords_iter : host_coords) {
+        total_size += host_coords_iter.size();
+    }
+
+    nsamps.reserve(total_size);
+    buf_offset.reserve(total_size);
+    tail_buf_offset.reserve(total_size);
+    tail_nsamps.reserve(total_size);
+
+    for (const auto& host_coords_iter : host_coords) {
+        for (const auto& coord : host_coords_iter) {
+            nsamps.emplace_back(coord.nsamps);
+            buf_offset.emplace_back(coord.buf_offset);
+            tail_buf_offset.emplace_back(coord.tail_buf_offset);
+            tail_nsamps.emplace_back(coord.tail_nsamps);
+        }
+    }
+
+    device_coords.nsamps          = nsamps;
+    device_coords.buf_offset      = buf_offset;
+    device_coords.tail_buf_offset = tail_buf_offset;
+    device_coords.tail_nsamps     = tail_nsamps;
+}
 } // namespace detail
 
 __host__ inline void transfer_fdmt_plan_to_device(const FDMTPlanContainer& plan,
@@ -188,8 +230,8 @@ __host__ inline void transfer_fdmt_plan_to_device(const FDMTPlanContainer& plan,
 
     // Merge coordinates.
     detail::transfer_coords_impl(plan.coordinates_sum, plan_d.coordinates_sum);
-    detail::transfer_coords_impl(plan.coordinates_copy,
-                                 plan_d.coordinates_copy);
+    detail::transfer_copy_coords_impl(plan.coordinates_copy,
+                                      plan_d.coordinates_copy);
 }
 
 } // namespace dmt::plans

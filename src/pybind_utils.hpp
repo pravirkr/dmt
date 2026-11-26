@@ -57,9 +57,34 @@ as_listof_pyarray(const std::vector<std::vector<T>>& vec_of_vecs) {
     return result;
 }
 
+/// Strict zero-copy host array check: requires exact dtype T and C-contiguous
+/// layout, raising ValueError otherwise (never silently casts or copies).
+template <typename T>
+inline py::array_t<T, py::array::c_style>
+require_contiguous_array(const py::array& arr,
+                         std::string_view context,
+                         std::string_view dtype_name) {
+    if (!arr.dtype().is(py::dtype::of<T>())) {
+        throw py::value_error(fmt::format("{}: expected dtype {}, got {}",
+                                          context, dtype_name,
+                                          std::string(py::str(arr.dtype()))));
+    }
+    if ((arr.flags() & py::array::c_style) == 0) {
+        throw py::value_error(
+            fmt::format("{}: input array must be C-contiguous", context));
+    }
+    return py::array_t<T, py::array::c_style>::ensure(arr);
+}
+
 inline std::vector<IndexType> extract_dt_grid(const py::object& obj) {
     std::vector<IndexType> result;
     if (py::isinstance<py::array>(obj)) {
+        const auto raw  = py::reinterpret_borrow<py::array>(obj);
+        const char kind = raw.dtype().kind();
+        if (kind != 'i' && kind != 'u') {
+            throw py::value_error(
+                "dt_grid must have an integer dtype (got non-integer array)");
+        }
         auto arr =
             py::array_t<IndexType,
                         py::array::c_style | py::array::forcecast>::ensure(obj);
@@ -194,14 +219,13 @@ resolve_custom_grid(const py::object& dt_grid,
     return {CustomGridType::kDm, dm_obj};
 }
 
-// The engine's output buffer: the caller's `out` (validated, reused as is)
-// or a fresh array of nbeams * get_dmt_size() floats.
-template <typename Engine>
-py::array_t<float, py::array::c_style>
-fdmt_output_buffer(const Engine& fdmt,
-                   std::string_view name,
-                   const std::optional<py::array>& out) {
-    const auto needed = fdmt.get_nbeams() * fdmt.get_plan().get_dmt_size();
+// An engine's float32 output buffer: the caller's `out` (validated, reused as
+// is) or a fresh array of `needed` floats.
+inline py::array_t<float, py::array::c_style>
+float_output_buffer(SizeType needed,
+                    std::string_view name,
+                    std::string_view size_expr,
+                    const std::optional<py::array>& out) {
     if (!out.has_value()) {
         return py::array_t<float, py::array::c_style>(
             static_cast<py::ssize_t>(needed));
@@ -213,13 +237,24 @@ fdmt_output_buffer(const Engine& fdmt,
                                          "C-contiguous float32 array",
                                          name));
     }
-    if (static_cast<SizeType>(arr.size()) < needed) {
+    if (std::cmp_less(arr.size(), needed)) {
         throw std::invalid_argument(fmt::format(
-            "{}.execute: out has {} elements, needs at least nbeams * "
-            "plan.dmt_size = {}",
-            name, arr.size(), needed));
+            "{}.execute: out has {} elements, needs at least {} = {}", name,
+            arr.size(), size_expr, needed));
     }
     return py::reinterpret_borrow<py::array_t<float, py::array::c_style>>(arr);
+}
+
+// The engine's output buffer: the caller's `out` (validated, reused as is)
+// or a fresh array of nbeams * get_dmt_size() floats.
+template <typename Engine>
+py::array_t<float, py::array::c_style>
+fdmt_output_buffer(const Engine& fdmt,
+                   std::string_view name,
+                   const std::optional<py::array>& out) {
+    return float_output_buffer(fdmt.get_nbeams() *
+                                   fdmt.get_plan().get_dmt_size(),
+                               name, "nbeams * plan.dmt_size", out);
 }
 
 // FDMT execute(): runs `run(dmt_span)` into the output buffer
@@ -247,7 +282,11 @@ py::object fdmt_execute_to_array(const Engine& fdmt,
                         name, expected_size, input_size));
     }
     auto buf = fdmt_output_buffer(fdmt, name, out);
-    run(std::span<float>(buf.mutable_data(), buf.size()));
+    const std::span<float> dmt_span(buf.mutable_data(), buf.size());
+    {
+        const py::gil_scoped_release release;
+        run(dmt_span);
+    }
     if (!batched) {
         return py::array_t<float>({ncoords, nsamps}, {nsamps * fsize, fsize},
                                   buf.data(), buf);
@@ -264,14 +303,21 @@ inline Exec make_exec(std::string_view backend, int nthreads, int device) {
     return {.backend = b, .nthreads = nthreads, .device = device};
 }
 
-// The stepper's dmt buffer: the caller's, or a new nbeams * dmt_size one.
-// Kept alive as the engine's `_dmt_buffer` attribute by the caller.
+// The stepper's dmt buffer: the caller's (validated in place), or a new
+// nbeams * dmt_size one. Kept alive as the engine's `_dmt_buffer` attribute.
 template <typename Engine>
-py::array_t<float, py::array::c_style> stepper_dmt_buffer(
-    const Engine& engine,
-    const std::optional<py::array_t<float, py::array::c_style>>& dmt_opt) {
+py::array_t<float, py::array::c_style>
+stepper_dmt_buffer(const Engine& engine,
+                   std::string_view context,
+                   const std::optional<py::array>& dmt_opt) {
     if (dmt_opt.has_value()) {
-        return *dmt_opt;
+        auto arr =
+            require_contiguous_array<float>(*dmt_opt, context, "float32");
+        if (!arr.writeable()) {
+            throw py::value_error(
+                fmt::format("{}: dmt buffer must be writeable", context));
+        }
+        return arr;
     }
     return py::array_t<float, py::array::c_style>(static_cast<py::ssize_t>(
         engine.get_nbeams() * engine.get_plan().get_dmt_size()));

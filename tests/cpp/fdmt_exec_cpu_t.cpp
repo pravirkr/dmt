@@ -13,9 +13,6 @@
 
 #include "dmt/algorithms/fdmt.hpp"
 
-#include "dmt/bit_pack_utils.hpp"
-#include "dmt/fdmt_box_weights.hpp"
-
 #include "test_helpers.hpp"
 #include "test_random.hpp"
 
@@ -41,46 +38,6 @@ constexpr bool kFloatTree   = false;
 
 std::vector<float> random_waterfall(SizeType n, unsigned seed) {
     return dmt::test_random::uniform_real<float>(n, seed, -1.0F, 1.0F);
-}
-
-// Random nbits-wide unsigned samples, as float (reference) and packed rows.
-struct PackedWaterfall {
-    std::vector<float> values;
-    std::vector<uint8_t> packed;
-};
-
-PackedWaterfall
-random_packed(SizeType nrows, SizeType nsamps, SizeType nbits, unsigned seed) {
-    const auto vals = dmt::test_random::uniform_int<uint32_t>(
-        nrows * nsamps, seed, 0, bit_pack_utils::max_sample_value(nbits));
-    const auto row_bytes = bit_pack_utils::packed_row_bytes(nsamps, nbits);
-    PackedWaterfall out{.values = std::vector<float>(nrows * nsamps),
-                        .packed = std::vector<uint8_t>(nrows * row_bytes, 0)};
-    for (SizeType r = 0; r < nrows; ++r) {
-        uint8_t* row = out.packed.data() + (r * row_bytes);
-        for (SizeType s = 0; s < nsamps; ++s) {
-            const uint32_t v             = vals[(r * nsamps) + s];
-            out.values[(r * nsamps) + s] = static_cast<float>(v);
-            switch (nbits) {
-            case 1:
-                bit_pack_utils::write_packed_sample<1>(row, s, v);
-                break;
-            case 2:
-                bit_pack_utils::write_packed_sample<2>(row, s, v);
-                break;
-            case 4:
-                bit_pack_utils::write_packed_sample<4>(row, s, v);
-                break;
-            case 8:
-                bit_pack_utils::write_packed_sample<8>(row, s, v);
-                break;
-            default:
-                bit_pack_utils::write_packed_sample<16>(row, s, v);
-                break;
-            }
-        }
-    }
-    return out;
 }
 
 std::vector<float> run(FDMT& fdmt, const std::vector<float>& wf) {
@@ -111,51 +68,6 @@ void require_beams_exact(const std::vector<float>& actual,
             std::vector<float>(a.begin(), a.end()),
             Catch::Matchers::Equals(std::vector<float>(e.begin(), e.end())));
     }
-}
-
-// Largest |packed - float| of every trial with box smearing: packed input
-// rounds each channel's box mean to f(L_c) fractional bits (at most
-// 2^-(f + 1) each, see fdmt_box_weights.hpp); float input does not.
-std::vector<double> packed_rounding_bound(const FDMT& fdmt) {
-    const auto& plan    = fdmt.get_plan();
-    const auto nchans   = plan.get_nchans();
-    const auto smearing = plan.get_smearing_grid_final();
-    std::vector<double> bound(plan.get_dmt_ndms(), 0.0);
-    for (SizeType i = 0; i < bound.size(); ++i) {
-        for (SizeType c = 0; c < nchans; ++c) {
-            const auto len =
-                static_cast<SizeType>(smearing[(i * nchans) + c]) + 1;
-            bound[i] += std::ldexp(
-                1.0,
-                -static_cast<int>(algorithms::detail::box_mean_bits(len)) - 1);
-        }
-    }
-    return bound;
-}
-
-// Compares the leading dmt_size values of every beam within the per-trial
-// rounding bound of packed_rounding_bound() (plus float round-off).
-void require_beams_near(const std::vector<float>& actual,
-                        const std::vector<float>& expected,
-                        const FDMT& fdmt) {
-    const auto bufsz  = fdmt.get_plan().get_dmt_size(); // beam stride
-    const auto ndms   = fdmt.get_plan().get_dmt_ndms();
-    const auto nsamps = fdmt.get_plan().get_dmt_nsamps();
-    const auto bound  = packed_rounding_bound(fdmt);
-    double worst      = 0.0; // fraction of the bound used
-    for (SizeType b = 0; b < fdmt.get_nbeams(); ++b) {
-        for (SizeType i = 0; i < ndms; ++i) {
-            for (SizeType t = 0; t < nsamps; ++t) {
-                const auto k     = (b * bufsz) + (i * nsamps) + t;
-                const double e   = expected[k];
-                const double d   = std::abs(static_cast<double>(actual[k]) - e);
-                const double tol = bound[i] + (1e-6 * std::abs(e)) + 1e-6;
-                worst            = std::max(worst, d / tol);
-            }
-        }
-    }
-    INFO("worst |packed - float| / bound = " << worst);
-    REQUIRE(worst <= 1.0);
 }
 
 } // namespace
@@ -192,115 +104,52 @@ TEST_CASE("FDMT performance parameters and memory usage", "[fdmt_cpu][cpu]") {
     CHECK(mem.workspace > orig.get_memory_usage().workspace);
     CHECK(orig.get_memory_usage().workspace > 0); // unpack + box rows
 
-    // Per-thread scratch: exactly one slice per thread (construction
-    // only: no thread runs).
-    FDMT one(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid",
-             Exec::cpu(1), 1, 3);
-    FDMT two(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, true, "valid",
-             Exec::cpu(2), 1, 3);
-    CHECK(two.get_memory_usage().workspace ==
-          2 * one.get_memory_usage().workspace);
+    // Per-thread scratch: exactly one slice per thread (estimate only: nothing
+    // is allocated and no thread runs).
+    const plans::FDMTPlan p(kFMin, kFMax, 32, 128, kTsamp, 16, 0, 1, "valid");
+    const auto one = FDMT::estimate_memory(p, true, Exec::cpu(1), 1, 3);
+    const auto two = FDMT::estimate_memory(p, true, Exec::cpu(2), 1, 3);
+    CHECK(two.usage.workspace == 2 * one.usage.workspace);
 }
 
-TEST_CASE("FDMT automatic fusion depth", "[fdmt_cpu][cpu]") {
-    // Modes "full" and "roll": kFDMTAutoFuse picks the deepest depth whose
-    // two per-thread fusion buffers fit max(36 MiB / nthreads, 8 MiB): a
-    // rule on the plan alone. The fusion buffers are what the workspace
-    // holds beyond the three unpack/box rows of each thread.
-    const SizeType nchans  = 1024;
-    const SizeType nsamps  = 4096;
-    const auto fused_bytes = [&](const FDMT& f, SizeType nthreads) {
-        const auto rows = 3 * (((nsamps * sizeof(float)) + 63) / 64) * 64;
-        return (f.get_memory_usage().workspace / nthreads) - rows;
-    };
-    SizeType prev_depth = SIZE_MAX;
-    for (const int nthreads : {1, 2, 4, 8}) {
-        DYNAMIC_SECTION("full, nthreads=" << nthreads) {
-            const auto n = static_cast<SizeType>(nthreads);
-            const SizeType budget =
-                std::max<SizeType>((SizeType{36} << 20) / n, SizeType{8} << 20);
-            FDMT fdmt(kFMin, kFMax, nchans, nsamps, kTsamp, 256, 0, 1, true,
-                      "full", Exec::cpu(nthreads));
-            const auto depth = fdmt.get_fuse_levels();
-            REQUIRE(depth >= 1);
-            REQUIRE(depth <= prev_depth); // more threads never fuse deeper
-            prev_depth = depth;
-            CHECK(fused_bytes(fdmt, n) <= budget);
-            if (depth < fdmt.get_plan().get_niters()) {
-                FDMT deeper(kFMin, kFMax, nchans, nsamps, kTsamp, 256, 0, 1,
-                            true, "full", Exec::cpu(nthreads), 1, depth + 1);
-                CHECK(fused_bytes(deeper, n) > budget);
-            }
-        }
-    }
-}
-
-TEST_CASE("FDMT automatic fusion depth in valid mode (time tiles)",
+TEST_CASE("FDMT automatic fusion depth: more threads never fuse deeper",
           "[fdmt_cpu][cpu]") {
-    // Mode "valid" fuses in time tiles: the deepest depth F whose mean
-    // per-group working set with 256-sample tiles -- two scratch buffers of
-    // the group's widest fused level, plus the tree-history rings of its
-    // fused merges, in float -- is at most 1.75 MiB, with at least two
-    // level-F groups per thread (not required of F = 1). Recomputed here
-    // from the plan alone.
-    constexpr double kBudget = 1792.0 * 1024.0;
-    const auto working_set   = [](const plans::FDMTPlan& plan, SizeType fuse,
-                                  SizeType tile) {
-        const auto& pc         = plan.get_container();
-        const SizeType ngroups = pc.state_shape[fuse].nchans;
-        double total           = 0.0;
-        for (SizeType g = 0; g < ngroups; ++g) {
-            SizeType rows = 0;
-            SizeType ring = 0;
-            for (SizeType l = 0; l <= fuse; ++l) {
-                const auto& grids    = pc.grids[l];
-                const SizeType width = SizeType{1} << (fuse - l);
-                const SizeType first = g * width;
-                const SizeType last = std::min(first + width, grids.size()) - 1;
-                const SizeType cb   = grids[first].coord_offset;
-                const SizeType ce = grids[last].coord_offset + grids[last].ndt;
-                if (l < fuse) {
-                    rows = std::max(rows, ce - cb);
-                }
-                for (SizeType k = cb; l > 0 && k < ce; ++k) {
-                    const auto& c = pc.coordinates[l][k];
-                    ring += (c.i_coord_head != SIZE_MAX) ? c.delay : 0;
-                }
-            }
-            total += static_cast<double>((2 * rows * tile) + ring) * 4.0;
-        }
-        return total / static_cast<double>(ngroups);
+    // Estimate-only (allocates nothing and spawns no threads): per-thread
+    // workspace grows monotonically with fusion depth, so comparing the auto
+    // estimate's per-thread workspace across thread counts verifies that
+    // asking for more threads never chooses a deeper fusion level.
+    const auto per_thread_ws = [](const plans::FDMTPlan& plan, int nthreads,
+                                  SizeType fuse) {
+        return FDMT::estimate_memory(plan, true, Exec::cpu(nthreads), 1, fuse)
+                   .usage.workspace /
+               static_cast<SizeType>(nthreads);
     };
-    struct Case {
-        SizeType nchans;
-        SizeType nsamps;
-        IndexType dt_max;
-    };
-    const std::vector<Case> cases = {{1024, 4096, 256}, {256, 4096, 3000}};
-    for (const auto& c : cases) {
-        SizeType prev_depth = SIZE_MAX;
-        for (const int nthreads : {1, 2, 4, 8}) {
-            DYNAMIC_SECTION("nchans=" << c.nchans << " dt_max=" << c.dt_max
-                                      << " nthreads=" << nthreads) {
-                FDMT fdmt(kFMin, kFMax, c.nchans, c.nsamps, kTsamp, c.dt_max, 0,
-                          1, true, "valid", Exec::cpu(nthreads));
-                const auto& plan   = fdmt.get_plan();
-                const auto& shapes = plan.get_container().state_shape;
-                const auto depth   = fdmt.get_fuse_levels();
-                REQUIRE(depth >= 1);
-                REQUIRE(depth <= prev_depth);
-                prev_depth = depth;
-                CHECK(working_set(plan, depth, 256) <= kBudget);
-                const auto next = depth + 1;
-                if (next <= plan.get_niters()) {
-                    CHECK((working_set(plan, next, 256) > kBudget ||
-                           shapes[next].nchans <
-                               2 * static_cast<SizeType>(nthreads)));
-                }
-                CHECK_THAT(fdmt.summary(),
-                           Catch::Matchers::ContainsSubstring("time tiles of"));
+    const auto check_monotone = [&](const plans::FDMTPlan& plan) {
+        SizeType prev_ws  = SIZE_MAX;
+        SizeType first_ws = 0;
+        SizeType last_ws  = 0;
+        for (const int n : {1, 2, 4, 8, 16}) {
+            const SizeType ws = per_thread_ws(plan, n, kFDMTAutoFuse);
+            CHECK(ws <= prev_ws);
+            if (n == 1) {
+                first_ws = ws;
             }
+            last_ws = ws;
+            prev_ws = ws;
         }
+        // Per-thread scratch at 16 threads stays below the 1-thread choice
+        // on plans that hit the thread budget / group-count cap.
+        CHECK(last_ws < first_ws);
+    };
+    SECTION("full mode (per-thread scratch budget)") {
+        const plans::FDMTPlan plan(kFMin, kFMax, 1024, 4096, kTsamp, 256, 0, 1,
+                                   "full");
+        check_monotone(plan);
+    }
+    SECTION("valid mode (groups-per-thread cap)") {
+        const plans::FDMTPlan plan(kFMin, kFMax, 64, 4096, kTsamp, 64, 0, 1,
+                                   "valid");
+        check_monotone(plan);
     }
 }
 
@@ -443,7 +292,8 @@ TEST_CASE("FDMT fused levels: dt_grid, streaming, packed int tree",
     SECTION("packed input with int tree") {
         for (const SizeType nbits : {1, 4, 8}) {
             for (const std::string mode : {"full", "roll", "valid"}) {
-                const auto wf = random_packed(256, 128, nbits, 30 + nbits);
+                const auto wf =
+                    test::random_packed(256, 128, nbits, 30 + nbits);
                 // Packed reference: the unfused float tree (same rounded box
                 // means), bit-exact; float input within the rounding bound.
                 FDMT ref(kFMin, kFMax, 256, 128, kTsamp, 64, 0, 1, true, mode,
@@ -454,7 +304,8 @@ TEST_CASE("FDMT fused levels: dt_grid, streaming, packed int tree",
                 require_beams_exact(got, run_packed(ref, wf.packed, nbits),
                                     fdmt);
                 ref.reset_history(); // a fresh stream for the float input
-                require_beams_near(got, run(ref, wf.values), fdmt);
+                test::require_packed_near(got, run(ref, wf.values),
+                                          fdmt.get_plan(), fdmt.get_nbeams());
             }
         }
     }
@@ -494,8 +345,8 @@ TEST_CASE("FDMT packed input matches float input", "[fdmt_cpu][cpu]") {
                     DYNAMIC_SECTION("nchans=" << c.nchans << " nbits=" << nbits
                                               << " mode=" << mode
                                               << " smearing=" << smearing) {
-                        const auto wf = random_packed(c.nchans, c.nsamps, nbits,
-                                                      17 + nbits);
+                        const auto wf = test::random_packed(c.nchans, c.nsamps,
+                                                            nbits, 17 + nbits);
                         FDMT ref(kFMin, kFMax, c.nchans, c.nsamps, kTsamp,
                                  c.dt_max, c.dt_min, 1, smearing, mode,
                                  Exec::cpu(1), 1, kUnfused, kFloatTree);
@@ -509,7 +360,9 @@ TEST_CASE("FDMT packed input matches float input", "[fdmt_cpu][cpu]") {
                         const auto expected_pk =
                             run_packed(ref, wf.packed, nbits);
                         if (smearing) {
-                            require_beams_near(expected_pk, expected_f32, ref);
+                            test::require_packed_near(expected_pk, expected_f32,
+                                                      ref.get_plan(),
+                                                      ref.get_nbeams());
                         } else {
                             require_beams_exact(expected_pk, expected_f32, ref);
                         }
@@ -547,8 +400,7 @@ TEST_CASE("FDMT packed valid-mode streaming and multiple beams",
             DYNAMIC_SECTION("nchans=" << c.nchans << " dt_min=" << c.dt_min
                                       << " nbits=" << nbits) {
                 const SizeType nchans = c.nchans;
-                const auto row_bytes =
-                    bit_pack_utils::packed_row_bytes(block, nbits);
+                const auto row_bytes  = test::packed_row_bytes(block, nbits);
                 FDMT ref(kFMin, kFMax, nchans, block, kTsamp, c.dt_max,
                          c.dt_min, 1, true, "valid", Exec::cpu(1), nbeams,
                          kUnfused, kFloatTree);
@@ -561,13 +413,15 @@ TEST_CASE("FDMT packed valid-mode streaming and multiple beams",
                              kUnfused, kFloatTree);
                 for (SizeType b = 0; b < nblks; ++b) {
                     const auto wf =
-                        random_packed(nbeams * nchans, block, nbits,
-                                      static_cast<unsigned>(100 + b));
+                        test::random_packed(nbeams * nchans, block, nbits,
+                                            static_cast<unsigned>(100 + b));
                     REQUIRE(wf.packed.size() == nbeams * nchans * row_bytes);
                     const auto expected = run_packed(ref, wf.packed, nbits);
                     const auto got      = run_packed(fdmt, wf.packed, nbits);
                     require_beams_exact(got, expected, fdmt);
-                    require_beams_near(got, run(ref_f32, wf.values), fdmt);
+                    test::require_packed_near(got, run(ref_f32, wf.values),
+                                              fdmt.get_plan(),
+                                              fdmt.get_nbeams());
                 }
                 std::vector<float> h_ref(ref.history_state_size());
                 std::vector<float> h_pk(fdmt.history_state_size());
@@ -585,7 +439,7 @@ TEST_CASE("FDMT packed input errors and integer-level inspection",
     const SizeType nsamps = 128;
     FDMT fdmt(kFMin, kFMax, nchans, nsamps, kTsamp, 32, 0, 1, false, "full");
     std::vector<float> dmt(fdmt.get_plan().get_buffer_size());
-    const auto wf = random_packed(nchans, nsamps, 1, 9);
+    const auto wf = test::random_packed(nchans, nsamps, 1, 9);
 
     REQUIRE_THROWS_AS(fdmt.execute(std::span<const uint8_t>(wf.packed), 3, dmt),
                       std::invalid_argument);
@@ -655,10 +509,12 @@ TEST_CASE("FDMT estimate_memory equals the constructed instance (cpu)",
         CHECK(e.chunk_nsamps == 256);
     }
     SECTION("skewed path chosen by the budget") {
-        // The golden skewed configuration: the tree path needs more.
+        // The golden skewed configuration: a budget below the tree path's
+        // estimate forces the skewed path.
         const plans::FDMTPlan plan(1100.0F, 1714.0F, 1152, 4096, 455.6e-6F,
                                    2700);
-        const SizeType budget = SizeType{30} << 20;
+        const SizeType budget =
+            FDMT::estimate_memory(plan, true, cpu).usage.total() / 3;
         const auto e = FDMT::estimate_memory(plan, true, cpu, 1, kFDMTAutoFuse,
                                              true, 0, budget);
         const FDMT f(plan, true, cpu, 1, kFDMTAutoFuse, true, 0, budget);

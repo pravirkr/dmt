@@ -22,19 +22,6 @@ namespace dmt::utils {
 float cff(float f_start, float f_end, float f_min, float f_max);
 
 /**
- * @brief Calculate the subband delay (in bins) for a given frequency range.
- *
- * @param f_start Start frequency (MHz).
- * @param f_end End frequency (MHz).
- * @param f_min Minimum frequency (MHz).
- * @param f_max Maximum frequency (MHz).
- * @param dt Delay time (in bins).
- * @return The subband delay (in bins) for the given frequency range.
- */
-SizeType calculate_dt_sub(
-    float f_start, float f_end, float f_min, float f_max, SizeType dt);
-
-/**
  * @brief Compute the DM conversion factor (in bins/DM unit).
  *
  * @param f_min Minimum frequency (MHz).
@@ -148,12 +135,10 @@ std::vector<float> generate_fractional_delay_table(
  * @param f_max Highest frequency (MHz).
  * @param nchans Number of frequency channels.
  * @param tol Smearing tolerance factor (must be > 1.0, typically 1.15 to 1.25).
- * @return Monotonically increasing vector of DM trials starting at dm_start.
- * Normally ends at a value >= dm_end; if the step size collapses to zero
- * before reaching dm_end (an extreme tolerance/pulse_width/tsamp
- * combination with no valid further step), the grid stops short and a
- * warning is logged -- callers that need a hard guarantee should check
- * `grid.back() >= dm_end` themselves.
+ * @return Monotonically increasing vector of DM trials starting at dm_start
+ * and ending at a value >= dm_end.
+ * @throws std::runtime_error if numerical collapse or a zero step size is
+ * encountered before reaching dm_end.
  */
 std::vector<float> generate_levin_dm_grid(float dm_start,
                                           float dm_end,
@@ -198,6 +183,22 @@ std::vector<float> generate_levin_dm_grid_piecewise(float dm_start,
     const volatile std::uint32_t bits = std::bit_cast<std::uint32_t>(v);
     constexpr std::uint32_t kExp      = 0x7F800000U;
     return (bits & kExp) != kExp;
+}
+
+/**
+ * @brief True if @p n > 0 has only prime factors 2, 3, 5 and 7 (7-smooth).
+ */
+[[nodiscard]] constexpr bool is_smooth7(SizeType n) noexcept {
+    if (n == 0) {
+        return false;
+    }
+    for (const SizeType p :
+         {SizeType{2}, SizeType{3}, SizeType{5}, SizeType{7}}) {
+        while (n % p == 0) {
+            n /= p;
+        }
+    }
+    return n == 1;
 }
 
 /**

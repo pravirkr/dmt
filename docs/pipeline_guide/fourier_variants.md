@@ -23,8 +23,8 @@ delays and `plan.time_offset` (see [periodicity](periodicity.md)).
 ```python
 fdmt = dmtlib.FDMTFFT(1200.0, 1600.0, 1024, 16384, 6.4e-5, 1024,
                       kill_mask=mask, backend="cuda")
-dmt = fdmt.execute(packed_rows, 2)              # (nchans, row_bytes) uint8
-dmt = fdmt.execute_time_major(filterbank, 2)    # (nsamps, sample_bytes) uint8
+dmt = fdmt.execute(packed_rows, nbits=2)              # (nchans, row_bytes) uint8
+dmt = fdmt.execute_time_major(filterbank, nbits=2)    # (nsamps, sample_bytes) uint8
 state = fdmt.save_history()                     # same layout on every backend
 ```
 

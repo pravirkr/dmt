@@ -40,70 +40,58 @@ __global__ void kernel_tree_ring_to_fifo(const float* __restrict__ ring,
 
 } // namespace
 
-void FDMTCudaEngine::reset_search_history(Stream queue) {
-    gpu_utils::set_device(m_device_id);
-    const auto stream = to_cuda(queue);
-    for (auto* v : {&m_history_a_d, &m_history_b_d, &m_tree_fifo_d[0],
-                    &m_tree_fifo_d[1], &m_tree_ring_d}) {
-        if (!v->empty()) {
-            gpu_utils::check_gpu_call(
-                cudaMemsetAsync(thrust::raw_pointer_cast(v->data()), 0,
-                                v->size() * sizeof(float), stream));
-        }
+void FDMTCudaEngine::zero_history(cudaStream_t stream, bool throw_on_error) {
+    if (throw_on_error) {
+        gpu_utils::set_device(m_device_id);
+    } else {
+        (void)cudaSetDevice(m_device_id);
     }
-    if (m_integer_ring.size() > 0) {
-        gpu_utils::check_gpu_call(
-            cudaMemsetAsync(thrust::raw_pointer_cast(m_integer_ring.data()), 0,
-                            m_integer_ring.size() * sizeof(uint64_t), stream));
-    }
-    if (m_integer32_ring.size() > 0) {
-        gpu_utils::check_gpu_call(cudaMemsetAsync(
-            thrust::raw_pointer_cast(m_integer32_ring.data()), 0,
-            m_integer32_ring.size() * sizeof(uint32_t), stream));
-    }
-    if (m_direct) {
-        for (auto& w : m_direct->win) {
-            if (!w.empty()) {
-                gpu_utils::check_gpu_call(
-                    cudaMemsetAsync(thrust::raw_pointer_cast(w.data()), 0,
-                                    w.size() * sizeof(float), stream));
+    const auto zero_vec = [&](auto& v) {
+        using ElemT = typename std::remove_reference_t<decltype(v)>::value_type;
+        if (!v.empty()) {
+            const cudaError_t err =
+                cudaMemsetAsync(thrust::raw_pointer_cast(v.data()), 0,
+                                v.size() * sizeof(ElemT), stream);
+            if (throw_on_error) {
+                gpu_utils::check_gpu_call(err);
             }
         }
-        if (!m_direct->win_ring.empty()) {
-            gpu_utils::check_gpu_call(cudaMemsetAsync(
-                thrust::raw_pointer_cast(m_direct->win_ring.data()), 0,
-                m_direct->win_ring.size() * sizeof(float), stream));
+    };
+    for (auto* v : {&m_history_a_d, &m_history_b_d, &m_tree_fifo_d[0],
+                    &m_tree_fifo_d[1], &m_tree_ring_d}) {
+        zero_vec(*v);
+    }
+    zero_vec(m_integer_ring);
+    zero_vec(m_integer32_ring);
+    if (m_direct) {
+        for (auto& w : m_direct->win) {
+            zero_vec(w);
         }
-        if (!m_direct->win_ring_u8.empty()) {
-            gpu_utils::check_gpu_call(cudaMemsetAsync(
-                thrust::raw_pointer_cast(m_direct->win_ring_u8.data()), 0,
-                m_direct->win_ring_u8.size() * sizeof(uint8_t), stream));
-        }
-        if (!m_direct->win_ring_u16.empty()) {
-            gpu_utils::check_gpu_call(cudaMemsetAsync(
-                thrust::raw_pointer_cast(m_direct->win_ring_u16.data()), 0,
-                m_direct->win_ring_u16.size() * sizeof(uint16_t), stream));
-        }
+        zero_vec(m_direct->win_ring);
+        zero_vec(m_direct->win_ring_u8);
+        zero_vec(m_direct->win_ring_u16);
+        // An all-zero window is consistent with all-zero tree histories.
         m_direct_filled = static_cast<SizeType>(m_direct->window);
     }
     m_direct_stale = false;
-    if (m_top && !m_top->ring.empty()) {
-        gpu_utils::check_gpu_call(
-            cudaMemsetAsync(thrust::raw_pointer_cast(m_top->ring.data()), 0,
-                            m_top->ring.size() * sizeof(float), stream));
+    if (m_top) {
+        zero_vec(m_top->ring);
+        // The windowed top's carried spreads start the next chunk's merges.
+        zero_vec(m_top->win_top);
         m_top_filled = static_cast<SizeType>(m_top->max_ring);
     }
-    if (m_top && !m_top->win_top.empty()) {
-        // The windowed top's carried spreads start the next chunk's merges.
-        gpu_utils::check_gpu_call(
-            cudaMemsetAsync(thrust::raw_pointer_cast(m_top->win_top.data()), 0,
-                            m_top->win_top.size() * sizeof(float), stream));
-    }
-    m_top_stale      = false;
-    m_parity         = false;
+    m_top_stale = false;
+    m_parity    = false;
+    // Abandons any unfinished stepper block along with its stream.
     m_is_initialized = false;
     m_chunk_pos      = 0;
     m_next_pos       = 0;
+    m_hist_pos_base  = 0;
+}
+
+void FDMTCudaEngine::reset_search_history(Stream queue) {
+    const auto stream = to_cuda(queue);
+    zero_history(stream, true);
     m_device_work.mark(stream);
 }
 
@@ -250,49 +238,18 @@ void FDMTCudaEngine::finalize(Stream stream_in) {
     m_is_initialized   = false;
 }
 
+// Synchronous, as before zero_history() was shared: device work of earlier
+// calls (on any stream) ends before the zeroing, and the zeroing (on the
+// default stream) ends before this returns, so a following call on a
+// non-blocking stream reads zeros. noexcept: an error stays sticky in the
+// context and surfaces at the next call.
 void FDMTCudaEngine::reset_history() noexcept {
-    m_chunk_pos     = 0;
-    m_next_pos      = 0;
-    m_hist_pos_base = 0;
-    gpu_utils::set_device(m_device_id);
-    for (auto* v : {&m_history_a_d, &m_history_b_d, &m_tree_fifo_d[0],
-                    &m_tree_fifo_d[1], &m_tree_ring_d}) {
-        if (!v->empty()) {
-            v->assign(v->size(), 0.0F);
-        }
+    try {
+        m_device_work.wait();
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
-    if (!m_integer_ring.empty()) {
-        m_integer_ring.assign(m_integer_ring.size(), 0);
-    }
-    if (!m_integer32_ring.empty()) {
-        m_integer32_ring.assign(m_integer32_ring.size(), 0);
-    }
-    if (m_direct) {
-        for (auto& w : m_direct->win) {
-            w.assign(w.size(), 0.0F);
-        }
-        if (!m_direct->win_ring.empty()) {
-            m_direct->win_ring.assign(m_direct->win_ring.size(), 0.0F);
-        }
-        if (!m_direct->win_ring_u8.empty()) {
-            m_direct->win_ring_u8.assign(m_direct->win_ring_u8.size(), 0);
-        }
-        if (!m_direct->win_ring_u16.empty()) {
-            m_direct->win_ring_u16.assign(m_direct->win_ring_u16.size(), 0);
-        }
-        // An all-zero window is consistent with all-zero tree histories.
-        m_direct_filled = static_cast<SizeType>(m_direct->window);
-    }
-    m_direct_stale = false;
-    if (m_top) {
-        m_top->ring.assign(m_top->ring.size(), 0.0F);
-        m_top->win_top.assign(m_top->win_top.size(), 0.0F);
-        m_top_filled = static_cast<SizeType>(m_top->max_ring);
-    }
-    m_top_stale = false;
-    m_parity    = false;
-    // Abandons any unfinished stepper block along with its stream.
-    m_is_initialized = false;
+    zero_history(nullptr, false);
+    (void)cudaStreamSynchronize(nullptr);
 }
 
 SizeType FDMTCudaEngine::history_state_size() const noexcept {
@@ -347,31 +304,157 @@ void FDMTCudaEngine::save_history(std::span<float> out) const {
                         "got {}",
                         history_state_size(), out.size()));
     }
+    if (out.empty()) {
+        return;
+    }
     gpu_utils::set_device(m_device_id);
     m_device_work.wait();
-    thrust::device_vector<float> staged(out.size());
-    save_history_d(thrust::raw_pointer_cast(staged.data()), nullptr);
-    gpu_utils::check_gpu_call(
-        cudaMemcpy(out.data(), thrust::raw_pointer_cast(staged.data()),
-                   out.size_bytes(), cudaMemcpyDeviceToHost),
-        "FDMT::save_history");
+    if (skew_history()) {
+        std::array<float, kSkewHistHeader> hdr{};
+        detail::put16(hdr, 0, kSkewHistMagic, 1);
+        detail::put16(hdr, 1, kSkewHistVersion, 1);
+        detail::put16(hdr, 2, skew_layout_hash(), 4);
+        detail::put16(hdr, 6, m_next_pos, 4);
+        std::ranges::copy(hdr, out.begin());
+        SizeType off = kSkewHistHeader;
+        for (const auto& b : skew_hist_buffers()) {
+            gpu_utils::check_gpu_call(cudaMemcpy(out.data() + off, b.data,
+                                                 b.size * sizeof(float),
+                                                 cudaMemcpyDeviceToHost),
+                                      "FDMT::save_history");
+            off += b.size;
+        }
+        return;
+    }
+    detail::write_fdmt_tree_history_header(out, m_hist_hash,
+                                           m_hist_pos_base + m_next_pos);
+    rebuild_direct_history(nullptr);
+    rebuild_top_history(nullptr);
+    float* dst         = out.data() + detail::kFDMTHistHeader;
+    const auto& level0 = next_level0_history();
+    if (!level0.empty()) {
+        gpu_utils::check_gpu_call(
+            cudaMemcpy(dst, thrust::raw_pointer_cast(level0.data()),
+                       level0.size() * sizeof(float), cudaMemcpyDeviceToHost),
+            "FDMT::save_history");
+    }
+    float* tree      = dst + level0.size();
+    const auto total = m_plan.get_tree_history_size();
+    if (m_fifo_size > 0) {
+        gpu_utils::check_gpu_call(
+            cudaMemcpy2D(tree, total * sizeof(float),
+                         thrust::raw_pointer_cast(next_tree_fifo().data()),
+                         m_fifo_size * sizeof(float),
+                         m_fifo_size * sizeof(float), m_nbeams,
+                         cudaMemcpyDeviceToHost),
+            "FDMT::save_history");
+    }
+    if (m_ring_size > 0) {
+        gpu_utils::check_gpu_call(
+            cudaMemcpy2D(tree + m_fifo_size, total * sizeof(float),
+                         thrust::raw_pointer_cast(m_tree_ring_d.data()),
+                         m_ring_size * sizeof(float),
+                         m_ring_size * sizeof(float), m_nbeams,
+                         cudaMemcpyDeviceToHost),
+            "FDMT::save_history");
+        const auto& pc = m_plan.get_container();
+        for (SizeType beam = 0; beam < m_nbeams; ++beam) {
+            float* beam_tree = tree + (beam * total);
+            for (SizeType l = m_fifo_levels + 1; l <= m_plan.get_niters();
+                 ++l) {
+                for (const auto& c : pc.coordinates_sum[l]) {
+                    if (c.delay <= 1) {
+                        continue;
+                    }
+                    const auto rot = static_cast<SizeType>(
+                        m_next_pos % static_cast<uint64_t>(c.delay));
+                    if (rot != 0) {
+                        float* slot = beam_tree + c.hist_offset;
+                        std::rotate(slot, slot + rot, slot + c.delay);
+                    }
+                }
+            }
+        }
+    }
 }
 
 void FDMTCudaEngine::load_history(std::span<const float> in) {
     if (in.size() != history_state_size()) {
         detail::throw_fdmt_history_size(history_state_size(), in.size());
     }
-    if (!skew_history() && !in.empty()) {
-        // Before the staging copy, so a wrong buffer replaces nothing.
-        static_cast<void>(
-            detail::check_fdmt_tree_history_header(in, m_hist_hash));
+    if (in.empty()) {
+        m_hist_pos_base  = 0;
+        m_chunk_pos      = 0;
+        m_next_pos       = 0;
+        m_is_initialized = false;
+        m_direct_filled  = 0;
+        m_direct_stale   = false;
+        m_top_filled     = 0;
+        m_top_stale      = false;
+        return;
     }
+    if (skew_history()) {
+        const uint64_t pos =
+            check_skew_history_header(in.subspan(0, kSkewHistHeader));
+        gpu_utils::set_device(m_device_id);
+        m_device_work.wait();
+        SizeType off = kSkewHistHeader;
+        for (const auto& b : skew_hist_buffers()) {
+            gpu_utils::check_gpu_call(cudaMemcpy(b.data, in.data() + off,
+                                                 b.size * sizeof(float),
+                                                 cudaMemcpyHostToDevice),
+                                      "FDMT::load_history");
+            off += b.size;
+        }
+        m_chunk_pos      = pos;
+        m_next_pos       = pos;
+        m_is_initialized = false;
+        m_direct_stale   = false;
+        m_top_stale      = false;
+        m_direct_filled  = static_cast<SizeType>(m_direct->window);
+        if (m_top) {
+            m_top_filled = static_cast<SizeType>(m_top->max_ring);
+        }
+        return;
+    }
+    const uint64_t pos_base =
+        detail::check_fdmt_tree_history_header(in, m_hist_hash);
     gpu_utils::set_device(m_device_id);
     m_device_work.wait();
-    thrust::device_vector<float> staged(in.begin(), in.end());
-    load_history_d(thrust::raw_pointer_cast(staged.data()), nullptr);
-    gpu_utils::check_gpu_call(cudaStreamSynchronize(nullptr),
-                              "FDMT::load_history");
+    m_hist_pos_base  = pos_base;
+    const float* src = in.data() + detail::kFDMTHistHeader;
+    auto& level0     = next_level0_history();
+    if (!level0.empty()) {
+        gpu_utils::check_gpu_call(
+            cudaMemcpy(thrust::raw_pointer_cast(level0.data()), src,
+                       level0.size() * sizeof(float), cudaMemcpyHostToDevice),
+            "FDMT::load_history");
+    }
+    const float* tree = src + level0.size();
+    const auto total  = m_plan.get_tree_history_size();
+    if (m_fifo_size > 0) {
+        gpu_utils::check_gpu_call(
+            cudaMemcpy2D(thrust::raw_pointer_cast(next_tree_fifo().data()),
+                         m_fifo_size * sizeof(float), tree,
+                         total * sizeof(float), m_fifo_size * sizeof(float),
+                         m_nbeams, cudaMemcpyHostToDevice),
+            "FDMT::load_history");
+    }
+    if (m_ring_size > 0) {
+        gpu_utils::check_gpu_call(
+            cudaMemcpy2D(thrust::raw_pointer_cast(m_tree_ring_d.data()),
+                         m_ring_size * sizeof(float), tree + m_fifo_size,
+                         total * sizeof(float), m_ring_size * sizeof(float),
+                         m_nbeams, cudaMemcpyHostToDevice),
+            "FDMT::load_history");
+    }
+    m_chunk_pos      = 0;
+    m_next_pos       = 0;
+    m_is_initialized = false;
+    m_direct_filled  = 0;
+    m_direct_stale   = false;
+    m_top_filled     = 0;
+    m_top_stale      = false;
 }
 
 const float* FDMTCudaEngine::host_level_snapshot() const {
@@ -403,42 +486,6 @@ void FDMTCudaEngine::check_subband_idx(SizeType subband_idx) const {
                         "subbands)",
                         subband_idx, nsubs));
     }
-}
-
-void FDMTCudaEngine::ensure_full_tree_history(cudaStream_t stream) const {
-    if (m_full_tree_ring || m_mode != FDMTMode::kValid ||
-        m_search_nbits != 32) {
-        return;
-    }
-    check_tree_ring_extent(m_plan.get_tree_history_size());
-    const SizeType full_ring = m_plan.get_tree_history_size() - m_fifo_size;
-    thrust::device_vector<float> expanded(m_nbeams * full_ring, 0.0F);
-    if (m_ring_low_size > 0 && !m_tree_ring_d.empty()) {
-        gpu_utils::check_gpu_call(
-            cudaMemcpy2DAsync(thrust::raw_pointer_cast(expanded.data()) +
-                                  (m_ring_low_base - m_fifo_size),
-                              full_ring * sizeof(float),
-                              thrust::raw_pointer_cast(m_tree_ring_d.data()),
-                              m_ring_size * sizeof(float),
-                              m_ring_low_size * sizeof(float), m_nbeams,
-                              cudaMemcpyDeviceToDevice, stream),
-            "FDMT::ensure_full_tree_history (low)");
-    }
-    if (m_ring_high_size > 0 && !m_tree_ring_d.empty()) {
-        gpu_utils::check_gpu_call(
-            cudaMemcpy2DAsync(thrust::raw_pointer_cast(expanded.data()) +
-                                  (m_ring_high_orig_base - m_fifo_size),
-                              full_ring * sizeof(float),
-                              thrust::raw_pointer_cast(m_tree_ring_d.data()) +
-                                  m_ring_low_size,
-                              m_ring_size * sizeof(float),
-                              m_ring_high_size * sizeof(float), m_nbeams,
-                              cudaMemcpyDeviceToDevice, stream),
-            "FDMT::ensure_full_tree_history (high)");
-    }
-    m_tree_ring_d.swap(expanded);
-    m_ring_size      = full_ring;
-    m_full_tree_ring = true;
 }
 
 std::vector<FDMTCudaEngine::SkewHistBuffer>
@@ -488,15 +535,10 @@ uint64_t FDMTCudaEngine::skew_layout_hash() const {
 void FDMTCudaEngine::save_skew_history_d(float* dst,
                                          cudaStream_t stream) const {
     std::array<float, kSkewHistHeader> hdr{};
-    const auto put16 = [&](SizeType at, uint64_t x, SizeType words) {
-        for (SizeType i = 0; i < words; ++i) {
-            hdr[at + i] = static_cast<float>((x >> (16 * i)) & 0xFFFFU);
-        }
-    };
-    put16(0, kSkewHistMagic, 1);
-    put16(1, kSkewHistVersion, 1);
-    put16(2, skew_layout_hash(), 4);
-    put16(6, m_next_pos, 4);
+    detail::put16(hdr, 0, kSkewHistMagic, 1);
+    detail::put16(hdr, 1, kSkewHistVersion, 1);
+    detail::put16(hdr, 2, skew_layout_hash(), 4);
+    detail::put16(hdr, 6, m_next_pos, 4);
     // Pageable source: returns once the header has been staged.
     gpu_utils::check_gpu_call(cudaMemcpyAsync(dst, hdr.data(), sizeof(hdr),
                                               cudaMemcpyHostToDevice, stream),
@@ -511,6 +553,25 @@ void FDMTCudaEngine::save_skew_history_d(float* dst,
     }
 }
 
+uint64_t
+FDMTCudaEngine::check_skew_history_header(std::span<const float> hdr) const {
+    constexpr const char* kBadSkewHeader =
+        "FDMT::load_history: not a skewed-window history";
+    if (detail::get16(hdr, 0, 1, kBadSkewHeader) != kSkewHistMagic ||
+        detail::get16(hdr, 1, 1, kBadSkewHeader) != kSkewHistVersion) {
+        throw std::invalid_argument(
+            "FDMT::load_history: not a skewed-window history (it was "
+            "saved by a different engine path)");
+    }
+    if (detail::get16(hdr, 2, 4, kBadSkewHeader) != skew_layout_hash()) {
+        throw std::invalid_argument(
+            "FDMT::load_history: the history was saved by an engine with "
+            "a different skewed-window layout (plan, chunk_nsamps, beams "
+            "or direct levels)");
+    }
+    return detail::get16(hdr, 6, 4, kBadSkewHeader);
+}
+
 void FDMTCudaEngine::load_skew_history_d(const float* src,
                                          cudaStream_t stream) {
     std::array<float, kSkewHistHeader> hdr{};
@@ -519,30 +580,7 @@ void FDMTCudaEngine::load_skew_history_d(const float* src,
                               "FDMT::load_history");
     gpu_utils::check_gpu_call(cudaStreamSynchronize(stream),
                               "FDMT::load_history");
-    const auto get16 = [&](SizeType at, SizeType words) {
-        uint64_t x = 0;
-        for (SizeType i = 0; i < words; ++i) {
-            const float f = hdr[at + i];
-            if (!(f >= 0.0F && f <= 65535.0F) || f != std::floor(f)) {
-                throw std::invalid_argument(
-                    "FDMT::load_history: not a skewed-window history");
-            }
-            x |= static_cast<uint64_t>(f) << (16 * i);
-        }
-        return x;
-    };
-    if (get16(0, 1) != kSkewHistMagic || get16(1, 1) != kSkewHistVersion) {
-        throw std::invalid_argument(
-            "FDMT::load_history: not a skewed-window history (it was "
-            "saved by a different engine path)");
-    }
-    if (get16(2, 4) != skew_layout_hash()) {
-        throw std::invalid_argument(
-            "FDMT::load_history: the history was saved by an engine with "
-            "a different skewed-window layout (plan, chunk_nsamps, beams "
-            "or direct levels)");
-    }
-    const uint64_t pos = get16(6, 4);
+    const uint64_t pos = check_skew_history_header(hdr);
     SizeType off       = kSkewHistHeader;
     for (const auto& b : skew_hist_buffers()) {
         gpu_utils::check_gpu_call(
@@ -578,7 +616,6 @@ void FDMTCudaEngine::save_history_d(float* dst, cudaStream_t stream) const {
                                               cudaMemcpyHostToDevice, stream),
                               "FDMT::save_history");
     dst += detail::kFDMTHistHeader;
-    ensure_full_tree_history(stream);
     rebuild_direct_history(stream);
     rebuild_top_history(stream);
     const auto& level0 = next_level0_history();
@@ -632,8 +669,7 @@ void FDMTCudaEngine::load_history_d(const float* src, cudaStream_t stream) {
         src += detail::kFDMTHistHeader;
     }
     m_hist_pos_base = pos_base;
-    ensure_full_tree_history(stream);
-    auto& level0 = next_level0_history();
+    auto& level0    = next_level0_history();
     if (!level0.empty()) {
         gpu_utils::check_gpu_call(
             cudaMemcpyAsync(thrust::raw_pointer_cast(level0.data()), src,

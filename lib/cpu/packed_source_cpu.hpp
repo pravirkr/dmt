@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 
 #include "dmt/common/types.hpp"
 
@@ -63,7 +64,7 @@ inline void copy_samples(
         unpack_range<16>(r, s0, n, out);
         break;
     default:
-        break;
+        std::abort();
     }
 }
 

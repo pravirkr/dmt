@@ -12,18 +12,11 @@
 #include <utility>
 #include <vector>
 
+#include "dmt/dm_utils.hpp"
 #include "dmt/fdmt_box_weights.hpp"
 #include "dmt/fdmt_variance.hpp"
 
 namespace dmt::algorithms::detail {
-
-namespace {
-// As in boxcar_plans.cpp: an opaque integer test, safe under -ffast-math.
-bool finite(float x) {
-    const volatile uint32_t bits = std::bit_cast<uint32_t>(x);
-    return (bits & 0x7F800000U) != 0x7F800000U;
-}
-} // namespace
 
 BoxcarNoiseModel::BoxcarNoiseModel(const plans::FDMTPlan& plan,
                                    const BoxcarConfig& config,
@@ -134,19 +127,8 @@ double BoxcarNoiseModel::mean_weight(SizeType r) const noexcept {
     const auto& off = m_offsets[l];
     const double unit =
         std::ldexp(1.0, -static_cast<int>(m_plan.get_box_fraction_bits()));
-    double sum = 0;
-    for (SizeType i = off[node]; i < off[node + 1]; ++i) {
-        const Bin& e = b[i];
-        if (e.count == 0) {
-            continue;
-        }
-        const SizeType len = e.len;
-        const double weight =
-            m_smear ? box_weight(len, m_plan.get_box_fraction_bits()) * unit
-                    : 1.0;
-        sum += static_cast<double>(e.count) * static_cast<double>(len) * weight;
-    }
-    return sum;
+    return row_mean_weight({b.data() + off[node], b.data() + off[node + 1]},
+                           m_smear, m_plan.get_box_fraction_bits(), unit);
 }
 
 std::vector<BoxcarNoiseModel::Bin>&
@@ -195,33 +177,14 @@ void BoxcarNoiseModel::fill(std::span<const uint8_t> mask, bool layout) {
             const auto merge = [&](SizeType i, Bin* dst) -> SizeType {
                 const auto& c    = coords[i];
                 const SizeType a = c.tail_buf_offset / prev;
-                const Bin* x     = in.data() + in_off[a];
-                const Bin* xe    = in.data() + in_off[a + 1];
-                const Bin* y     = nullptr;
-                const Bin* ye    = nullptr;
+                const std::span<const Bin> sa{in.data() + in_off[a],
+                                              in.data() + in_off[a + 1]};
+                std::span<const Bin> sb;
                 if (c.i_coord_head != SIZE_MAX) {
                     const SizeType b = c.head_buf_offset / prev;
-                    y                = in.data() + in_off[b];
-                    ye               = in.data() + in_off[b + 1];
+                    sb = {in.data() + in_off[b], in.data() + in_off[b + 1]};
                 }
-                SizeType k = 0;
-                while (x != xe || y != ye) {
-                    Bin v{};
-                    if (y == ye || (x != xe && x->len < y->len)) {
-                        v = *x++;
-                    } else if (x == xe || y->len < x->len) {
-                        v = *y++;
-                    } else {
-                        v = {x->len, x->count + y->count};
-                        ++x;
-                        ++y;
-                    }
-                    if (dst != nullptr) {
-                        dst[k] = v;
-                    }
-                    ++k;
-                }
-                return k;
+                return merge_length_bins(sa, sb, dst);
             };
             if (layout) {
                 off.assign(coords.size() + 1, 0);
@@ -286,74 +249,23 @@ BoxcarNoiseModel::compute(std::span<const uint8_t> mask) {
         const auto [l, node] = m_row_node[r];
         const auto& b        = bins(l);
         const auto& off      = m_offsets[l];
-        const Bin* h         = b.data() + off[node];
-        const Bin* he        = b.data() + off[node + 1];
+        const std::span<const Bin> hist{b.data() + off[node],
+                                        b.data() + off[node + 1]};
         // Packed: the row's mean weight under this mask and the reference.
         const double mw     = m_packed ? mean_weight(r) : 0.0;
         const double mw_ref = m_packed ? m_reference_mean[r] : 0.0;
-        // The arithmetic and order of make_boxcar_plans(): ascending
-        // length over the lengths present (nonzero counts).
+        // Shared with make_boxcar_plans(): bit-identical arithmetic and order.
         for (SizeType f = 0; f < nf; ++f) {
-            const SizeType width = m_widths[f];
-            const SizeType w_edge =
-                m_config.use_trapezoid ? trapezoid_edge_width(m_widths[f]) : 0;
-            double variance = 0;
-            for (const Bin* e = h; e != he; ++e) {
-                if (e->count == 0) {
-                    continue;
-                }
-                const SizeType len = e->len;
-                const double weight =
-                    m_smear
-                        ? box_weight(len, m_plan.get_box_fraction_bits()) * unit
-                        : 1.0;
-                const auto cnt = static_cast<double>(e->count);
-                variance +=
-                    cnt * fdmt_trapezoid_variance(len, width, w_edge, weight);
-            }
-            const SizeType k = (static_cast<SizeType>(r) * nf) + f;
-            if (variance == 0) {
-                tables->inv_sigma[k] = 0;
-                tables->thresh[k]    = std::numeric_limits<float>::max();
-                if (m_packed) {
-                    tables->integer_thresh[k] = UINT64_MAX;
-                }
-                continue;
-            }
-            const double sigma    = m_config.noise_sigma * std::sqrt(variance);
-            const float inv_sigma = static_cast<float>(1.0 / sigma);
-            const float threshold =
-                static_cast<float>(m_config.detect_thresh * sigma);
-            ok = ok && finite(inv_sigma) && finite(threshold) &&
-                 inv_sigma > 0 && threshold > 0;
-            tables->inv_sigma[k] = inv_sigma;
-            tables->thresh[k]    = threshold;
+            const auto res =
+                row_width_noise(hist, m_widths[f], m_config, m_smear,
+                                m_plan.get_box_fraction_bits(), unit, m_packed,
+                                mw, mw_ref, true);
+            const SizeType k     = (static_cast<SizeType>(r) * nf) + f;
+            ok                   = ok && res.ok_float && res.ok_int;
+            tables->inv_sigma[k] = res.inv_sigma;
+            tables->thresh[k]    = res.thresh;
             if (m_packed) {
-                // make_boxcar_plans()'s cutoff for this mask, then moved by
-                // the exact difference of the reference mean and this
-                // mask's (killed channels add input_mean each).
-                const double scale = m_smear ? 1.0 / unit : 1.0;
-                const double filter_weight =
-                    w_edge == 0 ? static_cast<double>(width)
-                                : static_cast<double>(2 * (width - w_edge));
-                const double mean =
-                    m_config.input_mean * mw * filter_weight * scale;
-                const double mean_ref =
-                    m_config.input_mean * mw_ref * filter_weight * scale;
-                const double cutoff =
-                    std::ceil(mean + (m_config.detect_thresh * sigma * scale));
-                const double shift = mean_ref - mean;
-                // A whole number (integer mean code, dyadic weights).
-                const bool fits = cutoff < std::ldexp(1.0, 64) && shift >= 0 &&
-                                  shift < std::ldexp(1.0, 63) &&
-                                  shift == std::floor(shift);
-                ok              = ok && fits;
-                if (fits) {
-                    const auto c0             = static_cast<uint64_t>(cutoff);
-                    const auto sh             = static_cast<uint64_t>(shift);
-                    ok                        = ok && c0 <= UINT64_MAX - sh;
-                    tables->integer_thresh[k] = c0 + sh;
-                }
+                tables->integer_thresh[k] = res.integer_thresh;
             }
         }
     }

@@ -137,6 +137,10 @@ struct Segments {
     SizeType zeros{};
 };
 
+/// @brief Shortest valid overlap-save segment transform length for `geom`
+/// (FFT-friendly, >= 2 * (max(skip, support) + guard) + 2).
+[[nodiscard]] SizeType min_segment_length(const Geometry& geom);
+
 /// @brief execute()'s transform length: the single transform, or overlap-save
 /// segments of a length that transforms faster per output sample (FFTW's
 /// deterministic cost estimate, so every engine and run picks the same

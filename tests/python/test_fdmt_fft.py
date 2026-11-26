@@ -3,6 +3,11 @@ import pytest
 
 from dmtlib import FDMT, FDMTFFT, compute_fdmt_fft, libdmt
 
+try:
+    from ._helpers import pack_lsb_first
+except ImportError:
+    from _helpers import pack_lsb_first
+
 
 class TestFDMTFFT:
     def test_fdmt_fft_initialise_shape(self) -> None:
@@ -321,22 +326,6 @@ class TestFDMTFFT:
         )
 
 
-def _pack(vals: np.ndarray, nbits: int) -> np.ndarray:
-    """Rows of unsigned values -> LSB-first packed uint8 rows."""
-    if nbits == 16:
-        return np.ascontiguousarray(vals.astype("<u2")).view(np.uint8)
-    if nbits == 8:
-        return vals.astype(np.uint8)
-    per = 8 // nbits
-    rows, n = vals.shape
-    out = np.zeros((rows, (n * nbits + 7) // 8), dtype=np.uint8)
-    for i in range(n):
-        out[:, i // per] |= (vals[:, i].astype(np.uint8) << ((i % per) * nbits)).astype(
-            np.uint8
-        )
-    return out
-
-
 class TestFDMTFFTInputs:
     args = (1100.0, 1500.0, 64, 512, 0.001, 48)
 
@@ -345,8 +334,10 @@ class TestFDMTFFTInputs:
         rng = np.random.default_rng(nbits)
         vals = rng.integers(0, 2**nbits, size=(64, 512))
         ref = FDMTFFT(*self.args).execute(vals.astype(np.float32))
-        packed = FDMTFFT(*self.args).execute(_pack(vals, nbits), nbits)
-        tm = FDMTFFT(*self.args).execute_time_major(_pack(vals.T.copy(), nbits), nbits)
+        packed = FDMTFFT(*self.args).execute(pack_lsb_first(vals, nbits), nbits=nbits)
+        tm = FDMTFFT(*self.args).execute_time_major(
+            pack_lsb_first(vals.T.copy(), nbits), nbits=nbits
+        )
         np.testing.assert_allclose(packed, ref, rtol=0, atol=1e-5 * np.abs(ref).max())
         np.testing.assert_allclose(tm, ref, rtol=0, atol=1e-5 * np.abs(ref).max())
 
@@ -468,3 +459,44 @@ def test_estimate_memory_matches_instance_cpu() -> None:
 
 def test_estimate_memory_matches_instance_gpu(gpu_backend: str) -> None:
     _check_fft_estimate(gpu_backend)
+
+
+def test_fdmt_fft_finalize_preserves_nbeams() -> None:
+    rng = np.random.default_rng(19)
+    nbeams, nchans, nsamps = 2, 8, 256
+    wf = rng.standard_normal((nbeams, nchans, nsamps), dtype=np.float32)
+    eng = FDMTFFT(700.0, 1200.0, nchans, nsamps, 0.001, 16, nbeams=nbeams)
+    expected = eng.execute(wf)
+    eng.reset_history()
+    dmt_buf = np.empty_like(expected)
+    eng.reset(wf, dmt=dmt_buf)
+    got = eng.finalize()
+    assert got.shape == expected.shape
+    np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-5)
+
+
+def test_fdmt_fft_execute_out_buffer() -> None:
+    rng = np.random.default_rng(23)
+    nchans, nsamps = 16, 128
+    eng = FDMTFFT(1000.0, 1500.0, nchans, nsamps, 0.001, 16, mode="roll")
+    wf = rng.standard_normal((nchans, nsamps), dtype=np.float32)
+    out = np.empty(eng.plan.dmt_size, dtype=np.float32)
+    ref = eng.execute(wf)
+    got = eng.execute(wf, out=out)
+    assert np.shares_memory(got, out)
+    np.testing.assert_array_equal(got, ref)
+
+    vals = rng.integers(0, 256, size=(nchans, nsamps))
+    packed = pack_lsb_first(vals, 8)
+    tm = pack_lsb_first(vals.T.copy(), 8)
+    ref_p = eng.execute(packed, nbits=8)
+    got_p = eng.execute(packed, nbits=8, out=out)
+    assert np.shares_memory(got_p, out)
+    np.testing.assert_array_equal(got_p, ref_p)
+
+    got_tm = eng.execute_time_major(tm, nbits=8, out=out)
+    assert np.shares_memory(got_tm, out)
+    np.testing.assert_array_equal(got_tm, ref_p)
+
+    with pytest.raises(ValueError, match="elements"):
+        eng.execute(wf, out=np.empty(eng.plan.dmt_size - 1, dtype=np.float32))

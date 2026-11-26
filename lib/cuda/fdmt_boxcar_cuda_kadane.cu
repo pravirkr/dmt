@@ -101,15 +101,8 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     constexpr int kLeaderTid  = kBlockWarps - 1;
     const SizeType task       = SizeType{blockIdx.x};
 
-    if (input.row_lag != nullptr) {
-        FDMTSearchInput lagged;
-        if (!lagged_row_input(input, rows[row_base + (task % ndm)].row,
-                              lagged)) {
-            return;
-        }
-        input = lagged;
-    }
-    if (!stop_row_input(input) || input.nsamps == 0) {
+    if (!setup_row_input(input, rows, row_base, ndm, task) ||
+        input.nsamps == 0) {
         return;
     }
 
@@ -135,150 +128,26 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     auto& shared = kshared.boxcar;
     T* ring      = reinterpret_cast<T*>(storage + sizeof(kshared));
 
-    const BoxcarRow row    = rows[row_index];
-    C* carry               = carry_all + (index * max_width);
-    BoxcarPeak* peaks      = peaks_all + (index * peak_count);
-    RawCandidate prototype = row.candidate;
-    prototype.beam_idx     = static_cast<uint32_t>(beam);
-    const PlaneShare share =
-        plane_share(slots, capacity, plane_slots, plane_cap, row.plane);
-    CandidateWriter writer{candidates,         counts, share.slots,
-                           per_dm_all + index, widths, prototype,
-                           share.capacity,     dm_cap};
-    writer.base   = share.base;
-    writer.means  = means != nullptr ? means + (row_index * nfilters) : nullptr;
-    writer.scales = inv_sigma + (row_index * nfilters);
-    writer.unit   = unit;
-    // Packed rows under per-call masks carry their S/N in the peak.
-    writer.integer = std::is_integral_v<T> && !kBlockNoise &&
-                     mode != PeakFindingMode::kContiguousPeakAcrossWidths;
-
-    struct NoKeep {};
+    const BoxcarRow row = rows[row_index];
+    C* carry            = carry_all + (index * max_width);
+    BoxcarPeak* peaks   = peaks_all + (index * peak_count);
     std::conditional_t<kKeep, KeepPending, NoKeep> pending{};
-    std::conditional_t<kKeep, KeepWriter, NoKeep> keeper{};
-    if constexpr (kKeep) {
-        keeper = KeepWriter{counts,
-                            keep_all + (index * keep_q),
-                            per_dm_all + index,
-                            detected_all + index,
-                            keep_q,
-                            &pending,
-                            writer.means,
-                            writer.scales,
-                            unit,
-                            writer.integer};
-    }
-    const auto& out = [&]() -> const auto& {
-        if constexpr (kKeep) {
-            return keeper;
-        } else {
-            return writer;
-        }
-    }();
+    const auto out = make_row_writer<T, kBlockNoise, kKeep>(
+        row, beam, row_index, index, nfilters, widths, inv_sigma, means, unit,
+        mode, candidates, counts, slots, per_dm_all, capacity, dm_cap, keep_all,
+        keep_q, detected_all, plane_slots, plane_cap, pending);
 
-    const auto lookback    = static_cast<uint32_t>(max_width - 1);
-    const float* plane_thr = thresholds + (row_index * nfilters);
-    const float* plane_inv = inv_sigma + (row_index * nfilters);
-    const float* inv_row   = plane_inv;
-    const float* thr_float = plane_thr;
-    // Packed rows: the integer cutoffs likewise.
-    const uint64_t* plane_ithr = nullptr;
-    if constexpr (std::is_integral_v<T>) {
-        plane_ithr = integer_thresholds + (row_index * nfilters);
-    }
-    const uint64_t* thr_int = plane_ithr;
-    const float* in_play[4][2];
-    const uint64_t* in_play_i[4];
-    int n_play           = 0;
-    bool mixed           = false;
-    uint64_t row_support = 0;
-    if constexpr (kBlockNoise) {
-        if (block_tables.count > 0) {
-            row_support       = block_tables.support[row_index];
-            const uint64_t s0 = input.sample_begin;
-            const uint64_t s1 = s0 + input.nsamps - 1;
-            const int e0      = block_entry(block_tables, s0);
-            const int e1      = block_entry(block_tables, s1);
-            const auto add    = [&](int e, int k) {
-                const float* t     = block_tables.thr[e][k];
-                const float* v     = block_tables.inv[e][k];
-                const uint64_t* it = block_tables.ithr[e][k];
-                t  = t != nullptr ? t + (row_index * nfilters) : plane_thr;
-                v  = v != nullptr ? v + (row_index * nfilters) : plane_inv;
-                it = it != nullptr ? it + (row_index * nfilters) : plane_ithr;
-                for (int j = 0; j < n_play; ++j) {
-                    if (in_play[j][0] == t) {
-                        return;
-                    }
-                }
-                in_play[n_play][0] = t;
-                in_play[n_play][1] = v;
-                in_play_i[n_play]  = it;
-                ++n_play;
-            };
-            for (int e = e0; e <= e1; ++e) {
-                const uint64_t first = block_tables.first[e];
-                const uint64_t lo    = e == e0 ? s0 : first;
-                const uint64_t hi = e < e1 ? block_tables.first[e + 1] - 1 : s1;
-                if (!block_tables.transition[e]) {
-                    add(e, 0);
-                    continue;
-                }
-                if (lo < first + row_support + max_width - 1) {
-                    add(e, 1);
-                }
-                if (hi + 1 >= first + row_support + widths[0]) {
-                    add(e, 0);
-                }
-            }
-            if (n_play == 1) {
-                thr_float = in_play[0][0];
-                inv_row   = in_play[0][1];
-                thr_int   = in_play_i[0];
-            } else {
-                mixed = true;
-            }
-        }
-    }
-    // Tables other than the constructor's (one, or several).
-    [[maybe_unused]] const bool custom = mixed || thr_float != plane_thr;
+    const auto lookback = static_cast<uint32_t>(max_width - 1);
+    RowNoisePlay<kBlockNoise> play{};
+    const auto noise = resolve_row_noise<T, kBlockNoise>(
+        input, row_index, nfilters, max_width, widths, thresholds, inv_sigma,
+        integer_thresholds, block_tables, play);
 
-    const T* thr_row = [&] {
-        if constexpr (std::is_integral_v<T>) {
-            return thr_int;
-        } else {
-            return thr_float;
-        }
-    }();
     T* s_thr             = ring + mask + 1;
     auto* s_widths       = reinterpret_cast<uint32_t*>(s_thr + nfilters);
     const uint32_t* wtab = shared_tables ? s_widths : widths;
-    const T* ttab        = shared_tables ? s_thr : thr_row;
+    const T* ttab        = shared_tables ? s_thr : noise.thr_row();
     bool tables_staged   = false;
-
-    const auto stage_shared_tables = [&] {
-        for (SizeType f = tid; f < nfilters; f += kBlockThreads) {
-            T th = thr_row[f];
-            if constexpr (kBlockNoise) {
-                if (mixed) {
-                    if constexpr (std::is_integral_v<T>) {
-                        th = in_play_i[0][f];
-                        for (int j = 1; j < n_play; ++j) {
-                            th = th < in_play_i[j][f] ? th : in_play_i[j][f];
-                        }
-                    } else {
-                        th = in_play[0][0][f];
-                        for (int j = 1; j < n_play; ++j) {
-                            th = th < in_play[j][0][f] ? th : in_play[j][0][f];
-                        }
-                    }
-                }
-            }
-            s_thr[f]    = th;
-            s_widths[f] = widths[f];
-        }
-        tables_staged = true;
-    };
 
     const SizeType nb = gate.num_buckets;
     float row_biases_f32[kadane::kMaxGateBuckets]{};
@@ -291,25 +160,12 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     // gate on centred sums: at most the centred integer cutoff, as
     // init_kadane()).
     [[maybe_unused]] const auto min_ithr_at = [&](SizeType f) -> uint64_t {
-        if (!mixed) {
-            return thr_int[f];
-        }
-        uint64_t th = in_play_i[0][f];
-        for (int j = 1; j < n_play; ++j) {
-            th = th < in_play_i[j][f] ? th : in_play_i[j][f];
-        }
-        return th;
+        return noise.min_ithr_at(f, play);
     };
     [[maybe_unused]] const auto min_thr_at = [&](SizeType f) -> float {
-        float th = thr_float[f];
-        if (mixed) {
-            th = in_play[0][0][f];
-            for (int j = 1; j < n_play; ++j) {
-                th = th < in_play[j][0][f] ? th : in_play[j][0][f];
-            }
-        }
+        float th = noise.min_fthr_at(f, play);
         if constexpr (std::is_integral_v<T>) {
-            const uint64_t it = min_ithr_at(f);
+            const uint64_t it = noise.min_ithr_at(f, play);
             if (it != std::numeric_limits<uint64_t>::max()) {
                 const double centred = (static_cast<double>(it) -
                                         means[(row_index * nfilters) + f]) *
@@ -332,7 +188,7 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
             // Per-call tables: the row's cuts at its fixed bias, as
             // KadaneGatePlan::recompute_row_icuts (the minimum over the
             // tables in play is the cut of their per-width minimum).
-            if (custom) {
+            if (noise.custom) {
                 if (static_cast<SizeType>(tid) < nb) {
                     const auto k = static_cast<SizeType>(tid);
                     const int32_t c =
@@ -356,7 +212,7 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
             row_cuts_f32[k]   = gate.cut[(k * gate.row_stride) + row_index];
         }
         if constexpr (kBlockNoise) {
-            if (custom) {
+            if (noise.custom) {
                 if (static_cast<SizeType>(tid) < nb) {
                     const auto k = static_cast<SizeType>(tid);
                     if (gate.disabled_row[row_index] != 0U) {
@@ -410,16 +266,6 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
         }
     }
 
-    const auto any_open = [&] {
-        bool loc_open = false;
-        if (mode != PeakFindingMode::kAllAboveThreshold) {
-            for (SizeType f = tid; f < peak_count; f += kBlockThreads) {
-                loc_open = loc_open || peaks[f].open;
-            }
-        }
-        return __syncthreads_or(loc_open) != 0;
-    };
-
     bool ring_ready        = false;
     SizeType ring_synced_t = 0;
 
@@ -429,19 +275,7 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
         const uint64_t start = input.sample_begin + t0;
 
         T x[kItems];
-#pragma unroll
-        for (int j = 0; j < kItems; ++j) {
-            const SizeType local = static_cast<SizeType>(tid * kItems + j);
-            x[j]                 = 0;
-            if (local < static_cast<SizeType>(n)) {
-                if constexpr (std::is_integral_v<T>) {
-                    x[j] = boxcar_integer_sample(input, row, beam, t0 + local,
-                                                 root);
-                } else {
-                    x[j] = boxcar_sample(input, row, beam, t0 + local, root);
-                }
-            }
-        }
+        load_tile_samples<T, kBlockThreads>(input, row, beam, t0, n, root, x);
 
         float x_f32[kItems]{};
         if constexpr (!kUseIntGate) {
@@ -546,38 +380,13 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
         if (__syncthreads_or(my_hit || open) != 0) {
             if (!ring_ready) {
                 if (shared_tables && !tables_staged) {
-                    stage_shared_tables();
+                    stage_row_tables<T, kBlockThreads, kBlockNoise>(
+                        s_thr, s_widths, widths, nfilters, noise, play);
+                    tables_staged = true;
                 }
-                if (input.sample_begin == 0) {
-                    for (uint32_t j = tid; j <= lookback; j += kBlockThreads) {
-                        ring[j & mask] = T{0};
-                    }
-                    __syncthreads();
-                } else {
-                    if (tid == 0) {
-                        ring[0] = 0;
-                    }
-                    __syncthreads();
-                    const auto carry0 =
-                        static_cast<uint32_t>(input.sample_begin % max_width);
-                    const auto width32 = static_cast<uint32_t>(max_width);
-                    for (uint32_t p = 0; p < lookback; p += kBlockTile) {
-                        const T base_c = ring[p & mask];
-                        T cx[kItems];
-                        for (int j = 0; j < kItems; ++j) {
-                            const uint32_t t = p + (tid * kItems) + j;
-                            const uint32_t back =
-                                t < lookback ? lookback - t : 0U;
-                            cx[j] = t < lookback && input.sample_begin >= back
-                                        ? carry[carry0 >= back
-                                                    ? carry0 - back
-                                                    : carry0 + width32 - back]
-                                        : T{0};
-                        }
-                        prefix_tile<T, kBlockThreads>(shared, ring, mask, cx, p,
-                                                      base_c);
-                    }
-                }
+                bootstrap_carry_ring<T, C, kBlockThreads>(
+                    shared, ring, mask, carry, max_width, lookback,
+                    input.sample_begin);
                 ring_ready    = true;
                 ring_synced_t = 0;
             }
@@ -587,28 +396,13 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                     static_cast<uint32_t>(lookback + ring_synced_t);
                 const T base_tau = ring[pos_tau & mask];
                 T prev_x[kItems];
-#pragma unroll
-                for (int j = 0; j < kItems; ++j) {
-                    const SizeType local =
-                        static_cast<SizeType>(tid * kItems + j);
-                    if constexpr (std::is_integral_v<T>) {
-                        prev_x[j] = boxcar_integer_sample(
-                            input, row, beam, ring_synced_t + local, root);
-                    } else {
-                        prev_x[j] = boxcar_sample(input, row, beam,
-                                                  ring_synced_t + local, root);
-                    }
-                }
+                load_tile_samples<T, kBlockThreads, true>(
+                    input, row, beam, ring_synced_t, kBlockTile, root, prev_x);
                 prefix_tile<T, kBlockThreads>(shared, ring, mask, prev_x,
                                               pos_tau, base_tau);
-                const uint32_t end_tau =
-                    pos_tau + static_cast<uint32_t>(kBlockTile);
-                const T origin_tau = ring[(end_tau - lookback) & mask];
-                __syncthreads();
-                for (uint32_t j = tid; j <= lookback; j += kBlockThreads) {
-                    ring[(end_tau - lookback + j) & mask] -= origin_tau;
-                }
-                __syncthreads();
+                recenter_prefix_ring<T, kBlockThreads>(
+                    ring, mask, pos_tau + static_cast<uint32_t>(kBlockTile),
+                    lookback);
                 ring_synced_t += kBlockTile;
             }
 
@@ -617,129 +411,15 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
             prefix_tile<T, kBlockThreads>(shared, ring, mask, x, position,
                                           base);
 
-            float best[kItems];
-            uint32_t best_filter[kItems];
-            T current[kItems];
-            uint64_t raw_sums[kItems]{};
-            for (int j = 0; j < kItems; ++j) {
-                current[j] = ring[(position + (tid * kItems) + j + 1) & mask];
-                best[j]    = -1.0F;
-                best_filter[j] = 0;
-            }
-            for (SizeType f = 0; f < nfilters; ++f) {
-                bool above[kItems];
-                float snr[kItems];
-                uint32_t filters[kItems];
-                const uint32_t width = wtab[f];
-                const uint32_t w_edge =
-                    use_trapezoid ? trapezoid_edge_width(width) : 0U;
-                T threshold = ttab[f];
-                float scale = inv_row[f];
-                bool f_hit  = false;
-                for (int j = 0; j < kItems; ++j) {
-                    const uint32_t local  = (tid * kItems) + j;
-                    const uint64_t sample = start + local;
-                    if constexpr (kBlockNoise) {
-                        if (mixed) {
-                            const int e = block_entry(block_tables, sample);
-                            const int k = block_table(block_tables, e, sample,
-                                                      width, row_support);
-                            const float* v = block_tables.inv[e][k];
-                            if constexpr (std::is_integral_v<T>) {
-                                const uint64_t* it = block_tables.ithr[e][k];
-                                threshold = it != nullptr
-                                                ? it[(row_index * nfilters) + f]
-                                                : plane_ithr[f];
-                            } else {
-                                const float* t = block_tables.thr[e][k];
-                                threshold = t != nullptr
-                                                ? t[(row_index * nfilters) + f]
-                                                : plane_thr[f];
-                            }
-                            scale = v != nullptr ? v[(row_index * nfilters) + f]
-                                                 : plane_inv[f];
-                        }
-                    }
-                    const uint32_t idx = position + local + 1;
-                    T sum = current[j] - ring[(idx - width) & mask];
-                    if (w_edge > 0) {
-                        sum += ring[(idx - w_edge) & mask] -
-                               ring[(idx - width + w_edge) & mask];
-                    }
-                    above[j] =
-                        local < static_cast<uint32_t>(n) &&
-                        (!skip_cold || sample >= row.warmup + width - 1) &&
-                        sum >= threshold;
-                    f_hit  = f_hit || above[j];
-                    snr[j] = 0;
-                    if constexpr (std::is_integral_v<T>) {
-                        raw_sums[j] = sum;
-                        if (above[j] &&
-                            (kBlockNoise ||
-                             mode == PeakFindingMode::
-                                         kContiguousPeakAcrossWidths)) {
-                            snr[j] = static_cast<float>(
-                                (static_cast<double>(sum) -
-                                 means[(row_index * nfilters) + f]) *
-                                (scale * unit));
-                        }
-                    } else {
-                        snr[j] = above[j] ? sum * scale : 0.0F;
-                    }
-                    filters[j] = static_cast<uint32_t>(f);
-                    if (mode == PeakFindingMode::kContiguousPeakAcrossWidths) {
-                        if (above[j] && snr[j] > best[j]) {
-                            best[j]        = snr[j];
-                            best_filter[j] = filters[j];
-                        }
-                    } else if (mode == PeakFindingMode::kAllAboveThreshold &&
-                               above[j]) {
-                        BoxcarPeak peak{sample, sample,     sample,
-                                        snr[j], filters[j], true};
-                        if constexpr (std::is_integral_v<T>) {
-                            peak.raw_sum = sum;
-                        }
-                        out(peak);
-                    }
-                }
-                if (mode == PeakFindingMode::kContiguousPeakPerWidth &&
-                    __syncthreads_or(f_hit || peaks[f].open) != 0) {
-                    reduce_runs<T, kBlockThreads>(
-                        shared, above, snr, filters, start, n, peaks + f, out,
-                        raw_sums,
-                        std::is_integral_v<T> ? (kBlockNoise ? 2 : 1) : 0);
-                    if constexpr (kKeep) {
-                        keep_drain(shared, pending, keeper);
-                    }
-                }
-                if constexpr (kKeep) {
-                    if (mode == PeakFindingMode::kAllAboveThreshold) {
-                        keep_drain(shared, pending, keeper);
-                    }
-                }
-            }
-            if (mode == PeakFindingMode::kContiguousPeakAcrossWidths) {
-                bool above[kItems];
-                for (int j = 0; j < kItems; ++j) {
-                    above[j] = best[j] >= 0;
-                }
-                reduce_runs<T, kBlockThreads>(shared, above, best, best_filter,
-                                              start, n, peaks, out, raw_sums,
-                                              false);
-                if constexpr (kKeep) {
-                    keep_drain(shared, pending, keeper);
-                }
-            }
-            open = any_open();
+            score_tile_bookkeeping<T, kBlockThreads, kBlockNoise, kKeep>(
+                shared, ring, mask, position, n, start, row, row_index, wtab,
+                ttab, nfilters, noise, block_tables, means, unit, mode,
+                skip_cold, use_trapezoid, peaks, out, pending);
+            open = any_open_peaks<kBlockThreads>(peaks, peak_count, mode);
 
             if (t0 + kBlockTile < input.nsamps) {
-                const uint32_t end = position + static_cast<uint32_t>(n);
-                const T origin     = ring[(end - lookback) & mask];
-                __syncthreads();
-                for (uint32_t j = tid; j <= lookback; j += kBlockThreads) {
-                    ring[(end - lookback + j) & mask] -= origin;
-                }
-                __syncthreads();
+                recenter_prefix_ring<T, kBlockThreads>(
+                    ring, mask, position + static_cast<uint32_t>(n), lookback);
                 ring_synced_t = t0 + kBlockTile;
             }
         }
@@ -766,21 +446,8 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
     }
 
     // Exact raw carry update directly from input.
-    const SizeType keep = input.nsamps < max_width ? input.nsamps : max_width;
-    const auto keep0    = static_cast<uint32_t>(
-        (input.sample_begin + input.nsamps - keep) % max_width);
-    const auto width32 = static_cast<uint32_t>(max_width);
-    for (SizeType t = tid; t < keep; t += kBlockThreads) {
-        const SizeType sample = input.nsamps - keep + t;
-        uint32_t slot         = keep0 + static_cast<uint32_t>(t);
-        slot -= slot >= width32 ? width32 : 0U;
-        if constexpr (std::is_integral_v<T>) {
-            carry[slot] = static_cast<C>(
-                boxcar_integer_sample(input, row, beam, sample, root));
-        } else {
-            carry[slot] = boxcar_sample(input, row, beam, sample, root);
-        }
-    }
+    save_row_carry<T, C, kBlockThreads>(input, row, beam, root, max_width,
+                                        carry);
 }
 
 } // namespace
@@ -799,23 +466,6 @@ void FDMTBoxcarCudaEngine::populate_row_int_m1(std::span<const double> means) {
         row_m1[r] = means[r * m_filters] / g0;
     }
     m_row_int_m1_d = row_m1;
-}
-
-template <typename T, typename SegT>
-SizeType FDMTBoxcarCudaEngine::kadane_shared_need(int threads) const {
-    const auto need = [&]<int kBlockThreads>() {
-        const SizeType ring =
-            std::bit_ceil(m_width + SizeType{kBlockThreads * kItems});
-        return sizeof(KadaneBlockShared<T, SegT, kBlockThreads>) +
-               (ring * sizeof(T));
-    };
-    if (threads == 64) {
-        return need.template operator()<64>();
-    }
-    if (threads == 128) {
-        return need.template operator()<128>();
-    }
-    return need.template operator()<256>();
 }
 
 template <typename T,
@@ -837,25 +487,11 @@ void FDMTBoxcarCudaEngine::configure_kadane_variants() {
 
 template <typename T, typename SegT, int kBlockThreads>
 void FDMTBoxcarCudaEngine::configure_shared_kadane_block(SizeType limit) {
-    constexpr SizeType kBlockTile = kBlockThreads * kItems;
-    constexpr bool kUseIntGate    = std::is_same_v<SegT, kadane::KadaneSegI64>;
-    const SizeType ring           = std::bit_ceil(m_width + kBlockTile);
-    const SizeType fixed =
-        sizeof(KadaneBlockShared<T, SegT, kBlockThreads>) + (ring * sizeof(T));
-    const SizeType tables = m_filters * (sizeof(T) + sizeof(uint32_t));
-    m_block_threads       = kBlockThreads;
-    m_mask                = static_cast<uint32_t>(ring - 1);
-    m_shared_tables = m_filters <= kSharedFilters && fixed + tables <= limit;
-    m_smem          = fixed + (m_shared_tables ? tables : 0);
-    // Design C SMEM halving: no s_screen range-minimum buffer allocated!
-    m_screen_offset = 0;
-    m_group_offset  = 0;
-    if (m_smem > limit) {
-        throw std::invalid_argument(fmt::format(
-            "FDMTBoxcar (kKadane): max_boxcar {} needs {} B of shared memory "
-            "per block; the device allows {} B",
-            m_width, m_smem, limit));
-    }
+    constexpr bool kUseIntGate = std::is_same_v<SegT, kadane::KadaneSegI64>;
+    // Design C SMEM halving: no s_screen range-minimum buffer allocated.
+    configure_shared_layout<T, kBlockThreads>(
+        sizeof(KadaneBlockShared<T, SegT, kBlockThreads>), limit, false,
+        "FDMTBoxcar (kKadane)");
     configure_kadane_variants<T, SegT, kBlockThreads, kUseIntGate, false, T>();
     configure_kadane_variants<T, SegT, kBlockThreads, kUseIntGate, true, T>();
     if constexpr (std::is_integral_v<T>) {
@@ -868,36 +504,26 @@ void FDMTBoxcarCudaEngine::configure_shared_kadane_block(SizeType limit) {
 
 template <typename T, typename SegT>
 bool FDMTBoxcarCudaEngine::try_configure_shared_kadane() {
-    int optin = 0;
-    gpu_utils::check_gpu_call(
-        cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin,
-                               m_device),
-        "FDMTBoxcar: shared memory limit");
-    const auto limit =
-        m_shared_limit != 0
-            ? std::min(m_shared_limit, static_cast<SizeType>(optin))
-            : static_cast<SizeType>(optin);
+    const SizeType limit   = shared_mem_limit();
+    const auto kadane_need = [&](int threads) {
+        return block_shared_need<T>(
+            threads, false, []<int K>(std::integral_constant<int, K>) {
+                return sizeof(KadaneBlockShared<T, SegT, K>);
+            });
+    };
     if constexpr (std::is_integral_v<T>) {
-        if (kadane_shared_need<T, SegT>(kKadaneThreads) > limit) {
+        if (kadane_need(kKadaneThreads) > limit) {
             return false;
         }
         configure_shared_kadane_block<T, SegT, kKadaneThreads>(limit);
         return true;
     } else {
-        // Exactly the kPrefix kernel's block size (configure_shared: the
-        // width screen is dropped before any shrink, so the choice depends
-        // on the unscreened need only): bit-exact float S/N. Where the
-        // Kadane kernel does not fit at that size, fall back to kPrefix.
-        const SizeType eff_chunk =
-            std::min(m_driver->chunk_nsamps(), m_plan.get_nsamps());
-        int threads = eff_chunk <= 64 * kItems    ? 64
-                      : eff_chunk <= 128 * kItems ? 128
-                                                  : 256;
-        while (threads > 64 && shared_need<T>(threads, false) > limit) {
-            threads /= 2;
-            m_block_shrunk = true;
-        }
-        if (kadane_shared_need<T, SegT>(threads) > limit) {
+        // Exactly the kPrefix kernel's block size (shared policy): bit-exact
+        // float S/N. Where the Kadane kernel does not fit at that size, fall
+        // back to kPrefix.
+        const int threads =
+            select_prefix_block_threads<T>(limit, m_block_shrunk);
+        if (kadane_need(threads) > limit) {
             return false;
         }
         if (m_block_shrunk) {

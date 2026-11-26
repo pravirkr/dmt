@@ -1,10 +1,14 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <span>
+#include <stdexcept>
 
 #include "dmt/common/plans.hpp"
 #include "dmt/common/types.hpp"
+
+#include "dmt/dm_utils.hpp"
 
 namespace dmt::algorithms::detail {
 
@@ -25,6 +29,37 @@ inline constexpr uint64_t kFDMTTreeHistMagic   = 0x5452U; // "TR"
 inline constexpr uint64_t kFDMTTreeHistVersion = 1;
 /// Magic of the skewed-window histories (fdmt_skew.hpp, CUDA skewed path).
 inline constexpr uint64_t kFDMTSkewHistMagic = 0x534BU; // "SK"
+
+/// Encodes `words` 16-bit chunks of `v` into `header[at .. at + words)` as
+/// exact float32 integers in [0, 65535].
+inline void put16(std::span<float> header,
+                  SizeType at,
+                  uint64_t v,
+                  SizeType words) noexcept {
+    for (SizeType i = 0; i < words; ++i) {
+        header[at + i] = static_cast<float>((v >> (16 * i)) & 0xFFFFU);
+    }
+}
+
+/// Decodes `words` 16-bit chunks from `header[at .. at + words)`. Each word
+/// must be a finite exact integer in [0, 65535]; throws std::invalid_argument
+/// with @p error_msg otherwise. Tests utils::is_finite_bits() first because
+/// Release builds compile with -ffast-math.
+[[nodiscard]] inline uint64_t get16(std::span<const float> header,
+                                    SizeType at,
+                                    SizeType words,
+                                    const char* error_msg) {
+    uint64_t v = 0;
+    for (SizeType i = 0; i < words; ++i) {
+        const float x = header[at + i];
+        if (!utils::is_finite_bits(x) || x < 0.0F || x > 65535.0F ||
+            x != std::floor(x)) {
+            throw std::invalid_argument(error_msg);
+        }
+        v |= static_cast<uint64_t>(x) << (16 * i);
+    }
+    return v;
+}
 
 /**
  * @brief Identifies the plain-tree history layout: the beams, box smearing
