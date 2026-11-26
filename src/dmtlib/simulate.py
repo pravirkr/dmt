@@ -148,7 +148,7 @@ def generate_pure_frb(
     dt: float,
     pulse_toa: float,
     amplitude: float = 1.0,
-) -> tuple[np.ndarray, float]:
+) -> tuple[np.ndarray, int]:
     """Generate a noise-free dispersed pulse with exact channel-edge integration.
 
     Parameters
@@ -164,18 +164,21 @@ def generate_pure_frb(
     pulse_toa : float
         Arrival time at lowest frequency in samples.
     amplitude : float, default=1.0
-        Pulse peak amplitude.
+        Fluence of the pulse in every channel (each channel's samples sum to
+        ``amplitude``). A channel sweeping over ``dt_sub > 1`` samples holds
+        ``amplitude / dt_sub`` per fully covered sample, so the smeared peak is
+        below ``amplitude``.
 
     Returns
     -------
-    tuple[np.ndarray, float]
+    tuple[np.ndarray, int]
         Waterfall array with shape ``(nchans, nsamps)`` and the number of dispersed
         samples.
     """
     arr, nsamps_dispersed = libdmt.generate_pure_frb(
         nchans, nsamps, f_min, f_max, dt, pulse_toa, amplitude
     )
-    return np.asarray(arr, dtype=np.float32).reshape((nchans, nsamps)), float(
+    return np.asarray(arr, dtype=np.float32).reshape((nchans, nsamps)), int(
         nsamps_dispersed
     )
 

@@ -42,9 +42,7 @@ inline CohFDMTConfig small_config() {
             .format   = BasebandFormat{.order = "FTPRI"}};
 }
 
-inline double disp(double dm, double f) {
-    return static_cast<double>(kDispConst) * dm / (f * f);
-}
+inline double disp(double dm, double f) { return kDispConst * dm / (f * f); }
 
 // Largest |v| over the stream: quantisation scale that maps it to ~100.
 inline float scale_for(const std::vector<ComplexType>& v) {

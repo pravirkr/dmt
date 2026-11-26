@@ -5,6 +5,7 @@
 #include <map>
 #include <numbers>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -89,8 +90,7 @@ SizeType nearest_smooth7(double x) {
 
 // Dispersion delay (s) between frequencies f_lo < f_hi (MHz) at DM dm.
 double disp_delay(double dm, double f_lo, double f_hi) {
-    return static_cast<double>(kDispConst) * dm *
-           ((1.0 / (f_lo * f_lo)) - (1.0 / (f_hi * f_hi)));
+    return kDispConst * dm * ((1.0 / (f_lo * f_lo)) - (1.0 / (f_hi * f_hi)));
 }
 
 SizeType ceil_to(SizeType v, SizeType m) { return ((v + m - 1) / m) * m; }
@@ -118,6 +118,11 @@ public:
         validate();
         configure();
     }
+    Impl(const Impl&)            = default;
+    Impl& operator=(const Impl&) = delete;
+    Impl(Impl&&)                 = delete;
+    Impl& operator=(Impl&&)      = delete;
+    ~Impl()                      = default;
 
     // --- getters ---
     const CohFDMTConfig& config() const noexcept { return m_cfg; }
@@ -378,7 +383,7 @@ private:
     std::vector<IndexType> m_shifts; // (ndm_coh, nchans)
     std::vector<SizeType> m_row_offsets;
     std::vector<float> m_taper;
-    std::unique_ptr<FDMTPlan> m_fdmt_plan;
+    std::optional<FDMTPlan> m_fdmt_plan;
 
     std::vector<float> tile_fine(const std::vector<float>& fine) const {
         std::vector<float> grid;
@@ -539,9 +544,8 @@ private:
 
         // Fine FDMT over the aligned window [D - Delta - margin,
         // D + nout + Delta).
-        m_fdmt_plan = std::make_unique<FDMTPlan>(m_f_min, m_f_max, m_nchans,
-                                                 fdmt_nsamps(), m_tsamp, delta,
-                                                 -delta, c.dt_step, "valid");
+        m_fdmt_plan.emplace(m_f_min, m_f_max, m_nchans, fdmt_nsamps(), m_tsamp,
+                            delta, -delta, c.dt_step, "valid");
         const auto dt_grid = m_fdmt_plan->get_dt_grid_final();
         m_row_offsets.resize(dt_grid.size());
         for (SizeType r = 0; r < dt_grid.size(); ++r) {
@@ -662,10 +666,10 @@ CohFDMTPlan::~CohFDMTPlan()                                 = default;
 CohFDMTPlan::CohFDMTPlan(CohFDMTPlan&&) noexcept            = default;
 CohFDMTPlan& CohFDMTPlan::operator=(CohFDMTPlan&&) noexcept = default;
 CohFDMTPlan::CohFDMTPlan(const CohFDMTPlan& other)
-    : m_impl(std::make_unique<Impl>(other.m_impl->config())) {}
+    : m_impl(std::make_unique<Impl>(*other.m_impl)) {}
 CohFDMTPlan& CohFDMTPlan::operator=(const CohFDMTPlan& other) {
     if (this != &other) {
-        m_impl = std::make_unique<Impl>(other.m_impl->config());
+        m_impl = std::make_unique<Impl>(*other.m_impl);
     }
     return *this;
 }

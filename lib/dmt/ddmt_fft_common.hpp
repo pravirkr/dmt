@@ -88,8 +88,7 @@ struct DelayModel {
         // DDMTPlan delay tables' convention (DDMTPlan::get_f_ref()).
         const double f_ref   = plan.get_f_ref();
         const double inv_ref = 1.0 / (f_ref * f_ref);
-        const double k       = static_cast<double>(kDispConst) /
-                               static_cast<double>(plan.get_tsamp());
+        const double k = kDispConst / static_cast<double>(plan.get_tsamp());
         rate.resize(nchans);
         for (SizeType c = 0; c < nchans; ++c) {
             const double f = f_min + (df * (static_cast<double>(c) + 0.5));

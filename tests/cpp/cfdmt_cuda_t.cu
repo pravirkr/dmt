@@ -44,7 +44,7 @@ std::vector<uint8_t> make_block(const CohFDMTConfig& cfg, SizeType n) {
                          (100.0 * static_cast<double>(plan.get_tsamp()));
     const utils::BasebandPulse pulse{
         .dm        = dm,
-        .t_arrival = t_ref - (static_cast<double>(kDispConst) * dm /
+        .t_arrival = t_ref - (kDispConst * dm /
                               (static_cast<double>(plan.get_f_ref()) *
                                static_cast<double>(plan.get_f_ref()))),
         .fluence   = 1.0E7};

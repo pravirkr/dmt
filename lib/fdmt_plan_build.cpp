@@ -42,8 +42,7 @@ std::vector<IndexType> subband_dt_grid(float f_start,
                                        IndexType dt_hi) {
     const double f0     = f_start;
     const double f1     = f_end;
-    const double per_dm = static_cast<double>(kDispConst) *
-                          ((1.0 / (f0 * f0)) - (1.0 / (f1 * f1))) /
+    const double per_dm = kDispConst * ((1.0 / (f0 * f0)) - (1.0 / (f1 * f1))) /
                           static_cast<double>(tsamp);
     DMGridConfig c;
     c.f_min        = f0;
@@ -612,7 +611,7 @@ void FDMTPlan::Impl::make_level0_boxes() {
     // chan_dm only, not on the delay grid.
     const auto& grids0 = m_container.grids[0];
     // k = 1 / 2.41e-4 (kDispConst, in double).
-    const double k_ts = kDispConstD / static_cast<double>(m_tsamp);
+    const double k_ts = kDispConst / static_cast<double>(m_tsamp);
     std::vector<double> l_lo(m_nchans);
     std::vector<double> l_hi(m_nchans);
     IndexType lead = 0;

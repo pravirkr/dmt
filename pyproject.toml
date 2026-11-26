@@ -34,7 +34,7 @@ Issues = "https://github.com/pravirkr/dmt/issues"
 Changelog = "https://github.com/pravirkr/dmt/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-tests = ["pytest", "pytest-cov", "pytest-randomly", "pytest-sugar"]
+tests = ["pytest", "pytest-cov", "pytest-randomly", "pytest-sugar", "matplotlib"]
 docs = [
     "sphinx",
     "sphinx-book-theme",
@@ -96,6 +96,12 @@ environment = { DMT_CPU_ARCH = "x86-64-v3" }
 
 [tool.cibuildwheel.macos]
 environment = { DMT_ENABLE_NATIVE_ARCH = "OFF", DMT_USE_SYSTEM_DEPS = "OFF", DMT_GPU = "OFF" }
+
+# Intel macOS wheels: the same AVX2/FMA target as the Linux x86-64 wheels.
+[[tool.cibuildwheel.overrides]]
+select = "*-macosx_x86_64"
+inherit.environment = "append"
+environment = { DMT_CPU_ARCH = "x86-64-v3" }
 
 [tool.ruff]
 include = ["pyproject.toml", "src/**/*.py"]

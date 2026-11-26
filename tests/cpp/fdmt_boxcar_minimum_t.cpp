@@ -90,7 +90,14 @@ void check_monotone(const plans::FDMTPlan& plan,
         INFO("budget " << b);
         FDMTBoxcarMemoryEstimate e;
         REQUIRE_NOTHROW(e = estimate(plan, cfg, exec, b));
+        // max_memory_bytes bounds budgeted(), not total(): on a GPU, total()
+        // also counts host memory (plan copies, result storage) that the
+        // budget leaves out, so total() may exceed the budget there.
         CHECK(e.usage.budgeted() <= b);
+        CHECK(e.usage.total() == e.usage.budgeted() + e.usage.host);
+        if (exec.backend == Backend::kCPU) {
+            CHECK(e.usage.host == 0);
+        }
         usages.insert(e.usage.budgeted());
     }
     REQUIRE(usages.size() > 1);

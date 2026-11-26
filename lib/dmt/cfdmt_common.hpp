@@ -64,8 +64,8 @@ inline ChirpPhases make_chirp_phases(const plans::CohFDMTPlan& plan) {
             const double fp =
                 (static_cast<double>(b) - (static_cast<double>(mbin) / 2.0)) *
                 bw_bin;
-            const double phi = -1.0E6 * static_cast<double>(kDispConst) * fp *
-                               fp / (f_c * f_c * (f_c + fp));
+            const double phi =
+                -1.0E6 * kDispConst * fp * fp / (f_c * f_c * (f_c + fp));
             ph.base[(c * mbin) + b] = fixed_turns(phi * d0);
             ph.inc[(c * mbin) + b]  = fixed_turns(phi * step);
         }

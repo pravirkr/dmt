@@ -2,12 +2,12 @@
 message(STATUS "Searching for required system dependencies...")
 find_package(FFTW REQUIRED COMPONENTS FLOAT_LIB)
 
-# fmt — keep version in sync with spdlog's expected fmt release.
+# fmt (header-only, build-only: never installed or exported).
 CPMAddPackage(
   NAME fmt
   VERSION 12.1.0
   URL https://github.com/fmtlib/fmt/archive/refs/tags/12.1.0.tar.gz
-  OPTIONS "FMT_INSTALL ON" "FMT_HEADER_ONLY ON"
+  OPTIONS "FMT_INSTALL OFF" "FMT_HEADER_ONLY ON"
   EXCLUDE_FROM_ALL YES
   SYSTEM YES
 )
@@ -16,16 +16,6 @@ CPMAddPackage(
 # target (library, tests, bindings, benchmarks) links DMT_COMPILE_OPTIONS, which
 # is build-only, so installed consumers never see fmt.
 target_link_libraries(${DMT_COMPILE_OPTIONS} INTERFACE fmt::fmt-header-only)
-
-# spdlog — use the fmt package above (header-only external fmt).
-CPMAddPackage(
-  NAME spdlog
-  VERSION 1.17.0
-  URL https://github.com/gabime/spdlog/archive/refs/tags/v1.17.0.tar.gz
-  OPTIONS "SPDLOG_INSTALL ON" "SPDLOG_FMT_EXTERNAL_HO ON" "SPDLOG_BUILD_SHARED OFF"
-  EXCLUDE_FROM_ALL YES
-  SYSTEM YES
-)
 
 # Collect source files: backend-neutral facades and plans in lib/, one
 # directory per backend (lib/cpu always; lib/cuda for the GPU toolchain).
@@ -107,25 +97,23 @@ endif()
 
 # Header-only internal deps (not part of the installed export set, so even a
 # static dmt does not ask consumers for these targets).
-target_link_libraries(
-  ${DMT_LIBRARY_NAME} PRIVATE $<BUILD_INTERFACE:${DMT_COMPILE_OPTIONS}>
-                              $<BUILD_INTERFACE:spdlog::spdlog_header_only>
-)
+target_link_libraries(${DMT_LIBRARY_NAME} PRIVATE $<BUILD_INTERFACE:${DMT_COMPILE_OPTIONS}>)
 
-# FFTW: shared dmt links privately; static dmt exposes FFTW to downstream linkers.
-if(BUILD_SHARED_LIBS)
-  target_link_libraries(${DMT_LIBRARY_NAME} PRIVATE FFTW::Float)
-else()
-  target_link_libraries(${DMT_LIBRARY_NAME} PUBLIC FFTW::Float)
-endif()
+# FFTW: private (no public header includes <fftw3.h>). A static dmt still
+# carries it onto the consumer's link line as $<LINK_ONLY:FFTW::Float>, which
+# dmtConfig.cmake resolves with find_dependency(FFTW).
+target_link_libraries(${DMT_LIBRARY_NAME} PRIVATE FFTW::Float)
 
 # OpenMP stays private: public headers do not include <omp.h> or pragmas.
 # A static lib still propagates the runtime onto the final link line.
 target_link_libraries(${DMT_LIBRARY_NAME} PRIVATE OpenMP::OpenMP_CXX)
 
 # GPU options and libraries (DMT_GPU_LIBRARIES, see cmake/dmtGPU.cmake).
-# Private: a static dmt still carries them onto the consumer's link line (as
-# $<LINK_ONLY:...>).
+# Private: a static dmt still carries the libraries onto the consumer's link
+# line (as $<LINK_ONLY:...>). The options are compile flags of dmt's own GPU
+# sources, so they stay out of the export set.
 if(DMT_GPU_BACKEND)
-  target_link_libraries(${DMT_LIBRARY_NAME} PRIVATE ${DMT_GPU_OPTIONS} ${DMT_GPU_LIBRARIES})
+  target_link_libraries(
+    ${DMT_LIBRARY_NAME} PRIVATE $<BUILD_INTERFACE:${DMT_GPU_OPTIONS}> ${DMT_GPU_LIBRARIES}
+  )
 endif()

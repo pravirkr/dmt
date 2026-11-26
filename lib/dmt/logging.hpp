@@ -9,8 +9,8 @@
 
 // Internal logging front end: construction-time debug messages only.
 // Formatting uses fmt::format and happens only when debug logging is on;
-// spdlog is confined to lib/logging.cpp, so no other translation unit (and
-// nothing downstream) sees it.
+// lib/logging.cpp writes each message as one "[dmt] [debug] ..." line to
+// stderr under a mutex.
 
 namespace dmt::logging {
 

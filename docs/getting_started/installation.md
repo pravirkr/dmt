@@ -233,7 +233,7 @@ With CPM: `CPMAddPackage("gh:pravirkr/dmt#main")`. With a vendored copy:
 
 | CMake option | Default | Description |
 | :--- | :--- | :--- |
-| `DMT_BUILD_PYTHON` | `ON` (top level), `OFF` (subproject) | Build Python bindings via pybind11 |
+| `DMT_BUILD_PYTHON` | `ON` under `pip install` (scikit-build-core), else `OFF` | Build Python bindings via pybind11 (the presets that need them set it) |
 | `DMT_BUILD_TESTING` | `ON` (top level), `OFF` (subproject) | Build the Catch2 C++ unit tests |
 | `DMT_BUILD_BENCHMARKS` | `OFF` | Build the Google Benchmark suites (`dmt_bench`) |
 | `DMT_BUILD_DOCS` | `OFF` | Configure Doxygen and Sphinx documentation targets |
@@ -244,7 +244,7 @@ With CPM: `CPMAddPackage("gh:pravirkr/dmt#main")`. With a vendored copy:
 | `DMT_ENABLE_NATIVE_ARCH`| `ON` | `-march=native` in Release builds. Turn `OFF` for binaries or wheels that must run on other CPUs |
 | `DMT_CPU_ARCH` | (empty) | Fixed Release `-march` value that overrides native, e.g. `x86-64-v3` (AVX2), `x86-64-v4` (AVX-512) |
 | `DMT_ENABLE_IPO` | `OFF` | Link-time optimization in Release builds |
-| `DMT_USE_SYSTEM_DEPS` | `OFF` | Prefer compatible system packages over the pinned bundled dependencies (fmt, spdlog) |
+| `DMT_USE_SYSTEM_DEPS` | `OFF` | Prefer compatible system packages over the pinned bundled dependencies (fmt) |
 | `DMT_ENABLE_COVERAGE` | `OFF` | Coverage instrumentation |
 | `BUILD_SHARED_LIBS` | `OFF` | Build shared library (`ON`) or static library (`OFF`) |
 

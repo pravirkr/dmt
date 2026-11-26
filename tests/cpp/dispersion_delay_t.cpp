@@ -28,7 +28,7 @@ TEST_CASE("dispersion_delay matches dmtlib.dispersion_delay", "[types]") {
     // The library constant, and the sign: a lower f_hi than f_lo gives a
     // negative delay (f_lo arrives first).
     CHECK(dmt::dispersion_delay(1.0, 1.0, kInf) ==
-          Catch::Approx(static_cast<double>(dmt::kDispConst)).epsilon(1e-7));
+          Catch::Approx(dmt::kDispConst).epsilon(1e-7));
     CHECK(dmt::dispersion_delay(10.0, 1600.0, 1200.0) ==
           Catch::Approx(-dmt::dispersion_delay(10.0, 1200.0, 1600.0))
               .epsilon(1e-15));

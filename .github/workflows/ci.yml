@@ -290,7 +290,7 @@ jobs:
         run: cmake --build build-ci-tidy --target dmt_git_info
 
       # Only dmt's own library and binding sources. The compile database also
-      # lists the CPM-built fmt/spdlog sources (8 of ~64 TUs), and the Catch2
+      # lists CPM-built dependency sources, and the Catch2
       # test files mostly produce macro noise (bugprone-chained-comparison
       # from CHECK(a < b)); together they pushed the job past its timeout.
       - name: Run clang-tidy

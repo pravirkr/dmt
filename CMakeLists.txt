@@ -30,14 +30,22 @@ endif()
 
 # Configuration options
 option(DMT_BUILD_DOCS "Build documentation" OFF)
-# Python bindings and tests default to ON only when dmt is the top-level
-# project, not when it is pulled in via add_subdirectory/FetchContent/CPM.
+# Tests default to ON only when dmt is the top-level project, not when it is
+# pulled in via add_subdirectory/FetchContent/CPM. Python bindings default to
+# ON only under scikit-build-core (pip install), so a plain C++ configure
+# needs neither Python nor pybind11.
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
   set(DMT_IS_TOP_LEVEL ON)
 else()
   set(DMT_IS_TOP_LEVEL OFF)
 endif()
-option(DMT_BUILD_PYTHON "Build Python bindings" ${DMT_IS_TOP_LEVEL})
+if(DEFINED SKBUILD)
+  set(_dmt_python_default ON)
+else()
+  set(_dmt_python_default OFF)
+endif()
+option(DMT_BUILD_PYTHON "Build Python bindings" ${_dmt_python_default})
+unset(_dmt_python_default)
 option(DMT_BUILD_TESTING "Build C++ tests" ${DMT_IS_TOP_LEVEL})
 option(DMT_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(DMT_ENABLE_COVERAGE "Enable coverage reporting" OFF)
@@ -257,10 +265,6 @@ install(
   INCLUDES
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
-
-if(DMT_GPU_OPTIONS)
-  install(TARGETS ${DMT_GPU_OPTIONS} EXPORT dmtTargets)
-endif()
 
 # Install headers
 install(DIRECTORY ${PROJECT_SOURCE_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})

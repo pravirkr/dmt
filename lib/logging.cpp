@@ -1,10 +1,9 @@
 #include "dmt/logging.hpp"
 
 #include <atomic>
-#include <memory>
-
-#include <spdlog/logger.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
+#include <cstdio>
+#include <mutex>
+#include <string_view>
 
 namespace dmt {
 
@@ -15,16 +14,11 @@ std::atomic<LogLevel>& level_ref() noexcept {
     return level;
 }
 
-spdlog::logger& logger() {
-    static const auto kLogger = [] {
-        auto sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
-        auto log  = std::make_shared<spdlog::logger>("dmt", std::move(sink));
-        log->set_pattern("[dmt] [%l] %v");
-        // Filtering happens in logging::enabled(); the sink emits the rest.
-        log->set_level(spdlog::level::trace);
-        return log;
-    }();
-    return *kLogger;
+// One lock for every message, so lines from concurrent constructions do not
+// interleave.
+std::mutex& stderr_mutex() noexcept {
+    static std::mutex mutex;
+    return mutex;
 }
 
 } // namespace
@@ -43,7 +37,11 @@ bool enabled() noexcept { return get_log_level() == LogLevel::kDebug; }
 
 void emit(std::string_view message) noexcept {
     try {
-        logger().debug("{}", message);
+        const std::scoped_lock lock(stderr_mutex());
+        std::fputs("[dmt] [debug] ", stderr);
+        std::fwrite(message.data(), 1, message.size(), stderr);
+        std::fputc('\n', stderr);
+        std::fflush(stderr);
     } catch (...) { // NOLINT(bugprone-empty-catch): logging must not throw
     }
 }

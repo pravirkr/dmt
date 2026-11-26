@@ -18,8 +18,9 @@ float cff(float f_start, float f_end, float f_min, float f_max) {
 }
 
 float get_dmconv(float f_min, float f_max, float tsamp) {
-    const float dm_conv = kDispConst * (std::pow(f_min, kDispCoeff) -
-                                        std::pow(f_max, kDispCoeff));
+    const auto dm_conv =
+        static_cast<float>(kDispConst * (std::pow(f_min, kDispCoeff) -
+                                         std::pow(f_max, kDispCoeff)));
     return tsamp / dm_conv;
 }
 
@@ -90,7 +91,7 @@ delay_rate(SizeType c, float f_min, float df, float tsamp, double f_ref) {
     const double f = static_cast<double>(f_min) +
                      (static_cast<double>(df) * (static_cast<double>(c) + 0.5));
     const double inv_ref = 1.0 / (f_ref * f_ref);
-    return static_cast<double>(kDispConst) / static_cast<double>(tsamp) *
+    return kDispConst / static_cast<double>(tsamp) *
            ((1.0 / (f * f)) - inv_ref);
 }
 
