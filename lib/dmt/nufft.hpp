@@ -48,6 +48,11 @@ public:
     [[nodiscard]] SizeType fine_grid() const noexcept;
     [[nodiscard]] int width() const noexcept;
 
+    /// @brief fine_grid() and width() of a plan of these arguments, without
+    /// building it (no tables, no FFT plan); tol as the constructor checks.
+    [[nodiscard]] static SizeType fine_grid_for(SizeType modes, double tol);
+    [[nodiscard]] static int width_for(double tol);
+
     /// @brief Mode offset of the centred transform: f(d) is computed as the
     /// centred mode m = d - half().
     [[nodiscard]] SizeType half() const noexcept;

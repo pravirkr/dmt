@@ -364,6 +364,7 @@ public:
             throw std::logic_error(
                 "CohFDMT (cuda): allocated memory differs from the plan");
         }
+        configure_fused_launch();
         create_streams();
     }
 
@@ -502,6 +503,7 @@ private:
     FusedKernel m_fused{nullptr};
     uint64_t m_fused_ctas{0};
     uint64_t m_fused_smem{0};
+    int m_log2n{0}; ///< log2(mbin) of the fused kernel
     std::unique_ptr<utils::CUFFTManager> m_inv; // cuFFT path
     SizeType m_nwin{};
     SizeType m_chunk{};
@@ -612,6 +614,7 @@ private:
         }
         m_out.reserve(m_plan.get_dmt_size());
         if (!cfg.defer_allocation) {
+            configure_fused_launch();
             create_streams();
         }
     }
@@ -637,14 +640,14 @@ private:
         const bool shape = log2n >= cfdmt_gpu::kFusedMinLog2 &&
                            log2n <= cfdmt_gpu::kFusedMaxLog2;
         // Feasibility, not tuning: the kernel's shared memory must fit the
-        // device's opt-in limit (4096 bins need ~66 KiB).
-        int optin = 0;
-        gpu_utils::check_gpu_call(
-            cudaDeviceGetAttribute(
-                &optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, m_device_id),
-            "CohFDMT: device attribute query failed");
-        const bool fits = shape && cfdmt_gpu::fused_smem_bytes(log2n) <=
-                                       static_cast<uint64_t>(optin);
+        // device's per-block limit (4096 bins need ~66 KiB). A read-only
+        // query: the opt-in itself waits for allocation.
+        const auto limit =
+            shape ? gpu_utils::dynamic_smem_limit(
+                        fused_kernel_for<cfdmt_gpu::kFusedMinLog2>(log2n),
+                        m_device_id, "CohFDMT: device attribute query failed")
+                  : std::size_t{0};
+        const bool fits = shape && cfdmt_gpu::fused_smem_bytes(log2n) <= limit;
         if (path == CohFDMTCoherentPath::kCuFFT ||
             (path == CohFDMTCoherentPath::kAuto && !fits)) {
             return false;
@@ -653,16 +656,12 @@ private:
             throw std::invalid_argument(fmt::format(
                 "CohFDMT (gpu): the fused coherent kernel needs a "
                 "power-of-two channel FFT of 16-4096 bins fitting in the "
-                "device's shared memory ({} bytes opt-in); mbin={}",
-                optin, mbin));
+                "device's shared memory ({} bytes per block); mbin={}",
+                limit, mbin));
         }
         m_fused      = fused_kernel_for<cfdmt_gpu::kFusedMinLog2>(log2n);
         m_fused_smem = cfdmt_gpu::fused_smem_bytes(log2n);
-        gpu_utils::check_gpu_call(
-            cudaFuncSetAttribute(reinterpret_cast<const void*>(m_fused),
-                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 static_cast<int>(m_fused_smem)),
-            "CohFDMT: fused kernel shared-memory opt-in failed");
+        m_log2n      = log2n;
 
         std::vector<ComplexTypeGPU> tw(mbin / 2);
         for (SizeType k = 0; k < mbin / 2; ++k) {
@@ -672,7 +671,19 @@ private:
                                 static_cast<float>(std::sin(ang))};
         }
         m_twiddle.upload(tw);
+        return true;
+    }
 
+    // The fused kernel's shared-memory opt-in, then its launch shape from the
+    // occupancy it then has. Kernel attributes are process state, so this
+    // runs when the engine allocates, never in an estimate.
+    void configure_fused_launch() {
+        if (m_fused == nullptr) {
+            return;
+        }
+        gpu_utils::raise_dynamic_smem(
+            m_fused, m_fused_smem,
+            "CohFDMT: fused kernel shared-memory opt-in failed");
         // FFT blocks per thread block: aim for several waves of thread
         // blocks over the device, in whole rounds.
         int nsm      = 0;
@@ -687,7 +698,7 @@ private:
                                       static_cast<SizeType>(m_fused_smem)),
                                   "CohFDMT: occupancy query failed");
         const auto round =
-            static_cast<uint64_t>(cfdmt_gpu::fused_round_blocks(log2n));
+            static_cast<uint64_t>(cfdmt_gpu::fused_round_blocks(m_log2n));
         const uint64_t target =
             4 * static_cast<uint64_t>(std::max(1, nsm * resident));
         const uint64_t tasks = m_plan.get_nchans() * m_nwin;
@@ -697,7 +708,6 @@ private:
         m_fused_args.blocks_per_cta = per;
         m_fused_args.ngroups        = (m_nwin + per - 1) / per;
         m_fused_ctas = m_plan.get_nchans() * m_fused_args.ngroups;
-        return true;
     }
 
     void init_cufft_path(SizeType work_bytes) {

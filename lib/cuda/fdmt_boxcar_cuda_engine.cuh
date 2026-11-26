@@ -3,6 +3,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -1050,27 +1051,52 @@ private:
         bool release_pending = false;
     };
 
+    // Checks that `kernel` can take `smem` bytes of dynamic shared memory
+    // (a read-only query) and queues its opt-in and carveout for
+    // allocate(): estimates and deferred constructions set no attributes.
     template <typename Kernel>
-    void configure_kernel(Kernel kernel, SizeType smem = 0) const {
-        gpu_utils::raise_dynamic_smem(kernel, smem != 0 ? smem : m_smem,
-                                      "FDMTBoxcar: shared-memory opt-in");
+    void configure_kernel(Kernel kernel, SizeType smem = 0) {
+        const SizeType bytes = smem != 0 ? smem : m_smem;
+        const auto limit     = gpu_utils::dynamic_smem_limit(
+            kernel, m_device, "FDMTBoxcar: shared memory limit");
+        if (bytes > limit) {
+            throw std::invalid_argument(fmt::format(
+                "FDMTBoxcar: the search kernel needs {} B of shared memory "
+                "per block; the device allows {} B",
+                bytes, limit));
+        }
+        m_kernel_setup.emplace_back([kernel, bytes] {
+            gpu_utils::raise_dynamic_smem(kernel, bytes,
+                                          "FDMTBoxcar: shared-memory opt-in");
 #if !defined(DMT_ENABLE_HIP)
-        // Several resident rows per SM need the shared-memory carveout.
-        gpu_utils::check_gpu_call(
-            cudaFuncSetAttribute(kernel,
-                                 cudaFuncAttributePreferredSharedMemoryCarveout,
-                                 cudaSharedmemCarveoutMaxShared),
-            "FDMTBoxcar: shared-memory carveout");
+            // Several resident rows per SM need the shared-memory carveout.
+            gpu_utils::check_gpu_call(
+                cudaFuncSetAttribute(
+                    kernel, cudaFuncAttributePreferredSharedMemoryCarveout,
+                    cudaSharedmemCarveoutMaxShared),
+                "FDMTBoxcar: shared-memory carveout");
 #endif
+        });
+        if (m_allocated) {
+            run_kernel_setup();
+        }
     }
 
+    // The queued kernel attributes (allocate() and non-deferred
+    // construction).
+    void run_kernel_setup() {
+        for (const auto& setup : m_kernel_setup) {
+            setup();
+        }
+        m_kernel_setup.clear();
+    }
+
+    // Shared memory per block of the device (opt-in, or the default limit
+    // where that is larger, as on HIP); kernels' own static shared memory
+    // is checked by configure_kernel().
     [[nodiscard]] SizeType shared_mem_limit() const {
-        int optin = 0;
-        gpu_utils::check_gpu_call(
-            cudaDeviceGetAttribute(
-                &optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, m_device),
-            "FDMTBoxcar: shared memory limit");
-        return static_cast<SizeType>(optin);
+        return gpu_utils::max_shared_mem_per_block(
+            m_device, "FDMTBoxcar: shared memory limit");
     }
 
     template <typename T, typename HeaderBytes>
@@ -1084,7 +1110,9 @@ private:
                 header_bytes(std::integral_constant<int, kBlockThreads>{}) +
                 (ring * sizeof(T));
             if (screen) {
-                bytes = ((bytes + 15) / 16 * 16) + (ring * sizeof(T));
+                // The width screen's range minimum (s_screen) holds floats
+                // for every input type.
+                bytes = ((bytes + 15) / 16 * 16) + (ring * sizeof(float));
             }
             return bytes;
         };
@@ -1137,7 +1165,7 @@ private:
         if (with_screen) {
             m_smem          = (m_smem + 15) / 16 * 16;
             m_screen_offset = m_smem;
-            m_smem += ring * sizeof(T);
+            m_smem += ring * sizeof(float); // s_screen: floats for every T
         }
         m_group_offset = 0;
         m_smem_noise   = m_smem;
@@ -1407,6 +1435,8 @@ private:
     /// destroyed first, after nothing else refers to it).
     gpu_utils::PendingList m_deferred;
     bool m_allocated = false;
+    /// Kernel attributes set by allocate() (configure_kernel()).
+    std::vector<std::function<void()>> m_kernel_setup;
 };
 
 } // namespace dmt::algorithms::detail::fdmt_boxcar_cuda

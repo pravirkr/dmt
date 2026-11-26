@@ -76,6 +76,16 @@ namespace dmt::kadane {
     return (bits & 0x7FF0000000000000ULL) != 0x7FF0000000000000ULL;
 }
 
+/// A float32 Kadane carry crossing a call (gulp) boundary. Finite input is
+/// the contract, but one NaN or infinity from a dropped packet would otherwise
+/// stay in the carry for the rest of the stream (+NaN orders above every
+/// float in vmax_nonneg_f32's int32 max, +Inf never decays), blinding the
+/// row's gate: such a carry restarts at 0, confining the glitch to its call.
+/// Finite carries pass unchanged (bit test, `-ffast-math` safe).
+[[nodiscard]] DMT_HD inline float sanitize_carry_f32(float c) noexcept {
+    return is_finite_monoid_f32(c) ? c : 0.0F;
+}
+
 /// Step a positive float32 down by 1 ULP via bit arithmetic (`-ffast-math`
 /// safe on host and device).
 [[nodiscard]] DMT_HD constexpr float

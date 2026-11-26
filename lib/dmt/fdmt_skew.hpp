@@ -23,6 +23,9 @@
 #if defined(__AVX__)
 #include "dmt/x86_intrinsics.hpp"
 #endif
+#if defined(__ARM_NEON) && defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 #include <array>
 
@@ -1732,6 +1735,125 @@ private:
                             carry = _mm512_permutexvar_pd(bcast, v);
                         }
                         acc = _mm512_cvtsd_f64(carry);
+                    }
+#elif defined(__AVX2__)
+                    // Same in-register scans at 8 (uint32_t) and 4 (double)
+                    // lanes: the integer prefix is exact (mod 2^32, as the
+                    // scalar loop), the double one differs from the serial
+                    // sum only in rounding order.
+                    if constexpr (std::is_same_v<AccT, uint32_t>) {
+                        const __m256i zero  = _mm256_setzero_si256();
+                        const __m256i lane3 = _mm256_set1_epi32(3);
+                        const __m256i lane7 = _mm256_set1_epi32(7);
+                        __m256i carry =
+                            _mm256_set1_epi32(static_cast<int32_t>(acc));
+                        for (; m + 8 <= run; m += 8) {
+                            __m256i v;
+                            if constexpr (std::is_same_v<RingT, uint8_t>) {
+                                v = _mm256_cvtepu8_epi32(_mm_loadl_epi64(
+                                    reinterpret_cast<const __m128i*>(xs + m)));
+                            } else if constexpr (std::is_same_v<RingT,
+                                                                uint16_t>) {
+                                v = _mm256_cvtepu16_epi32(_mm_loadu_si128(
+                                    reinterpret_cast<const __m128i*>(xs + m)));
+                            } else {
+                                v = _mm256_cvttps_epi32(
+                                    _mm256_loadu_ps(xs + m));
+                            }
+                            // Scan within each 128-bit half, then add the
+                            // low half's total to the high half.
+                            v = _mm256_add_epi32(v, _mm256_slli_si256(v, 4));
+                            v = _mm256_add_epi32(v, _mm256_slli_si256(v, 8));
+                            v = _mm256_add_epi32(
+                                v,
+                                _mm256_blend_epi32(
+                                    zero, _mm256_permutevar8x32_epi32(v, lane3),
+                                    0xF0));
+                            v = _mm256_add_epi32(v, carry);
+                            _mm256_storeu_si256(
+                                reinterpret_cast<__m256i*>(dst + m), v);
+                            carry = _mm256_permutevar8x32_epi32(v, lane7);
+                        }
+                        acc = static_cast<uint32_t>(
+                            _mm_cvtsi128_si32(_mm256_castsi256_si128(carry)));
+                    } else if constexpr (std::is_same_v<AccT, double> &&
+                                         std::is_same_v<RingT, float>) {
+                        const __m256d zero = _mm256_setzero_pd();
+                        __m256d carry      = _mm256_set1_pd(acc);
+                        for (; m + 4 <= run; m += 4) {
+                            __m256d v = _mm256_cvtps_pd(_mm_loadu_ps(xs + m));
+                            // [0, v0, v1, v2], then [0, 0, v0, v1].
+                            v = _mm256_add_pd(
+                                v,
+                                _mm256_blend_pd(zero,
+                                                _mm256_permute4x64_pd(
+                                                    v, _MM_SHUFFLE(2, 1, 0, 0)),
+                                                0xE));
+                            v = _mm256_add_pd(
+                                v,
+                                _mm256_blend_pd(zero,
+                                                _mm256_permute4x64_pd(
+                                                    v, _MM_SHUFFLE(1, 0, 0, 0)),
+                                                0xC));
+                            v = _mm256_add_pd(v, carry);
+                            _mm256_storeu_pd(dst + m, v);
+                            carry = _mm256_permute4x64_pd(
+                                v, _MM_SHUFFLE(3, 3, 3, 3));
+                        }
+                        acc = _mm256_cvtsd_f64(carry);
+                    }
+#elif defined(__ARM_NEON) && defined(__aarch64__)
+                    // NEON: the same scans at 4 (uint32_t) and 2 (double)
+                    // lanes.
+                    if constexpr (std::is_same_v<AccT, uint32_t>) {
+                        const uint32x4_t zero = vdupq_n_u32(0);
+                        uint32x4_t carry      = vdupq_n_u32(acc);
+                        const auto scan4      = [&](uint32x4_t v) {
+                            v     = vaddq_u32(v, vextq_u32(zero, v, 3));
+                            v     = vaddq_u32(v, vextq_u32(zero, v, 2));
+                            v     = vaddq_u32(v, carry);
+                            carry = vdupq_laneq_u32(v, 3);
+                            return v;
+                        };
+                        for (; m + 8 <= run; m += 8) {
+                            uint32x4_t lo;
+                            uint32x4_t hi;
+                            if constexpr (std::is_same_v<RingT, uint8_t>) {
+                                const uint16x8_t h = vmovl_u8(vld1_u8(xs + m));
+                                lo                 = vmovl_u16(vget_low_u16(h));
+                                hi = vmovl_u16(vget_high_u16(h));
+                            } else if constexpr (std::is_same_v<RingT,
+                                                                uint16_t>) {
+                                const uint16x8_t h = vld1q_u16(xs + m);
+                                lo                 = vmovl_u16(vget_low_u16(h));
+                                hi = vmovl_u16(vget_high_u16(h));
+                            } else {
+                                lo = vreinterpretq_u32_s32(
+                                    vcvtq_s32_f32(vld1q_f32(xs + m)));
+                                hi = vreinterpretq_u32_s32(
+                                    vcvtq_s32_f32(vld1q_f32(xs + m + 4)));
+                            }
+                            vst1q_u32(dst + m, scan4(lo));
+                            vst1q_u32(dst + m + 4, scan4(hi));
+                        }
+                        acc = vgetq_lane_u32(carry, 0);
+                    } else if constexpr (std::is_same_v<AccT, double> &&
+                                         std::is_same_v<RingT, float>) {
+                        const float64x2_t zero = vdupq_n_f64(0.0);
+                        float64x2_t carry      = vdupq_n_f64(acc);
+                        const auto scan2       = [&](float64x2_t v) {
+                            v     = vaddq_f64(v, vextq_f64(zero, v, 1));
+                            v     = vaddq_f64(v, carry);
+                            carry = vdupq_laneq_f64(v, 1);
+                            return v;
+                        };
+                        for (; m + 4 <= run; m += 4) {
+                            const float32x4_t f = vld1q_f32(xs + m);
+                            vst1q_f64(dst + m,
+                                      scan2(vcvt_f64_f32(vget_low_f32(f))));
+                            vst1q_f64(dst + m + 2, scan2(vcvt_high_f64_f32(f)));
+                        }
+                        acc = vgetq_lane_f64(carry, 0);
                     }
 #endif
                     for (; m < run; ++m) {

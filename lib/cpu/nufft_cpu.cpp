@@ -132,26 +132,9 @@ public:
             throw std::invalid_argument(
                 fmt::format("NUFFT: tolerance {} outside [1e-7, 1e-2]", tol));
         }
-        // Width and shape for upsampling 2 (Barnett et al. 2019).
-        m_w = std::clamp(static_cast<int>(std::ceil(-std::log10(tol))) + 1, 2,
-                         kMaxWidth);
+        m_w    = Type1Plan::width_for(tol);
         m_beta = 2.30 * m_w;
-        // Fine grid: >= 2 M cells; among the FFT-friendly lengths up to 15%
-        // longer, the one FFTW expects to transform fastest.
-        const SizeType n_min =
-            std::max<SizeType>(2 * modes, 2 * static_cast<SizeType>(m_w));
-        m_nf        = utils::next_fft_size(n_min);
-        double best = std::numeric_limits<double>::max();
-        for (SizeType n = m_nf; n <= n_min + (n_min / 7);
-             n          = utils::next_fft_size(n + 1)) {
-            const double nd = static_cast<double>(n);
-            const double cost =
-                utils::r2c_cost_per_nlogn(n) * nd * std::log2(nd);
-            if (cost < best) {
-                best = cost;
-                m_nf = n;
-            }
-        }
+        m_nf   = Type1Plan::fine_grid_for(modes, tol);
         m_half = modes / 2;
         m_fft  = std::make_unique<utils::FFTWRowPlan>(
             utils::FFTKind::kC2CBackward, m_nf);
@@ -450,6 +433,31 @@ SizeType Type1Plan::memory_bytes() const noexcept {
 }
 SizeType Type1Plan::modes() const noexcept { return m_impl->m_modes; }
 SizeType Type1Plan::fine_grid() const noexcept { return m_impl->m_nf; }
+
+// Width and shape for upsampling 2 (Barnett et al. 2019).
+int Type1Plan::width_for(double tol) {
+    return std::clamp(static_cast<int>(std::ceil(-std::log10(tol))) + 1, 2,
+                      kMaxWidth);
+}
+
+// Fine grid: >= 2 M cells; among the FFT-friendly lengths up to 15% longer,
+// the one FFTW expects to transform fastest.
+SizeType Type1Plan::fine_grid_for(SizeType modes, double tol) {
+    const auto w         = static_cast<SizeType>(width_for(tol));
+    const SizeType n_min = std::max<SizeType>(2 * modes, 2 * w);
+    SizeType nf          = utils::next_fft_size(n_min);
+    double best          = std::numeric_limits<double>::max();
+    for (SizeType n = nf; n <= n_min + (n_min / 7);
+         n          = utils::next_fft_size(n + 1)) {
+        const double nd   = static_cast<double>(n);
+        const double cost = utils::r2c_cost_per_nlogn(n) * nd * std::log2(nd);
+        if (cost < best) {
+            best = cost;
+            nf   = n;
+        }
+    }
+    return nf;
+}
 int Type1Plan::width() const noexcept { return m_impl->m_w; }
 
 void Type1Plan::execute(std::span<const double> x,

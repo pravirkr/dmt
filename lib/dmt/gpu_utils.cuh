@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <mutex>
 #include <new>
@@ -179,6 +180,43 @@ raise_dynamic_smem(Kernel kernel,
                            static_cast<int>(bytes)),
                        msg, loc);
     }
+}
+
+/// Shared memory one block may use on `device`: the opt-in limit, or the
+/// default per-block limit where that is larger (HIP reports an opt-in of
+/// 0: all of its 64 KiB LDS is available without opting in). A read-only
+/// query: safe in estimate_memory().
+inline std::size_t max_shared_mem_per_block(
+    int device,
+    std::string_view msg     = "",
+    std::source_location loc = std::source_location::current()) {
+    int optin = 0;
+    int base  = 0;
+    check_gpu_call(cudaDeviceGetAttribute(
+                       &optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, device),
+                   msg, loc);
+    check_gpu_call(cudaDeviceGetAttribute(
+                       &base, cudaDevAttrMaxSharedMemoryPerBlock, device),
+                   msg, loc);
+    return static_cast<std::size_t>(std::max({optin, base, 0}));
+}
+
+/// Dynamic shared memory `kernel` may request per block on `device`:
+/// max_shared_mem_per_block() less the kernel's static __shared__ bytes. A
+/// read-only query (no attribute is set), so engines size their kernels
+/// with it at construction and in estimate_memory(); raise_dynamic_smem()
+/// then opts the kernel in from allocate() only.
+template <typename Kernel>
+inline std::size_t
+dynamic_smem_limit(Kernel kernel,
+                   int device,
+                   std::string_view msg     = "",
+                   std::source_location loc = std::source_location::current()) {
+    cudaFuncAttributes attr{};
+    check_gpu_call(cudaFuncGetAttributes(&attr, kernel), msg, loc);
+    const auto limit = max_shared_mem_per_block(device, msg, loc);
+    const auto fixed = static_cast<std::size_t>(attr.sharedSizeBytes);
+    return limit > fixed ? limit - fixed : 0;
 }
 
 inline void check_last_gpu_error(

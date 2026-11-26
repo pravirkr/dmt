@@ -17,7 +17,7 @@
 #endif
 
 #if defined(__AVX512F__) || defined(__AVX__)
-#include <immintrin.h>
+#include "dmt/x86_intrinsics.hpp"
 #endif
 
 #include "dmt/common/types.hpp"
@@ -160,6 +160,39 @@ inline void fdmt_stream_add(const StateT* __restrict__ a,
             }
             for (; i < m; ++i) {
                 out[i] = a[i] + b[i];
+            }
+            return;
+        }
+#elif defined(__AVX2__)
+        if constexpr (std::is_same_v<StateT, uint32_t>) {
+            constexpr SizeType kLanes       = 8;
+            constexpr std::uintptr_t kAlign = kLanes * sizeof(uint32_t);
+            SizeType i                      = 0;
+            for (; i < m &&
+                   (reinterpret_cast<std::uintptr_t>(out + i) % kAlign) != 0;
+                 ++i) {
+                out[i] = a[i] + b[i];
+            }
+            for (; i + kLanes <= m; i += kLanes) {
+                _mm256_stream_si256(
+                    reinterpret_cast<__m256i*>(out + i),
+                    _mm256_add_epi32(
+                        _mm256_loadu_si256(
+                            reinterpret_cast<const __m256i*>(a + i)),
+                        _mm256_loadu_si256(
+                            reinterpret_cast<const __m256i*>(b + i))));
+            }
+            for (; i < m; ++i) {
+                out[i] = a[i] + b[i];
+            }
+            return;
+        }
+#elif defined(__clang__) && __has_builtin(__builtin_nontemporal_store)
+        // ARM64 and other non-x86 targets: Clang's non-temporal stores (as
+        // the float path above).
+        if constexpr (std::is_same_v<StateT, uint32_t>) {
+            for (SizeType i = 0; i < m; ++i) {
+                __builtin_nontemporal_store(a[i] + b[i], out + i);
             }
             return;
         }

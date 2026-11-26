@@ -9,12 +9,18 @@
 #include <utility>
 #include <vector>
 
+#include "fdmt_boxcar_nan_cases.hpp"
 #include "fdmt_boxcar_reference.hpp"
 #include "test_helpers.hpp"
 #include "test_random.hpp"
 #include "test_sized.hpp"
 
 using namespace boxcar_test;
+
+TEST_CASE("FDMTBoxcar Kadane screen recovers after a NaN block (CPU)",
+          "[boxcar][cpu]") {
+    test::check_nan_block_does_not_blind(Exec::cpu());
+}
 
 TEST_CASE("Boxcar width generation and validation", "[boxcar][cpu]") {
     // Geometric widths, then max_width itself when the steps stop below it.

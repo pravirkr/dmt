@@ -270,6 +270,11 @@ if(DMT_GPU_BACKEND STREQUAL "HIP")
 
   set(DMT_GPU_OPTIONS ${PROJECT_NAME}_gpu_options)
   add_library(${DMT_GPU_OPTIONS} INTERFACE)
+  # gpu_compat.cuh takes cuda::std from libhipcxx only when it was found
+  # here (a CUDA toolkit's CCCL headers may also be visible to hip-clang).
+  if(libhipcxx_FOUND)
+    target_compile_definitions(${DMT_GPU_OPTIONS} INTERFACE DMT_HAVE_LIBHIPCXX)
+  endif()
   set(DMT_GPU_CONFIG_FLAGS_DEBUG -O0 -g)
   set(DMT_GPU_CONFIG_FLAGS_RELEASE -O3 -ffast-math -DNDEBUG)
   set(DMT_GPU_CONFIG_FLAGS_RELWITHDEBINFO -O2 -g -ffast-math -DNDEBUG)
