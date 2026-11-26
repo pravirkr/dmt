@@ -1397,3 +1397,33 @@ def test_add_frb_track_and_dt_grid_input_validation() -> None:
         libdmt.FDMTPlan(
             700.0, 1200.0, 8, 64, 0.001, dt_grid=np.array([0.5, 1.5], dtype=np.float32)
         )
+
+
+@pytest.mark.parametrize("nbits", [None, 8])
+def test_execute_tail_matches_one_pass(nbits: int | None) -> None:
+    """Whole blocks then a short tail give the single pass's samples."""
+    nchans, nsamps, tail, nblocks = 16, 64, 23, 3
+    total = nblocks * nsamps + tail
+    rng = np.random.default_rng(5)
+    values = rng.integers(0, 256, (nchans, total)).astype(np.uint8)
+    data = values if nbits else values.astype(np.float32)
+    kw = {"nbits": nbits} if nbits else {}
+    whole = libdmt.FDMT(1200.0, 1600.0, nchans, total, 0.001, 24)
+    want = whole.execute(data, **kw)
+    stream = libdmt.FDMT(1200.0, 1600.0, nchans, nsamps, 0.001, 24)
+    parts = [
+        stream.execute(
+            np.ascontiguousarray(data[:, k * nsamps : (k + 1) * nsamps]), **kw
+        )
+        for k in range(nblocks)
+    ]
+    block = np.full((nchans, nsamps), 255, dtype=data.dtype)  # padding
+    block[:, :tail] = data[:, nblocks * nsamps :]
+    last = stream.execute_tail(block, tail, **kw)
+    got = np.concatenate([*parts, last[:, :tail]], axis=1)
+    np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-3)
+    with pytest.raises(RuntimeError, match="execute_tail"):
+        stream.execute(block, **kw)
+    stream.reset_history()
+    with pytest.raises(ValueError, match="n_tail"):
+        stream.execute_tail(block, 0, **kw)

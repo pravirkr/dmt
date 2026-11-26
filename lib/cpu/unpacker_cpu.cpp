@@ -1,6 +1,7 @@
 #include "dmt/unpacker.hpp"
 
 #include <algorithm>
+#include <complex>
 #include <stdexcept>
 #include <vector>
 
@@ -88,11 +89,29 @@ public:
                       SizeType ifft,
                       ComplexType* pol0,
                       ComplexType* pol1) const noexcept {
-        const SizeType g    = m_sub_group[isub];
+        // isub counts up in frequency; m is its place in the input's order.
+        const SizeType m    = m_format.descending ? m_nsub - 1 - isub : isub;
+        const SizeType g    = m_sub_group[m];
         const auto& st      = m_strides[g];
         const uint8_t* data = groups[g].data();
         const SizeType base =
-            ((isub - m_group_offset[g]) * st.freq) + (ifft * m_step * st.time);
+            ((m - m_group_offset[g]) * st.freq) + (ifft * m_step * st.time);
+        decode_block(data, base, st, pol0, pol1);
+        if (m_format.lower_sideband) {
+            // Lower sideband: conjugating the voltages turns the spectrum
+            // back to upper sideband (exact: a sign flip).
+            for (SizeType i = 0; i < m_nbin; ++i) {
+                pol0[i] = std::conj(pol0[i]);
+                pol1[i] = std::conj(pol1[i]);
+            }
+        }
+    }
+
+    void decode_block(const uint8_t* data,
+                      SizeType base,
+                      const BasebandStrides& st,
+                      ComplexType* pol0,
+                      ComplexType* pol1) const noexcept {
         const bool interleaved = st.ri == 1 && st.pol == 2 && st.time == 4;
         if (m_format.nbits == 8) {
             if (interleaved) {

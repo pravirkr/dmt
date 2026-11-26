@@ -512,6 +512,43 @@ public:
                  DeviceSpan<float> d_dmt,
                  Stream stream = {});
 
+    /**
+     * @brief The stream's last, short block (mode "valid"): only the first
+     * @p n_tail samples of each channel are data.
+     *
+     * Takes a whole block, laid out as for execute() (float or packed, host
+     * or device memory; the same overloads); its samples from @p n_tail on
+     * are padding (e.g. zeros left in the caller's block buffer). The
+     * transform is causal in its f_min reference, so the first @p n_tail
+     * output samples of every row do not depend on the padding; the later
+     * ones do and are not meaningful. This ends the stream: execute(),
+     * execute_tail() and reset() then throw std::logic_error until
+     * reset_history() or load_history() (the history now holds padding).
+     *
+     * @throws std::invalid_argument outside mode "valid", or unless
+     * 1 <= n_tail <= nsamps; otherwise as execute().
+     */
+    void execute_tail(std::span<const float> waterfall,
+                      SizeType n_tail,
+                      std::span<float> dmt);
+    /// @brief Packed analogue of execute_tail().
+    void execute_tail(std::span<const uint8_t> waterfall_packed,
+                      SizeType nbits,
+                      SizeType n_tail,
+                      std::span<float> dmt);
+    /// @brief Device-memory execute_tail() (GPU backends; asynchronous on
+    /// @p stream).
+    void execute_tail(DeviceSpan<const float> d_waterfall,
+                      SizeType n_tail,
+                      DeviceSpan<float> d_dmt,
+                      Stream stream = {});
+    /// @brief Packed device-memory execute_tail().
+    void execute_tail(DeviceSpan<const uint8_t> d_waterfall_packed,
+                      SizeType nbits,
+                      SizeType n_tail,
+                      DeviceSpan<float> d_dmt,
+                      Stream stream = {});
+
     template <typename Alloc1 = std::allocator<float>,
               typename Alloc2 = std::allocator<float>>
     void execute(const std::vector<float, Alloc1>& waterfall,

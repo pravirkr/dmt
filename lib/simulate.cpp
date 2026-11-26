@@ -212,17 +212,21 @@ std::vector<uint8_t> pack_baseband(std::span<const ComplexType> voltages,
         return format.is_signed ? static_cast<unsigned>(vi) & mask
                                 : static_cast<unsigned>(vi + half);
     };
+    // Lower sideband: the conjugate voltages; descending: subband s of the
+    // input's order is ascending subband nsub - 1 - s.
+    const float im_sign = format.lower_sideband ? -1.0F : 1.0F;
     for (SizeType p = 0; p < 2; ++p) {
         for (SizeType s = 0; s < sub_count; ++s) {
-            const ComplexType* x = voltages.data() +
-                                   (((p * nsub) + sub_begin + s) * nsamps) +
-                                   t_begin;
+            const SizeType sub =
+                format.descending ? nsub - 1 - (sub_begin + s) : sub_begin + s;
+            const ComplexType* x =
+                voltages.data() + (((p * nsub) + sub) * nsamps) + t_begin;
             for (SizeType t = 0; t < t_count; ++t) {
                 const SizeType e = (p * st.pol) + (s * st.freq) + (t * st.time);
                 for (SizeType ri = 0; ri < 2; ++ri) {
                     const SizeType ei = e + (ri * st.ri);
                     const unsigned code =
-                        code_of(ri == 0 ? x[t].real() : x[t].imag());
+                        code_of(ri == 0 ? x[t].real() : im_sign * x[t].imag());
                     const auto k = static_cast<unsigned>(ei % per);
                     const unsigned shift =
                         format.msb_first ? 8U - (nbits * (k + 1U)) : nbits * k;

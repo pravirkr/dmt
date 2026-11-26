@@ -216,6 +216,11 @@ TEST_CASE("CohFDMT output is independent of layout, encoding and grouping",
     check_layout_independence(Exec::cpu());
 }
 
+TEST_CASE("CohFDMT reads descending and lower-sideband subbands",
+          "[cfdmt][cpu]") {
+    check_sideband_and_order(Exec::cpu());
+}
+
 TEST_CASE("CohFDMT 4-bit input and dt_step recover the pulse", "[cfdmt][cpu]") {
     check_4bit_dt_step(Exec::cpu());
 }

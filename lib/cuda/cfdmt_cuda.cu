@@ -742,28 +742,54 @@ private:
     void upload_plan(std::span<const std::span<const uint8_t>> h_groups,
                      std::vector<gpu_host::ChunkedStager::Segment>& segs,
                      std::vector<SizeType>& seg_chunk) const {
-        const auto& sizes = m_plan.get_subband_groups();
-        std::vector<bool> uploaded(sizes.size(), false);
+        const auto& sizes     = m_plan.get_subband_groups();
+        const auto nsub       = m_plan.get_nsub();
+        const bool descending = m_plan.get_format().descending;
+        // Per group, the subbands (in the input's order, group-local)
+        // already uploaded: [lo, hi). Chunks run up in frequency, which is
+        // down the input when it is descending, so a group fills from either
+        // end.
+        std::vector<std::pair<SizeType, SizeType>> done(sizes.size(), {0, 0});
+        const auto push = [&](SizeType g, SizeType lo, SizeType hi,
+                              SizeType ic) {
+            if (lo >= hi) {
+                return;
+            }
+            const auto [off, bytes] = group_bytes(lo, hi);
+            segs.push_back(
+                {m_raw[g].data() + off, h_groups[g].data() + off, bytes});
+            seg_chunk.push_back(ic);
+        };
         for (SizeType ic = 0; ic < m_chunks.size(); ++ic) {
             const auto& ch = m_chunks[ic];
-            SizeType g0    = 0;
+            // The chunk's subbands in the input's order.
+            const SizeType mlo = descending ? nsub - ch.sub_end : ch.sub_begin;
+            const SizeType mhi = descending ? nsub - ch.sub_begin : ch.sub_end;
+            SizeType g0        = 0;
             for (SizeType g = 0; g < sizes.size(); g0 += sizes[g], ++g) {
-                const SizeType lo = std::max(ch.sub_begin, g0);
-                const SizeType hi = std::min(ch.sub_end, g0 + sizes[g]);
-                if (lo >= hi || uploaded[g]) {
+                const SizeType lo = std::max(mlo, g0) - g0;
+                const SizeType hi = std::min(mhi, g0 + sizes[g]) - g0;
+                auto& [dlo, dhi]  = done[g];
+                if (std::max(mlo, g0) >= std::min(mhi, g0 + sizes[g]) ||
+                    (dlo == 0 && dhi == sizes[g])) {
                     continue;
                 }
-                SizeType off   = 0;
-                SizeType bytes = h_groups[g].size();
-                if (m_f_outer) {
-                    std::tie(off, bytes) = group_bytes(lo - g0, hi - g0);
-                    uploaded[g]          = hi == g0 + sizes[g];
-                } else {
-                    uploaded[g] = true; // whole group with its first chunk
+                if (!m_f_outer) {
+                    // The whole group with its first chunk.
+                    segs.push_back({m_raw[g].data(), h_groups[g].data(),
+                                    h_groups[g].size()});
+                    seg_chunk.push_back(ic);
+                    done[g] = {0, sizes[g]};
+                    continue;
                 }
-                segs.push_back(
-                    {m_raw[g].data() + off, h_groups[g].data() + off, bytes});
-                seg_chunk.push_back(ic);
+                if (dlo == dhi) {
+                    push(g, lo, hi, ic);
+                    done[g] = {lo, hi};
+                    continue;
+                }
+                push(g, lo, std::min(hi, dlo), ic); // below what is there
+                push(g, std::max(lo, dhi), hi, ic); // above it
+                done[g] = {std::min(lo, dlo), std::max(hi, dhi)};
             }
         }
     }

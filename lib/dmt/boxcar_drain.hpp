@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <span>
 #include <stdexcept>
@@ -167,10 +168,14 @@ drain_stream(FDMTBoxcarEngine& engine,
              const BoxcarConfig& config,
              std::span<const plans::BoxcarPlanePlan> planes,
              uint64_t latency,
-             DrainState& state) {
+             DrainState& state,
+             uint64_t n_tail                                  = 0,
+             const std::function<CandidateResultView()>& tail = {}) {
     const SizeType nbits = config.input_nbits;
     state.check_open("drain");
-    const uint64_t end = engine.stream_position();
+    // A short last block (`tail`, a whole block of which the first n_tail
+    // samples are data) moves the end n_tail samples on.
+    const uint64_t end = engine.stream_position() + (tail ? n_tail : 0);
     state.candidates.clear();
     state.plane_counts.clear();
     CandidateCounts counts{};
@@ -190,9 +195,16 @@ drain_stream(FDMTBoxcarEngine& engine,
         }
     };
     engine.set_search_stop(end);
+    if (tail) {
+        append(tail());
+    }
     if (end > 0 && latency > 0) {
+        // Rows have searched up to the stream position less the latency.
         const SizeType nsamps = plan.get_nsamps();
-        const uint64_t blocks = (latency + nsamps - 1) / nsamps;
+        const uint64_t need   = end + latency;
+        const uint64_t pos    = engine.stream_position();
+        const uint64_t blocks =
+            need > pos ? (need - pos + nsamps - 1) / nsamps : 0;
         if (engine.zero_blocks()) {
             // No input block is read, staged or allocated.
             for (uint64_t b = 0; b < blocks; ++b) {

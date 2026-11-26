@@ -317,11 +317,14 @@ public:
             m_f_min, m_f_max, m_cfg.nsub, m_cfg.bw_sub, m_groups.size(),
             m_tbin);
         out += fmt::format(
-            "Input: {} order, {}-bit {}, {:.1f} MiB per block\n",
+            "Input: {} order, {}-bit {}, {} subbands, {} sideband, {:.1f} MiB "
+            "per block\n",
             m_cfg.format.order, m_cfg.format.nbits,
             m_cfg.format.nbits == 2
                 ? "levels"
                 : (m_cfg.format.is_signed ? "signed" : "offset-binary"),
+            m_cfg.format.descending ? "descending" : "ascending",
+            m_cfg.format.lower_sideband ? "lower" : "upper",
             mib(utils::baseband_block_bytes(m_cfg.format, m_block_nsamps,
                                             m_cfg.nsub)));
         out += fmt::format(
