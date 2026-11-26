@@ -202,7 +202,10 @@ public:
                     r.needed > std::numeric_limits<SizeType>::max() - boxcar_est
                         ? std::numeric_limits<SizeType>::max()
                         : boxcar_est + r.needed;
-                return over(std::max(budget + 1, need), false);
+                // The need as estimated, even when it is within the budget
+                // (the estimate was short): estimate_minimum_memory() then
+                // steps the budget up instead of by one byte.
+                return over(need, false);
             };
             auto res = build(cfg, used, &fdmt_bytes);
             if (!res.ok) {

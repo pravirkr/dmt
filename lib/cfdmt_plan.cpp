@@ -159,7 +159,7 @@ public:
         return m_dm_grid_coh;
     }
     float dm_step_coh() const noexcept { return m_dm_step_coh; }
-    SizeType ndm_fine() const noexcept { return m_fdmt_plan->get_dmt_ndms(); }
+    SizeType ndm_fine() const noexcept { return fdmt_plan().get_dmt_ndms(); }
     SizeType fine_dt_max() const noexcept { return m_fine_dt_max; }
     const std::vector<float>& dm_grid_final() const noexcept {
         return m_dm_grid_final;
@@ -188,7 +188,10 @@ public:
         return m_dm_grid_final.size() * m_nout;
     }
     const std::vector<float>& taper() const noexcept { return m_taper; }
-    const FDMTPlan& fdmt_plan() const noexcept { return *m_fdmt_plan; }
+    const FDMTPlan& fdmt_plan() const noexcept {
+        // Set by configure(), in the constructor.
+        return *m_fdmt_plan; // NOLINT(bugprone-unchecked-optional-access)
+    }
 
     std::vector<double> lag_correlation(SizeType max_lag) const {
         // Detected noise of a complex Gaussian channel: Cov(I_t, I_t+tau) is
@@ -220,7 +223,7 @@ public:
         if (boxcar_width == 0) {
             throw std::invalid_argument("boxcar_width must be greater than 0");
         }
-        const auto smearing = m_fdmt_plan->get_smearing_grid_final();
+        const auto smearing = fdmt_plan().get_smearing_grid_final();
         const auto nfine    = ndm_fine();
         const auto w        = static_cast<IndexType>(boxcar_width);
         IndexType s_max     = 1;
@@ -262,7 +265,7 @@ public:
     // DC gain of every row: the output for a unit constant input, sum over
     // channels of box weight x box length (~ nchans with box means).
     std::vector<float> count_grid() const {
-        const auto smearing = m_fdmt_plan->get_smearing_grid_final();
+        const auto smearing = fdmt_plan().get_smearing_grid_final();
         const auto nfine    = ndm_fine();
         std::vector<float> fine(nfine, 0.0F);
         for (SizeType i = 0; i < nfine; ++i) {
@@ -281,7 +284,7 @@ public:
     // Effective level-0 weight round(2^b / L) * 2^-b of the fine FDMT's box
     // of L samples (the FDMT runs with box smearing; fdmt_box_weights.hpp).
     double box_weight(IndexType box_len) const {
-        const auto bits = m_fdmt_plan->get_box_fraction_bits();
+        const auto bits = fdmt_plan().get_box_fraction_bits();
         return std::ldexp(static_cast<double>(algorithms::detail::box_weight(
                               static_cast<SizeType>(box_len), bits)),
                           -static_cast<int>(bits));
@@ -292,7 +295,7 @@ public:
             SizeType{2} * m_nfft * m_cfg.nsub * m_nbin * sizeof(ComplexType);
         const SizeType waterfall = m_nchans * fdmt_nsamps() * sizeof(float);
         const SizeType fdmt =
-            (2 * m_fdmt_plan->get_buffer_size() * sizeof(float)) +
+            (2 * fdmt_plan().get_buffer_size() * sizeof(float)) +
             (m_nchans * m_fine_dt_max * sizeof(float));
         const SizeType workspace =
             (m_nchans * m_mbin * 2 * sizeof(unsigned long long)) +
@@ -354,7 +357,7 @@ public:
             "{:.1f} MiB, workspace {:.1f} MiB; output {:.1f} MiB\n",
             mib(mem.spectrum), mib(mem.waterfall), mib(mem.fdmt),
             mib(mem.workspace), mib(mem.output));
-        out += m_fdmt_plan->summary("\t");
+        out += fdmt_plan().summary("\t");
         out += fmt::format("{:*>80}\n", "");
         return out;
     }
@@ -549,7 +552,7 @@ private:
         // D + nout + Delta).
         m_fdmt_plan.emplace(m_f_min, m_f_max, m_nchans, fdmt_nsamps(), m_tsamp,
                             delta, -delta, c.dt_step, "valid");
-        const auto dt_grid = m_fdmt_plan->get_dt_grid_final();
+        const auto dt_grid = fdmt_plan().get_dt_grid_final();
         m_row_offsets.resize(dt_grid.size());
         for (SizeType r = 0; r < dt_grid.size(); ++r) {
             // Negative-dt rows are referenced to the top channel by the
@@ -558,7 +561,7 @@ private:
                 m_fine_dt_max + m_fdmt_margin +
                 static_cast<SizeType>(std::max<IndexType>(0, -dt_grid[r]));
         }
-        const auto fine_dms = m_fdmt_plan->get_dm_grid_final();
+        const auto fine_dms = fdmt_plan().get_dm_grid_final();
         m_dm_grid_final.resize(ncoh * fine_dms.size());
         for (SizeType k = 0; k < ncoh; ++k) {
             for (SizeType r = 0; r < fine_dms.size(); ++r) {

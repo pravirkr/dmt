@@ -428,3 +428,79 @@ class TestStrictWaterfallInput:
             libdmt.pack_baseband(v_c128)
         with pytest.raises(ValueError, match="C-contiguous"):
             libdmt.pack_baseband(v_noncontig)
+
+
+class TestPlanAndHostParity:
+    """Plan getters, kill masks and out= buffers the C++ API already had."""
+
+    def test_cfdmt_plan_window_getters(self) -> None:
+        plan = dmtlib.CohFDMTPlan(
+            dmtlib.CohFDMTConfig(400.0, 1.0, 16, 4.0e-6, 10.0, 11.0)
+        )
+        assert plan.fdmt_nsamps > plan.output_nsamps
+        assert isinstance(plan.fdmt_window_start, int)
+        assert plan.row_offsets.shape == (plan.ndm_fine,)
+        assert plan.channel_taper.shape == (plan.mbin,)
+        assert np.all(plan.channel_taper >= 0.0)
+
+    def test_ddmt_plan_kill_mask(self) -> None:
+        mask = np.ones(16, dtype=bool)
+        mask[3] = False
+        dms = np.array([0.0, 10.0], dtype=np.float32)
+        plan = dmtlib.DDMTPlan(1000.0, 1500.0, 16, 0.001, dms, kill_mask=mask)
+        wf = np.ones((16, 256), dtype=np.float32)
+        out = dmtlib.DDMT(plan).execute(wf)
+        np.testing.assert_allclose(out[0], 15.0)
+
+    @pytest.mark.parametrize("cls", [dmtlib.DDMT, dmtlib.SDMT, dmtlib.DDMTFFT])
+    def test_direct_engines_take_out(self, cls: type) -> None:
+        dms = np.linspace(0.0, 20.0, 5, dtype=np.float32)
+        rng = np.random.default_rng(9)
+        wf = rng.standard_normal((16, 512), dtype=np.float32)
+        want = cls(1000.0, 1500.0, 16, 0.001, dms).execute(wf)
+        out = np.full(want.size + 3, -1.0, dtype=np.float32)
+        got = cls(1000.0, 1500.0, 16, 0.001, dms).execute(wf, out=out)
+        assert got.shape == want.shape
+        assert np.shares_memory(got, out)
+        np.testing.assert_array_equal(got, want)
+        assert out[-1] == -1.0
+        with pytest.raises(ValueError, match="out must be"):
+            cls(1000.0, 1500.0, 16, 0.001, dms).execute(
+                wf, out=np.empty(want.size, np.float64)
+            )
+        with pytest.raises(ValueError, match="out has"):
+            cls(1000.0, 1500.0, 16, 0.001, dms).execute(
+                wf, out=np.empty(want.size - 1, np.float32)
+            )
+        packed = rng.integers(0, 256, (16, 512)).astype(np.uint8)
+        eng = cls(1000.0, 1500.0, 16, 0.001, dms, nbits=8)
+        want_p = eng.execute(packed, nsamps=512)
+        dtype = np.float32 if cls is dmtlib.DDMTFFT else np.int32
+        out_p = np.empty(want_p.size, dtype=dtype)
+        eng2 = cls(1000.0, 1500.0, 16, 0.001, dms, nbits=8)
+        got_p = eng2.execute(packed, nsamps=512, out=out_p)
+        np.testing.assert_array_equal(got_p, want_p)
+        tm = np.ascontiguousarray(packed.T)
+        eng3 = cls(1000.0, 1500.0, 16, 0.001, dms, nbits=8)
+        got_t = eng3.execute_time_major(tm, nsamps=512, out=np.empty_like(out_p))
+        np.testing.assert_array_equal(got_t, want_p)
+
+    def test_dedisperse_device_argument(self) -> None:
+        wf = np.zeros((16, 512), dtype=np.float32)
+        res = dmtlib.dedisperse(
+            wf, 1000.0, 1500.0, 0.001, [0.0, 5.0], engine="ddmt", device=0
+        )
+        assert res.data.shape[0] == 2
+
+    def test_ddmt_rejects_delays_beyond_int(self) -> None:
+        dms = np.array([0.0, 1000.0], dtype=np.float32)
+        plan = dmtlib.DDMTPlan(1000.0, 1500.0, 4, 1.0e-12, dms)
+        for cls in (dmtlib.DDMT, dmtlib.SDMT):
+            with pytest.raises(ValueError, match="fit an int"):
+                cls(plan)
+
+    def test_levels_2bit_must_be_finite(self) -> None:
+        fmt = dmtlib.BasebandFormat(nbits=2, levels_2bit=(-3.0, -1.0, np.inf, 3.0))
+        cfg = dmtlib.CohFDMTConfig(400.0, 1.0, 16, 4.0e-6, 10.0, 11.0, format=fmt)
+        with pytest.raises(ValueError, match="finite"):
+            dmtlib.CohFDMTPlan(cfg)

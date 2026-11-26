@@ -65,8 +65,9 @@ for block in stream:                        # contiguous (256, 1024) float32 blo
   byte, `row_bytes = ceil(nsamps * nbits / 8)`. Pass digitiser output as is:
   it is faster than converting to float, with the same result up to the
   rounding of the box means (S/N loss ≤ 0.5%).
-- **Errors.** Wrong sizes or `nbits` raise `ValueError`; a `uint8` array
-  without `nbits` raises `TypeError`.
+- **Errors.** Wrong sizes or `nbits` raise `ValueError`, as does a transposed
+  (time-major `(nsamps, nchans)`) array; a `uint8` array without `nbits`
+  raises `TypeError`.
 - **GPU.** `backend="cuda"` (and `device=`) takes the same arguments.
   `dmtlib.available_backends()` lists what your build has. Arrays already on
   the GPU (PyTorch, CuPy, Numba, DLPack) go straight in; see the
@@ -109,6 +110,35 @@ fdmt = FDMT(1200.0, 1600.0, 256, 1024, 1e-3,
             dt_grid=np.array([0, 1, 2, 4, 8, 16, 32, 64, 128, 256]))
 fdmt.plan.dt_grid_final
 ```
+
+## Candidate search with `FDMTBoxcar`
+
+`FDMTBoxcar` runs the FDMT and a boxcar (matched-filter) search together and
+returns candidates instead of the DM–time plane:
+
+```python
+from dmtlib import BoxcarConfig, FDMTBoxcar, FDMTPlan
+
+plan = FDMTPlan(1200.0, 1600.0, 256, 1024, 1e-3, 150)  # f_min, f_max, nchans, nsamps, tsamp, dt_max
+config = BoxcarConfig(64, detect_thresh=7.0)         # boxcars up to 64 samples, S/N >= 7
+search = FDMTBoxcar(plan, config, nthreads=4)        # backend="cuda" for a GPU
+
+for block in stream:                       # contiguous (256, 1024) float32 blocks
+    res = search.execute(block)
+    keep(res.candidates)                   # structured array: peak_sample, snr, dm, width, ...
+keep(search.drain().candidates)            # end of stream: search the last samples
+```
+
+- **Input.** Each channel zero mean with a common sigma (`config.noise_sigma`,
+  default 1); detrend upstream. Packed input: `BoxcarConfig(...,
+  input_nbits=8, input_mean=..., noise_sigma=...)` and `uint8` blocks.
+- **Times.** `peak_sample` counts from the start of the stream, at the
+  arrival at the lower edge `f_low_mhz` of the candidate's own subband (the
+  full band's `f_min` unless the plan has `subband_depth > 0`).
+- **Last block.** A final block shorter than `nsamps` goes in as a whole
+  block whose first `n` samples are data: `search.drain(block, n_tail=n)`.
+- **Device arrays** (CuPy, PyTorch, Numba) are searched in place on a GPU
+  backend; the candidates come back as NumPy arrays.
 
 ## Next
 

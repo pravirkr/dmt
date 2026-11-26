@@ -118,6 +118,35 @@ frequency, then `2**k - 1` staggered ones if `subband_depth >= k`.
   be viewed; construct with `int_tree=False`.
 - **Multi-beam.** Views show beam 0 only; every beam is still processed.
 
+## Search results and known limits
+
+- **Subband candidate times.** An `FDMTBoxcar` candidate's `peak_sample`,
+  `begin_sample` and `end_sample` are arrival times at the lower edge
+  `f_low_mhz` of the candidate's own subband (FDMT times refer to the band
+  edge below them). Full-band candidates refer to `f_min`; to line up
+  candidates of different subbands, shift each by
+  `dispersion_delay(dm, f_min, f_low_mhz)` (`dmtlib.dispersion_delay`,
+  `dmt::dispersion_delay`).
+- **`CohFDMTPlan.dm_grid_final` is piecewise monotonic.** The output is
+  `ndm_coh` blocks of `ndm_fine` rows, coarse-major. Each block covers its
+  coarse trial's fine window and neighbouring windows overlap, so the DMs
+  increase within a block and step back at the next one. This rectangular
+  layout is deliberate; sort the rows, or search each block, where a single
+  increasing DM axis is needed.
+- **Packed cold start with `skip_cold_prefix=False`.** Before the first
+  sample of a stream, packed input is padded with code 0 while float input
+  is padded with 0.0, so on packed input the cold windows (those reaching
+  before the stream's start) carry a bias of `-input_mean` per missing
+  sample. The default `skip_cold_prefix=True` never searches those windows.
+- **32-bit indices on GPUs.** The GPU engines index a beam's waterfall,
+  the search's tree history and a standalone FDMT's output with 32-bit
+  offsets: blocks of more than about 2^31 / nchans samples per beam (about
+  322,000 samples at 6656 channels), tree histories above 2^32 elements
+  (very wide DM ranges at fine resolution) and FDMT outputs above
+  `INT32_MAX` elements raise instead of running. Use shorter blocks, a
+  smaller `max_memory_bytes` (the skewed path has no tree history) or the
+  CPU backend there.
+
 ## Logging and summaries
 
 dmt is silent by default.

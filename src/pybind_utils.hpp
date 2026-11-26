@@ -313,6 +313,38 @@ inline void check_input_shape(std::string_view what,
                       nbeams, rows, cols, axes);
 }
 
+// A host output of `shape` (T elements): the caller's `out` (a writeable,
+// C-contiguous T array of at least prod(shape) elements, returned as a
+// `shape` view of its start, no copy) or a new array.
+template <typename T>
+inline py::array_t<T, py::array::c_style>
+shaped_output(const std::vector<py::ssize_t>& shape,
+              std::string_view what,
+              const std::optional<py::array>& out) {
+    if (!out.has_value()) {
+        return py::array_t<T, py::array::c_style>(shape);
+    }
+    py::ssize_t count = 1;
+    for (const auto n : shape) {
+        count *= n;
+    }
+    const auto& arr = *out;
+    if (!arr.dtype().is(py::dtype::of<T>()) ||
+        (arr.flags() & py::array::c_style) == 0 || !arr.writeable()) {
+        throw py::value_error(
+            fmt::format("{}: out must be a writeable, C-contiguous {} array",
+                        what, py::str(py::dtype::of<T>()).cast<std::string>()));
+    }
+    if (arr.size() < count) {
+        throw std::invalid_argument(
+            fmt::format("{}: out has {} elements, needs at least {}", what,
+                        arr.size(), count));
+    }
+    py::array target = arr; // a new reference, for its writable pointer
+    return py::array_t<T, py::array::c_style>(
+        shape, static_cast<T*>(target.mutable_data()), target);
+}
+
 // The engine's output buffer: the caller's `out` (validated, reused as is)
 // or a fresh array of nbeams * get_dmt_size() floats.
 template <typename Engine>

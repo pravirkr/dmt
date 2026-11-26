@@ -42,16 +42,19 @@ make_options(std::string_view method, double tolerance, SizeType guard) {
 
 // (n_dm, n_out) for one beam, (nbeams, n_dm, n_out) otherwise.
 py::array_t<float, py::array::c_style>
-output_array(const DDMTFFT& eng, SizeType nsamps, bool three_d) {
-    const auto ndm  = eng.get_plan().get_container().dm_arr.size();
-    const auto nout = eng.get_output_nsamps(nsamps);
+output_array(const DDMTFFT& eng,
+             SizeType nsamps,
+             bool three_d,
+             std::string_view what,
+             const std::optional<py::array>& out) {
+    const auto ndm =
+        static_cast<py::ssize_t>(eng.get_plan().get_container().dm_arr.size());
+    const auto nout = static_cast<py::ssize_t>(eng.get_output_nsamps(nsamps));
     if (three_d) {
-        return py::array_t<float, py::array::c_style>(
-            {static_cast<py::ssize_t>(eng.get_nbeams()),
-             static_cast<py::ssize_t>(ndm), static_cast<py::ssize_t>(nout)});
+        return shaped_output<float>(
+            {static_cast<py::ssize_t>(eng.get_nbeams()), ndm, nout}, what, out);
     }
-    return py::array_t<float, py::array::c_style>(
-        {static_cast<py::ssize_t>(ndm), static_cast<py::ssize_t>(nout)});
+    return shaped_output<float>({ndm, nout}, what, out);
 }
 
 } // namespace
@@ -180,9 +183,12 @@ void bind_ddmt_fft(py::module_& mod) {
                         double tolerance, SizeType guard,
                         std::string_view backend, int device,
                         std::optional<float> f_ref) {
+                const auto kill_vec = extract_kill_mask(kill_mask);
+                // Pure C++ from here: other Python threads run meanwhile.
+                const py::gil_scoped_release release;
                 return DDMTFFT(f_min, f_max, nchans, tsamp, dm_max, dm_step,
                                dm_min, make_exec(backend, nthreads, device),
-                               nbits, extract_kill_mask(kill_mask), nbeams,
+                               nbits, kill_vec, nbeams,
                                make_options(method, tolerance, guard), f_ref);
             }),
             "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_max"_a,
@@ -198,10 +204,13 @@ void bind_ddmt_fft(py::module_& mod) {
                          std::string_view backend, int device,
                          std::optional<float> f_ref) {
                  const auto dms = copy_native_1d<float>(dm_arr, "dm_arr");
+                 const auto kill_vec = extract_kill_mask(kill_mask);
+                 // Pure C++ from here: other Python threads run meanwhile.
+                 const py::gil_scoped_release release;
                  return DDMTFFT(f_min, f_max, nchans, tsamp,
                                 std::span<const float>(dms.data(), dms.size()),
                                 make_exec(backend, nthreads, device), nbits,
-                                extract_kill_mask(kill_mask), nbeams,
+                                kill_vec, nbeams,
                                 make_options(method, tolerance, guard), f_ref);
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_arr"_a,
@@ -215,9 +224,12 @@ void bind_ddmt_fft(py::module_& mod) {
                          std::string_view method, double tolerance,
                          SizeType guard, std::string_view backend, int device,
                          std::optional<float> f_ref) {
+                 const auto kill_vec = extract_kill_mask(kill_mask);
+                 // Pure C++ from here: other Python threads run meanwhile.
+                 const py::gil_scoped_release release;
                  return DDMTFFT(f_min, f_max, nchans, tsamp, levin,
                                 make_exec(backend, nthreads, device), nbits,
-                                extract_kill_mask(kill_mask), nbeams,
+                                kill_vec, nbeams,
                                 make_options(method, tolerance, guard), f_ref);
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "levin"_a,
@@ -228,6 +240,8 @@ void bind_ddmt_fft(py::module_& mod) {
         .def(py::init([](const DDMTPlan& plan, int nthreads, SizeType nbeams,
                          std::string_view method, double tolerance,
                          SizeType guard, std::string_view backend, int device) {
+                 // Pure C++ from here: other Python threads run meanwhile.
+                 const py::gil_scoped_release release;
                  return DDMTFFT(plan, make_exec(backend, nthreads, device),
                                 nbeams, make_options(method, tolerance, guard));
              }),
@@ -239,6 +253,8 @@ void bind_ddmt_fft(py::module_& mod) {
             [](const DDMTPlan& plan, SizeType nsamps, int nthreads,
                SizeType nbeams, std::string_view method, double tolerance,
                SizeType guard, std::string_view backend, int device) {
+                // Pure C++ from here: other Python threads run meanwhile.
+                const py::gil_scoped_release release;
                 return DDMTFFT::estimate_memory(
                     plan, nsamps, make_exec(backend, nthreads, device), nbeams,
                     make_options(method, tolerance, guard));
@@ -296,7 +312,8 @@ void bind_ddmt_fft(py::module_& mod) {
             "transform as output.")
         .def(
             "execute",
-            [](DDMTFFT& e, const py::array& waterfall_obj) {
+            [](DDMTFFT& e, const py::array& waterfall_obj,
+               const std::optional<py::array>& out_arr) {
                 const auto waterfall = require_contiguous_array<float>(
                     waterfall_obj, "DDMTFFT.execute", "float32");
                 const auto ndim = waterfall.ndim();
@@ -305,7 +322,8 @@ void bind_ddmt_fft(py::module_& mod) {
                                   "nchans, nsamps");
                 const auto nsamps =
                     static_cast<SizeType>(waterfall.shape(ndim - 1));
-                auto out = output_array(e, nsamps, ndim == 3);
+                auto out = output_array(e, nsamps, ndim == 3, "DDMTFFT.execute",
+                                        out_arr);
                 const std::span<const float> in_span(waterfall.data(),
                                                      waterfall.size());
                 const std::span<float> out_span(out.mutable_data(), out.size());
@@ -315,15 +333,18 @@ void bind_ddmt_fft(py::module_& mod) {
                 }
                 return out;
             },
-            "waterfall"_a.noconvert(),
+            "waterfall"_a.noconvert(), py::kw_only(), "out"_a = py::none(),
             R"doc(
             Dedisperse a float32 waterfall ``(nchans, nsamps)`` or
             ``(nbeams, nchans, nsamps)``; returns ``(n_dm, output_nsamps)`` or
-            ``(nbeams, n_dm, output_nsamps)`` (float32).
+            ``(nbeams, n_dm, output_nsamps)`` (float32). Keyword-only ``out``:
+            a writeable, C-contiguous float32 array of at least that many
+            elements, filled and returned as that shape (all host overloads).
             )doc")
         .def(
             "execute",
-            [](DDMTFFT& e, const py::array& packed_obj, SizeType nsamps) {
+            [](DDMTFFT& e, const py::array& packed_obj, SizeType nsamps,
+               const std::optional<py::array>& out_arr) {
                 const auto packed = require_contiguous_array<uint8_t>(
                     packed_obj, "DDMTFFT.execute", "uint8");
                 check_ddmt_packed_shape(
@@ -331,7 +352,8 @@ void bind_ddmt_fft(py::module_& mod) {
                     std::span<const py::ssize_t>(
                         packed.shape(), static_cast<SizeType>(packed.ndim())),
                     nsamps, false);
-                auto out = output_array(e, nsamps, e.get_nbeams() > 1);
+                auto out = output_array(e, nsamps, e.get_nbeams() > 1,
+                                        "DDMTFFT.execute", out_arr);
                 const std::span<const uint8_t> in_span(packed.data(),
                                                        packed.size());
                 const std::span<float> out_span(out.mutable_data(), out.size());
@@ -342,10 +364,12 @@ void bind_ddmt_fft(py::module_& mod) {
                 return out;
             },
             "waterfall_packed"_a.noconvert(), py::kw_only(), "nsamps"_a,
+            "out"_a = py::none(),
             "Dedisperse a channel-major packed waterfall (float32 output).")
         .def(
             "execute_time_major",
-            [](DDMTFFT& e, const py::array& packed_obj, SizeType nsamps) {
+            [](DDMTFFT& e, const py::array& packed_obj, SizeType nsamps,
+               const std::optional<py::array>& out_arr) {
                 const auto packed = require_contiguous_array<uint8_t>(
                     packed_obj, "DDMTFFT.execute_time_major", "uint8");
                 check_ddmt_packed_shape(
@@ -353,7 +377,8 @@ void bind_ddmt_fft(py::module_& mod) {
                     std::span<const py::ssize_t>(
                         packed.shape(), static_cast<SizeType>(packed.ndim())),
                     nsamps, true);
-                auto out = output_array(e, nsamps, e.get_nbeams() > 1);
+                auto out = output_array(e, nsamps, e.get_nbeams() > 1,
+                                        "DDMTFFT.execute", out_arr);
                 const std::span<const uint8_t> in_span(packed.data(),
                                                        packed.size());
                 const std::span<float> out_span(out.mutable_data(), out.size());
@@ -364,6 +389,7 @@ void bind_ddmt_fft(py::module_& mod) {
                 return out;
             },
             "filterbank_packed"_a.noconvert(), py::kw_only(), "nsamps"_a,
+            "out"_a = py::none(),
             "Dedisperse a time-major packed filterbank (float32 output).")
         .def(
             "execute",

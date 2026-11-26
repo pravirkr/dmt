@@ -67,8 +67,9 @@ jobs:
           - { os: ubuntu-22.04, cc: gcc-11, cpp: g++-11, packages: "gcc-11 g++-11" }
           - { os: ubuntu-24.04, cc: clang-17, cpp: clang++-17, packages: "clang-17 libomp-17-dev catch2" }
           # The newest GCC also builds the benchmarks (bench/), which no
-          # other CPU job compiles.
-          - { os: ubuntu-24.04, cc: gcc-14, cpp: g++-14, packages: "gcc-14 g++-14 catch2", cmake_args: "-DDMT_BUILD_BENCHMARKS=ON" }
+          # other CPU job compiles, for x86-64-v3 (AVX2/FMA): the target of
+          # the PyPI wheels, whose SIMD paths the SSE2 baseline jobs skip.
+          - { os: ubuntu-24.04, cc: gcc-14, cpp: g++-14, packages: "gcc-14 g++-14 catch2", cmake_args: "-DDMT_BUILD_BENCHMARKS=ON -DDMT_CPU_ARCH=x86-64-v3" }
     steps:
       - uses: actions/checkout@v7
 
@@ -132,6 +133,48 @@ jobs:
           cmake -S tests/consumer -B build-consumer -G Ninja -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/dmt"
           cmake --build build-consumer
           ./build-consumer/dmt_consumer
+
+  # ARM64 (Apple Silicon): the NEON paths and AppleClang with Homebrew's
+  # libomp. C++ library and tests only, to stay within the time limit.
+  cpp-tests-macos:
+    name: "C++ tests (AppleClang, macos-14 arm64)"
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Homebrew packages
+        run: brew install ninja ccache fftw libomp
+
+      - name: Cache ccache object store
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: cpp-tests-macos-14
+          max-size: 500M
+          save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Cache CPM sources
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CPM_SOURCE_CACHE }}
+          key: cpm-macos-14-${{ hashFiles('cmake/**/*.cmake', 'CMakeLists.txt') }}
+          restore-keys: |
+            cpm-macos-14-
+
+      - name: Configure (CMake preset ci, no Python)
+        run: >
+          cmake --preset ci
+          -DDMT_BUILD_PYTHON=OFF
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DOpenMP_ROOT=$(brew --prefix libomp)
+          -DFFTW_ROOT=$(brew --prefix fftw)
+
+      - name: Build
+        run: cmake --build --preset ci --parallel "$(sysctl -n hw.ncpu)"
+
+      - name: Run C++ unit tests
+        run: ctest --preset ci --parallel "$(sysctl -n hw.ncpu)"
 
   # Python: uv install + pytest (supported user path).
   python-tests:

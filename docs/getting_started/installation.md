@@ -110,6 +110,25 @@ CMAKE_ARGS="-DDMT_GPU=HIP" uv pip install .    # AMD (ROCm)
 :::
 ::::
 
+#### Login nodes, containers and mixed clusters
+
+By default the build targets the machine it runs on: `-march=native` for
+the CPU and the GPU it finds. On an HPC login node (often no GPU, and a
+different CPU from the compute nodes) or in a container image, name the
+targets instead, or the build stops at the GPU check or produces code that
+dies with `SIGILL` on other nodes:
+
+```bash
+CMAKE_ARGS="-DDMT_ENABLE_NATIVE_ARCH=OFF -DDMT_CPU_ARCH=x86-64-v3 \
+  -DDMT_GPU=CUDA -DDMT_GPU_CHECK_DEVICE=OFF \
+  -DDMT_CUDA_ARCHITECTURES='80;89;90'" uv pip install .
+```
+
+`x86-64-v3` (AVX2/FMA) runs on x86 CPUs since Haswell / Zen; use
+`x86-64-v4` only where every node has AVX-512. List the compute capability
+of each GPU model the jobs will use (`80` A100, `89` L40S/RTX Ada, `90`
+H100). The `portable` CMake preset sets the same options for C++ builds.
+
 To check the install:
 
 ```python

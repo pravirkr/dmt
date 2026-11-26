@@ -369,6 +369,8 @@ void bind_fdmt(py::module_& mod) {
                          std::string_view backend, int device,
                          std::optional<SizeType> chunk_nsamps,
                          SizeType max_memory_bytes) {
+                 // Pure C++ from here: other Python threads run meanwhile.
+                 const py::gil_scoped_release release;
                  return FDMT(f_min, f_max, nchans, nsamps, tsamp, dt_max,
                              dt_min, dt_step, use_box_smearing, mode,
                              make_exec(backend, nthreads, device), nbeams,
@@ -398,8 +400,11 @@ void bind_fdmt(py::module_& mod) {
                 const auto exec  = make_exec(backend, nthreads, device);
                 const auto chunk = chunk_nsamps.value_or(0);
                 if (type == CustomGridType::kDt) {
+                    const auto dt_grid_v = extract_dt_grid(obj);
+                    // Pure C++ from here: other Python threads run meanwhile.
+                    const py::gil_scoped_release release;
                     return FDMT(f_min, f_max, nchans, nsamps, tsamp,
-                                extract_dt_grid(obj), use_box_smearing, mode,
+                                dt_grid_v, use_box_smearing, mode,
                                 exec, nbeams, fuse, int_tree, chunk,
                                 max_memory_bytes);
                 }
@@ -423,6 +428,8 @@ void bind_fdmt(py::module_& mod) {
                          std::string_view backend, int device,
                          std::optional<SizeType> chunk_nsamps,
                          SizeType max_memory_bytes) {
+                 // Pure C++ from here: other Python threads run meanwhile.
+                 const py::gil_scoped_release release;
                  return FDMT(plan, use_box_smearing,
                              make_exec(backend, nthreads, device), nbeams,
                              fuse_levels.value_or(kFDMTAutoFuse), int_tree,
@@ -446,6 +453,8 @@ void bind_fdmt(py::module_& mod) {
                std::string_view backend, int device,
                std::optional<SizeType> chunk_nsamps,
                SizeType max_memory_bytes) {
+                // Pure C++ from here: other Python threads run meanwhile.
+                const py::gil_scoped_release release;
                 return FDMT::estimate_memory(
                     f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
                     dt_step, use_box_smearing, mode,
@@ -487,9 +496,12 @@ void bind_fdmt(py::module_& mod) {
                 const auto exec  = make_exec(backend, nthreads, device);
                 const auto chunk = chunk_nsamps.value_or(0);
                 if (type == CustomGridType::kDt) {
+                    const auto dt_grid_v = extract_dt_grid(obj);
+                    // Pure C++ from here: other Python threads run meanwhile.
+                    const py::gil_scoped_release release;
                     return FDMT::estimate_memory(
                         f_min, f_max, nchans, nsamps, tsamp,
-                        extract_dt_grid(obj), use_box_smearing, mode, exec,
+                        dt_grid_v, use_box_smearing, mode, exec,
                         nbeams, fuse, int_tree, chunk, max_memory_bytes);
                 }
                 return FDMT::estimate_memory(
@@ -514,6 +526,8 @@ void bind_fdmt(py::module_& mod) {
                bool int_tree, std::string_view backend, int device,
                std::optional<SizeType> chunk_nsamps,
                SizeType max_memory_bytes) {
+                // Pure C++ from here: other Python threads run meanwhile.
+                const py::gil_scoped_release release;
                 return FDMT::estimate_memory(
                     plan, use_box_smearing,
                     make_exec(backend, nthreads, device), nbeams,
@@ -1194,6 +1208,8 @@ void bind_fdmt(py::module_& mod) {
                          std::string_view backend, int device,
                          bool fractional_delays, const py::object& kill_mask) {
                  const auto mask = extract_kill_mask(kill_mask);
+                 // Pure C++ from here: other Python threads run meanwhile.
+                 const py::gil_scoped_release release;
                  return FDMTFFT(f_min, f_max, nchans, nsamps, tsamp, dt_max,
                                 dt_min, dt_step, use_box_smearing, mode,
                                 make_exec(backend, nthreads, device), nbeams,
@@ -1217,10 +1233,13 @@ void bind_fdmt(py::module_& mod) {
                 const auto exec = make_exec(backend, nthreads, device);
                 const auto mask = extract_kill_mask(kill_mask);
                 if (type == CustomGridType::kDt) {
+                    const auto dt_grid_v = extract_dt_grid(obj);
+                    // Pure C++ from here: other Python threads run meanwhile.
+                    const py::gil_scoped_release release;
                     return std::make_unique<FDMTFFT>(
-                        f_min, f_max, nchans, nsamps, tsamp,
-                        extract_dt_grid(obj), use_box_smearing, mode, exec,
-                        nbeams, fractional_delays, mask);
+                        f_min, f_max, nchans, nsamps, tsamp, dt_grid_v,
+                        use_box_smearing, mode, exec, nbeams, fractional_delays,
+                        mask);
                 }
                 return std::make_unique<FDMTFFT>(
                     f_min, f_max, nchans, nsamps, tsamp, extract_dm_grid(obj),
@@ -1241,6 +1260,8 @@ void bind_fdmt(py::module_& mod) {
                          std::string_view backend, int device,
                          bool fractional_delays, const py::object& kill_mask) {
                  const auto mask = extract_kill_mask(kill_mask);
+                 // Pure C++ from here: other Python threads run meanwhile.
+                 const py::gil_scoped_release release;
                  return std::make_unique<FDMTFFT>(
                      plan, use_box_smearing,
                      make_exec(backend, nthreads, device), nbeams,
@@ -1262,6 +1283,8 @@ void bind_fdmt(py::module_& mod) {
                int device, bool fractional_delays,
                const py::object& kill_mask) {
                 const auto mask = extract_kill_mask(kill_mask);
+                // Pure C++ from here: other Python threads run meanwhile.
+                const py::gil_scoped_release release;
                 return FDMTFFT::estimate_memory(
                     f_min, f_max, nchans, nsamps, tsamp, dt_max, dt_min,
                     dt_step, use_box_smearing, mode,
@@ -1297,10 +1320,13 @@ void bind_fdmt(py::module_& mod) {
                 const auto exec = make_exec(backend, nthreads, device);
                 const auto mask = extract_kill_mask(kill_mask);
                 if (type == CustomGridType::kDt) {
+                    const auto dt_grid_v = extract_dt_grid(obj);
+                    // Pure C++ from here: other Python threads run meanwhile.
+                    const py::gil_scoped_release release;
                     return FDMTFFT::estimate_memory(
-                        f_min, f_max, nchans, nsamps, tsamp,
-                        extract_dt_grid(obj), use_box_smearing, mode, exec,
-                        nbeams, fractional_delays, mask);
+                        f_min, f_max, nchans, nsamps, tsamp, dt_grid_v,
+                        use_box_smearing, mode, exec, nbeams, fractional_delays,
+                        mask);
                 }
                 return FDMTFFT::estimate_memory(
                     f_min, f_max, nchans, nsamps, tsamp, extract_dm_grid(obj),
@@ -1322,6 +1348,8 @@ void bind_fdmt(py::module_& mod) {
                SizeType nbeams, std::string_view backend, int device,
                bool fractional_delays, const py::object& kill_mask) {
                 const auto mask = extract_kill_mask(kill_mask);
+                // Pure C++ from here: other Python threads run meanwhile.
+                const py::gil_scoped_release release;
                 return FDMTFFT::estimate_memory(
                     plan, use_box_smearing,
                     make_exec(backend, nthreads, device), nbeams,

@@ -400,7 +400,11 @@ void bind_fdmt_boxcar(py::module_& mod) {
         ``2**k`` equal subbands and the ``2**k - 1`` staggered subbands of
         the same width centred on their boundaries. Candidates carry
         ``subband_level`` (the depth), ``subband_idx``, the channel extent
-        and ``staggered``.
+        and ``staggered``. A subband candidate's times (``peak_sample``,
+        ``begin_sample``, ``end_sample``) are arrival times at its own
+        subband's lower edge ``f_low_mhz``, not at the full band's
+        ``f_min``: shift them by ``dispersion_delay(dm, f_min, f_low_mhz)``
+        to compare candidates across subbands.
 
         ``max_memory_bytes`` (keyword-only, default 10 GiB) bounds
         ``memory_usage.budgeted``: everything the instance allocates on the
@@ -437,6 +441,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
                          std::string_view backend, int device,
                          SizeType max_memory_bytes, const py::object& kill) {
                  const auto mask = extract_kill_mask(kill);
+                 // Pure C++ from here: other Python threads run meanwhile.
+                 const py::gil_scoped_release release;
                  return FDMTBoxcar(std::move(plan), config, smear,
                                    make_exec(backend, nthreads, device), nbeams,
                                    fuse.value_or(algorithms::kFDMTAutoFuse),
@@ -455,6 +461,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
                std::optional<SizeType> chunk, std::string_view backend,
                int device, SizeType max_memory_bytes, const py::object& kill) {
                 const auto mask = extract_kill_mask(kill);
+                // Pure C++ from here: other Python threads run meanwhile.
+                const py::gil_scoped_release release;
                 return FDMTBoxcar::estimate_memory(
                     plan, config, smear, make_exec(backend, nthreads, device),
                     nbeams, fuse.value_or(algorithms::kFDMTAutoFuse),
@@ -486,6 +494,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
                std::optional<SizeType> chunk, std::string_view backend,
                int device, const py::object& kill) {
                 const auto mask = extract_kill_mask(kill);
+                // Pure C++ from here: other Python threads run meanwhile.
+                const py::gil_scoped_release release;
                 return FDMTBoxcar::estimate_minimum_memory(
                     plan, config, smear, make_exec(backend, nthreads, device),
                     nbeams, fuse.value_or(algorithms::kFDMTAutoFuse),
@@ -699,6 +709,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
                          std::string_view backend, int device,
                          SizeType max_memory_bytes, const py::object& kill) {
                  const auto mask = extract_kill_mask(kill);
+                 // Pure C++ from here: other Python threads run meanwhile.
+                 const py::gil_scoped_release release;
                  return FDMTFFTBoxcar(std::move(plan), config, smear,
                                       make_exec(backend, nthreads, device),
                                       nbeams, frac, max_memory_bytes, mask);
@@ -715,6 +727,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
                std::string_view backend, int device, SizeType max_memory_bytes,
                const py::object& kill) {
                 const auto mask = extract_kill_mask(kill);
+                // Pure C++ from here: other Python threads run meanwhile.
+                const py::gil_scoped_release release;
                 return FDMTFFTBoxcar::estimate_memory(
                     plan, config, smear, make_exec(backend, nthreads, device),
                     nbeams, frac, max_memory_bytes, mask);
