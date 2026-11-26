@@ -463,7 +463,18 @@ public:
             initialize(cfg.kill_mask);
         }
         if (!cfg.defer_allocation) {
+            set_kernel_attributes();
             m_allocated = true;
+        }
+    }
+
+    // Kernel attributes are process state: set once the engine allocates,
+    // never by an estimate.
+    void set_kernel_attributes() const {
+        for (const auto kernel :
+             {kernel_tree_stage<true>, kernel_tree_stage<false>}) {
+            gpu_utils::raise_dynamic_smem(
+                kernel, m_stage_smem, "FDMTFFT (cuda): shared-memory opt-in");
         }
     }
 
@@ -487,6 +498,7 @@ public:
                                                 gpu_utils::kAdviceBlocks);
         }
         m_after_alloc.clear();
+        set_kernel_attributes();
         const auto got = memory_usage();
         if (got.plan != planned.plan || got.state != planned.state ||
             got.history != planned.history ||
@@ -966,7 +978,9 @@ private:
     SizeType m_nsamps_out{};
     SizeType m_max_coords{};
     SizeType m_mid_rows{}; // rows of the largest inner stage boundary
-    int m_smem_optin{};
+    /// Dynamic shared memory of the largest tree stage (opted in by
+    /// set_kernel_attributes()).
+    SizeType m_stage_smem{};
 
     DevBuf<uint32_t> m_l0_chan;
     DevBuf<uint32_t> m_l0_shift;
@@ -1070,26 +1084,28 @@ private:
             }
         }
 
-        const auto& props = gpu_utils::device_properties(m_device_id);
-        m_smem_optin      = static_cast<int>(props.sharedMemPerBlockOptin);
+        // Stage node budget from the dynamic shared memory both stage
+        // kernels can take (read-only queries; allocate() opts them in).
+        const auto smem_limit = std::min(
+            gpu_utils::dynamic_smem_limit(kernel_tree_stage<true>, m_device_id,
+                                          "FDMTFFT (cuda): shared memory"),
+            gpu_utils::dynamic_smem_limit(kernel_tree_stage<false>, m_device_id,
+                                          "FDMTFFT (cuda): shared memory"));
         const auto budget = std::min<SizeType>(
-            kNodeBudget, static_cast<SizeType>(m_smem_optin) /
-                             (2 * kTileBins * sizeof(float2)));
+            kNodeBudget, smem_limit / (2 * kTileBins * sizeof(float2)));
         const auto stages = fdmt_fft::plan_tree_stages(m_dag, budget, kMaxOut);
         m_mid_rows        = 0;
-        for (SizeType i = 0; i + 1 < stages.size(); ++i) {
-            m_mid_rows =
-                std::max(m_mid_rows, m_dag.ncoords[stages[i].level_out]);
+        m_stage_smem      = 0;
+        for (SizeType i = 0; i < stages.size(); ++i) {
+            if (i + 1 < stages.size()) {
+                m_mid_rows =
+                    std::max(m_mid_rows, m_dag.ncoords[stages[i].level_out]);
+            }
+            m_stage_smem =
+                std::max(m_stage_smem,
+                         2 * stages[i].max_nodes * kTileBins * sizeof(float2));
         }
         m_stages.build(stages);
-        for (const auto kernel :
-             {kernel_tree_stage<true>, kernel_tree_stage<false>}) {
-            gpu_utils::check_gpu_call(
-                cudaFuncSetAttribute(
-                    kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    m_smem_optin),
-                "FDMTFFT (cuda): shared-memory opt-in");
-        }
 
         m_seg = fdmt_fft::choose_segments(m_geom, m_mode, m_nsamps_out,
                                           m_dag.ncoords[0] + m_dag.nops(),

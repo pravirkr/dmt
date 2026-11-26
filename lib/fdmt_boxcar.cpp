@@ -871,10 +871,9 @@ void FDMTBoxcar::reset_history(Stream stream) {
     }
 }
 CandidateResultView FDMTBoxcar::drain() {
-    return detail::drain_stream(*m_impl->engine, m_impl->plan, m_impl->beams,
-                                m_impl->config.input_nbits,
-                                m_impl->engine->search_latency(),
-                                m_impl->drain_state);
+    return detail::drain_stream(
+        *m_impl->engine, m_impl->plan, m_impl->beams, m_impl->config,
+        m_impl->planes, m_impl->engine->search_latency(), m_impl->drain_state);
 }
 uint64_t FDMTBoxcar::get_searched_nsamps() const noexcept {
     return detail::searched_nsamps(*m_impl->engine, m_impl->drain_state,

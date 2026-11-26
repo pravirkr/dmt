@@ -623,6 +623,7 @@ FDMTBoxcarCudaEngine::FDMTBoxcarCudaEngine(
     m_oldest_d.resize(1, UINT64_MAX);
     if (!cfg.defer_allocation) {
         allocate_host();
+        run_kernel_setup();
     }
     m_allocated = !cfg.defer_allocation;
 }
@@ -654,6 +655,7 @@ void FDMTBoxcarCudaEngine::allocate() {
                                             gpu_utils::kAdviceBoxcar);
     }
     allocate_host();
+    run_kernel_setup();
     try {
         // Table slots of per-call masks enabled during the construction.
         for (auto& slot : m_slots) {

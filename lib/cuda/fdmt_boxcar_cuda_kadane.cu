@@ -434,7 +434,8 @@ __global__ void __launch_bounds__(kBlockThreads, 4)
                     gate.lag_i32[state_off + k] = lag_state[k];
                 }
             } else {
-                gate.state_fc[state_off + k] = c_state_f32[k];
+                gate.state_fc[state_off + k] =
+                    kadane::sanitize_carry_f32(c_state_f32[k]);
                 if (gate.any_edge_lag) {
                     gate.lag_f32[state_off + k] = lag_state[k];
                 }

@@ -252,6 +252,13 @@ TEST_CASE("FDMTBoxcar CPU screen modes match bit-for-bit",
                                        "valid", 1);
         REQUIRE_FALSE(
             algorithms::detail::int_search_fits_u32(u64_plan, true, 16));
+        // The GPU kKeepBrightest uint64-carry plan of
+        // fdmt_boxcar_overflow_t.cpp (B43) does not fit uint32_t either.
+        const plans::FDMTPlan overflow_plan(
+            700.0F, 1200.0F, 8, 1024, 0.001F,
+            std::vector<IndexType>{0, 32, 16384});
+        REQUIRE_FALSE(
+            algorithms::detail::int_search_fits_u32(overflow_plan, true, 16));
         const float maxf  = 65535.0F;
         auto cfg          = make_cfg(32, 1.5F, 2.65F, true);
         cfg.input_nbits   = 16;

@@ -21,10 +21,16 @@
 #include "dmt/gpu_compat.cuh"
 #include "dmt/gpu_utils.cuh"
 
+#include "fdmt_boxcar_nan_cases.hpp"
 #include "fdmt_boxcar_reference.hpp"
 #include "test_helpers.hpp"
 
 using namespace boxcar_test;
+
+TEST_CASE("FDMTBoxcar GPU Kadane screen recovers after a NaN block",
+          "[boxcar][gpu]") {
+    test::check_nan_block_does_not_blind(test::gpu_exec());
+}
 
 TEST_CASE("FDMTBoxcar GPU host and device APIs match direct reference",
           "[gpu][parity][boxcar]") {

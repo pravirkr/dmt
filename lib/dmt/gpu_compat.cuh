@@ -17,11 +17,15 @@
 #include <hipfft/hipfft.h>
 #include <thrust/system/hip/execution_policy.h>
 
-// libcu++ (cuda::std) is provided by libhipcxx when it is installed; the
-// library only needs span and complex from it, so fall back to std::span and
-// thrust::complex (rocThrust) otherwise. hip-clang compiles constexpr
-// functions (all of std::span) for the device as well.
-#if __has_include(<cuda/std/span>) && __has_include(<cuda/std/complex>)
+// libcu++ (cuda::std) is provided by libhipcxx when CMake found it
+// (DMT_HAVE_LIBHIPCXX); the library only needs span and complex from it, so
+// fall back to std::span and thrust::complex (rocThrust) otherwise. The CMake
+// result decides, not __has_include alone: on hosts with both SDKs the CUDA
+// toolkit's CCCL headers are visible to hip-clang but do not compile there.
+// hip-clang compiles constexpr functions (all of std::span) for the device as
+// well.
+#if defined(DMT_HAVE_LIBHIPCXX) && __has_include(<cuda/std/span>) &&            \
+    __has_include(<cuda/std/complex>)
 #include <cuda/std/complex>
 #include <cuda/std/span>
 #else
@@ -68,6 +72,8 @@ namespace cuda = ::thrust::hip;
 #define cudaFuncAttributeMaxDynamicSharedMemorySize                            \
     hipFuncAttributeMaxDynamicSharedMemorySize
 #define cudaDevAttrMultiProcessorCount hipDeviceAttributeMultiprocessorCount
+#define cudaDevAttrMaxSharedMemoryPerBlock                                     \
+    hipDeviceAttributeMaxSharedMemoryPerBlock
 
 // Runtime: functions
 #define cudaGetErrorString hipGetErrorString
@@ -90,6 +96,7 @@ namespace cuda = ::thrust::hip;
 #define cudaMemsetAsync hipMemsetAsync
 #define cudaMemset2DAsync hipMemset2DAsync
 #define cudaMemcpy2DAsync hipMemcpy2DAsync
+#define cudaMemcpy2D hipMemcpy2D
 #define cudaStreamCreate hipStreamCreate
 #define cudaStreamCreateWithFlags hipStreamCreateWithFlags
 #define cudaStreamQuery hipStreamQuery
@@ -181,16 +188,31 @@ inline hipError_t func_get_attributes(hipFuncAttributes* attr, Kernel kernel) {
 // width argument keeps every shuffle inside its own 32-lane half; the
 // _sync forms are not used (older ROCm lacks them). Callers keep all lanes of
 // a logical warp converged at the shuffle.
+#include <cstdint>
+#include <type_traits>
+
 namespace dmt::gpu_compat {
 inline constexpr int kLogicalWarp = 32;
 
 // Device code only: the header also reaches host translation units.
 #if defined(__CUDACC__) || defined(__HIPCC__)
 /// Value of lane (lane - delta) of this logical warp (own value below delta).
+/// On HIP, 8-byte values move as two 32-bit shuffles: hip-clang's
+/// 64-bit __shfl overloads are ambiguous for `unsigned long` (LP64
+/// uint64_t), as in kadane_cuda.cuh.
 template <typename T>
 __device__ __forceinline__ T shfl_up(T value, unsigned delta) {
 #if defined(DMT_ENABLE_HIP)
-    return __shfl_up(value, delta, kLogicalWarp);
+    if constexpr (sizeof(T) == 8 && std::is_integral_v<T>) {
+        const auto u  = static_cast<uint64_t>(value);
+        const auto lo = static_cast<uint64_t>(static_cast<uint32_t>(
+            __shfl_up(static_cast<uint32_t>(u), delta, kLogicalWarp)));
+        const auto hi = static_cast<uint64_t>(static_cast<uint32_t>(
+            __shfl_up(static_cast<uint32_t>(u >> 32U), delta, kLogicalWarp)));
+        return static_cast<T>((hi << 32U) | lo);
+    } else {
+        return __shfl_up(value, delta, kLogicalWarp);
+    }
 #else
     return __shfl_up_sync(0xFFFFFFFFU, value, delta);
 #endif
@@ -199,7 +221,16 @@ __device__ __forceinline__ T shfl_up(T value, unsigned delta) {
 /// Value of lane `src` of this logical warp.
 template <typename T> __device__ __forceinline__ T shfl(T value, int src) {
 #if defined(DMT_ENABLE_HIP)
-    return __shfl(value, src, kLogicalWarp);
+    if constexpr (sizeof(T) == 8 && std::is_integral_v<T>) {
+        const auto u  = static_cast<uint64_t>(value);
+        const auto lo = static_cast<uint64_t>(static_cast<uint32_t>(
+            __shfl(static_cast<uint32_t>(u), src, kLogicalWarp)));
+        const auto hi = static_cast<uint64_t>(static_cast<uint32_t>(
+            __shfl(static_cast<uint32_t>(u >> 32U), src, kLogicalWarp)));
+        return static_cast<T>((hi << 32U) | lo);
+    } else {
+        return __shfl(value, src, kLogicalWarp);
+    }
 #else
     return __shfl_sync(0xFFFFFFFFU, value, src);
 #endif

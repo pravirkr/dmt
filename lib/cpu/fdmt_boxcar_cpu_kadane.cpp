@@ -462,6 +462,19 @@ void FDMTBoxcarCpuEngine::consume_kadane(SizeType row_lo,
         const SizeType b_hi      = std::min(row_hi, b_lo + kBatch);
         const SizeType b_cap     = b_hi - b_lo;
 
+        if (!m_kadane_int32) {
+            // Carries from the previous call: a non-finite one restarts at
+            // 0 (kadane::sanitize_carry_f32), so a NaN/Inf glitch stays in
+            // the call that read it.
+            float* carry = m_kadane_fc.data() + (beam * nb * rs);
+            for (SizeType k = 0; k < nb; ++k) {
+                for (SizeType r = b_lo; r < b_hi; ++r) {
+                    carry[(k * rs) + r] =
+                        kadane::sanitize_carry_f32(carry[(k * rs) + r]);
+                }
+            }
+        }
+
         std::array<FDMTSearchInput, kBatch> lane_in{};
         std::array<bool, kBatch> lane_active{};
         for (SizeType q = 0; q < b_cap; ++q) {
