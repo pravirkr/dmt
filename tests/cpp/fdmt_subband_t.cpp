@@ -376,7 +376,7 @@ TEST_CASE("FDMT subband rows follow the dispersion law of their own band",
     // FDMT time reference and the box-smearing-off sample).
     const plans::FDMTPlan plan(1100.0F, 1714.0F, 48, 64, 455.6e-6F, 300, 0, 1,
                                "valid", 3);
-    algorithms::FDMTBoxcar search(plan, BoxcarConfig(1), false);
+    algorithms::FDMTBoxcar search(plan, BoxcarConfig{.max_boxcar = 1}, false);
     const auto& pc     = plan.get_container();
     SizeType staggered = 0;
     for (const auto& p : search.get_search_plans()) {

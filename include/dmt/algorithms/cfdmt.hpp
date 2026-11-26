@@ -113,21 +113,22 @@ public:
     /**
      * @brief Searches one block given as a single span (one subband group).
      *
-     * @tparam DataType int8_t or uint8_t; the bytes are decoded per the
-     * config's BasebandFormat (the type does not select the signedness).
+     * @tparam DataType char, int8_t or uint8_t (ByteDataType); the bytes are
+     * decoded per the config's BasebandFormat (the type does not select the
+     * signedness).
      * @param data_in get_input_size() bytes in the configured order.
      * @param dmt At least get_dmt_size() floats: (ndm, output_nsamps), row i
      * the DM plan.get_dm_grid_final()[i].
      * @throws std::invalid_argument on a size mismatch.
      */
-    template <IntegralDataType DataType>
+    template <ByteDataType DataType>
     void execute(std::span<const DataType> data_in, std::span<float> dmt) const;
 
     /**
      * @brief Searches one block given as one span per subband group (e.g.
      * one GUPPI node file each), in the config's subband_groups order.
      */
-    template <IntegralDataType DataType>
+    template <ByteDataType DataType>
     void execute(std::span<const std::span<const DataType>> groups,
                  std::span<float> dmt) const;
 
@@ -135,18 +136,18 @@ public:
      * @brief Device-memory execute() (GPU backends), asynchronous on
      * @p stream.
      */
-    template <IntegralDataType DataType>
+    template <ByteDataType DataType>
     void execute(DeviceSpan<const DataType> d_data_in,
                  DeviceSpan<float> d_dmt,
                  Stream stream = {}) const;
 
     /// @brief Device-memory execute() with one span per subband group.
-    template <IntegralDataType DataType>
+    template <ByteDataType DataType>
     void execute(std::span<const DeviceSpan<const DataType>> d_groups,
                  DeviceSpan<float> d_dmt,
                  Stream stream = {}) const;
 
-    template <IntegralDataType DataType,
+    template <ByteDataType DataType,
               typename Alloc1 = std::allocator<DataType>,
               typename Alloc2 = std::allocator<float>>
     void execute(const std::vector<DataType, Alloc1>& data_in,

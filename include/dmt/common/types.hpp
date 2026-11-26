@@ -53,6 +53,14 @@ dispersion_delay(double dm, double f_lo_mhz, double f_hi_mhz) noexcept {
 template <typename T>
 concept IntegralDataType = std::is_integral_v<T>;
 
+/// One-byte integer types: char, signed char (int8_t) and unsigned char
+/// (uint8_t), the raw bytes CohFDMT::execute() reads. bool and char8_t are
+/// excluded.
+template <typename T>
+concept ByteDataType = std::is_integral_v<T> && sizeof(T) == 1 &&
+                       !std::is_same_v<std::remove_cv_t<T>, bool> &&
+                       !std::is_same_v<std::remove_cv_t<T>, char8_t>;
+
 /**
  * @brief FDMT mode for the FDMT tree.
  */

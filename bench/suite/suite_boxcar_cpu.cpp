@@ -112,11 +112,20 @@ void bench_fdmt_boxcar_stream(
     auto plan = make_plan(point, subband_depth);
     // The GPU benchmark's width sets (boxcars up to 100 ms), threshold 6,
     // per-width peaks. Input preparation and construction are not timed.
-    const BoxcarConfig boxcar(
-        max_boxcar_100ms(), wtsp, 6.0F, packed ? 12.0F : 1.0F,
-        PeakFindingMode::kContiguousPeakPerWidth, 131072, 4096, true,
-        packed ? 8 : 32, packed ? 127.0F : 0.0F, trapezoid,
-        OverflowPolicy::kDropNew, screen_mode);
+    const BoxcarConfig boxcar{
+        .max_boxcar       = max_boxcar_100ms(),
+        .wtsp             = wtsp,
+        .detect_thresh    = 6.0F,
+        .noise_sigma      = packed ? 12.0F : 1.0F,
+        .peak_mode        = PeakFindingMode::kContiguousPeakPerWidth,
+        .max_candidates   = 131072,
+        .max_cands_per_dm = 4096,
+        .skip_cold_prefix = true,
+        .input_nbits      = packed ? SizeType{8} : SizeType{32},
+        .input_mean       = packed ? 127.0F : 0.0F,
+        .use_trapezoid    = trapezoid,
+        .overflow_policy  = OverflowPolicy::kDropNew,
+        .screen_mode      = screen_mode};
     const auto input_size = cfg.nchans * cfg.nsamps_ref;
     auto ctx              = cpu_context(
         fmt::format("stream/{}/{}/{}/{}/{}/{}", wtsp, subband_depth, threads,
@@ -175,11 +184,20 @@ void bench_rt_cpu(benchmark::State& state,
                   BoxcarScreenMode screen_mode = BoxcarScreenMode::kAuto,
                   bool trapezoid               = false) {
     auto plan = make_rt_plan(p);
-    const BoxcarConfig config(
-        rt_max_boxcar(p), kRtWtsp, 6.0F, packed ? 12.0F : 1.0F,
-        PeakFindingMode::kContiguousPeakPerWidth, 131072, 4096, true,
-        packed ? 8 : 32, packed ? 127.0F : 0.0F, trapezoid,
-        OverflowPolicy::kDropNew, screen_mode);
+    const BoxcarConfig config{
+        .max_boxcar       = rt_max_boxcar(p),
+        .wtsp             = kRtWtsp,
+        .detect_thresh    = 6.0F,
+        .noise_sigma      = packed ? 12.0F : 1.0F,
+        .peak_mode        = PeakFindingMode::kContiguousPeakPerWidth,
+        .max_candidates   = 131072,
+        .max_cands_per_dm = 4096,
+        .skip_cold_prefix = true,
+        .input_nbits      = packed ? SizeType{8} : SizeType{32},
+        .input_mean       = packed ? 127.0F : 0.0F,
+        .use_trapezoid    = trapezoid,
+        .overflow_policy  = OverflowPolicy::kDropNew,
+        .screen_mode      = screen_mode};
     const SizeType n = kNchans * p.nsamps;
     auto ctx =
         cpu_context(fmt::format("{}/{}/{}", rt_name("cpu", p, packed),

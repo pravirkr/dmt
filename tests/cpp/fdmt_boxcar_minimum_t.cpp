@@ -178,9 +178,17 @@ void check_minimum_equals_default(Exec exec) {
     }
     for (const bool packed : {false, true}) {
         DYNAMIC_SECTION((packed ? "packed 8-bit" : "float")) {
-            const BoxcarConfig cfg(
-                24, 1.5F, 4.2F, 73.9F, PeakFindingMode::kContiguousPeakPerWidth,
-                1U << 20, 0, true, packed ? 8 : 32, packed ? 127.5F : 0.0F);
+            const BoxcarConfig cfg{
+                .max_boxcar       = 24,
+                .wtsp             = 1.5F,
+                .detect_thresh    = 4.2F,
+                .noise_sigma      = 73.9F,
+                .peak_mode        = PeakFindingMode::kContiguousPeakPerWidth,
+                .max_candidates   = 1U << 20,
+                .max_cands_per_dm = 0,
+                .skip_cold_prefix = true,
+                .input_nbits      = packed ? SizeType{8} : SizeType{32},
+                .input_mean       = packed ? 127.5F : 0.0F};
             const auto min =
                 FDMTBoxcar::estimate_minimum_memory(plan, cfg, true, exec);
             FDMTBoxcar at_min(plan, cfg, true, exec, 1,

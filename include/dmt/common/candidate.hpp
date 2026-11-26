@@ -52,37 +52,10 @@ enum class BoxcarScreenMode : uint8_t {
 
 /// Analytical search of independent input noise of known common mean/sigma.
 /// The subband search depth is the plan's (FDMTPlan subband_depth).
+/// Settings only; FDMTBoxcar validates them together with its plan. An
+/// aggregate: set fields by name, e.g.
+/// `BoxcarConfig{.max_boxcar = 64, .detect_thresh = 7.0F}`.
 struct BoxcarConfig {
-    BoxcarConfig() = default;
-    /// Settings only; FDMTBoxcar validates them together with its plan.
-    explicit constexpr BoxcarConfig(
-        SizeType max_boxcar,
-        float wtsp                = 2.0F,
-        float detect_thresh       = 6.0F,
-        float noise_sigma         = 1.0F,
-        PeakFindingMode peak_mode = PeakFindingMode::kContiguousPeakPerWidth,
-        SizeType max_candidates   = 131072,
-        SizeType max_cands_per_dm = 4096,
-        bool skip_cold_prefix     = true,
-        SizeType input_nbits      = 32,
-        float input_mean          = 0.0F,
-        bool use_trapezoid        = false,
-        OverflowPolicy overflow_policy = OverflowPolicy::kDropNew,
-        BoxcarScreenMode screen_mode   = BoxcarScreenMode::kAuto) noexcept
-        : max_boxcar(max_boxcar),
-          wtsp(wtsp),
-          detect_thresh(detect_thresh),
-          noise_sigma(noise_sigma),
-          peak_mode(peak_mode),
-          max_candidates(max_candidates),
-          max_cands_per_dm(max_cands_per_dm),
-          skip_cold_prefix(skip_cold_prefix),
-          input_nbits(input_nbits),
-          input_mean(input_mean),
-          use_trapezoid(use_trapezoid),
-          overflow_policy(overflow_policy),
-          screen_mode(screen_mode) {}
-
     /// Widest box searched, 1..2^20 samples; always the last width of the
     /// bank. Up to 4096 the search is tuned; wider boxes are searched
     /// exactly but more slowly (on a GPU, prefix rings in device memory).

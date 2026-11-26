@@ -25,7 +25,8 @@ fft_reference(const plans::FDMTPlan& plan,
               SizeType max_segment = 0) {
     using algorithms::FDMTFFT;
     using algorithms::FDMTFFTBoxcar;
-    FDMTFFTBoxcar metadata(plan, config, smear, Exec::cpu(), 1, frac, kill);
+    FDMTFFTBoxcar metadata(plan, config, smear, Exec::cpu(), 1, frac,
+                           algorithms::kFDMTDefaultMaxMemory, kill);
     const auto planes = metadata.get_search_plans();
     REQUIRE(planes.size() == 1);
     const SizeType ndm = planes.front().dm_grid.size();

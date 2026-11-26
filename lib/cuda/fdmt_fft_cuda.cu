@@ -515,6 +515,7 @@ public:
     void execute(std::span<const float> waterfall,
                  std::span<float> dmt) override {
         gpu_utils::set_device(m_device_id);
+        check_previous_block_finished();
         check_sizes(waterfall.size(), dmt.size(), "execute");
         const auto s = host_begin();
         m_in_d.reserve(waterfall.size());
@@ -530,6 +531,7 @@ public:
                  bool time_major,
                  std::span<float> dmt) override {
         gpu_utils::set_device(m_device_id);
+        check_previous_block_finished();
         check_nbits(nbits, time_major ? "execute_time_major" : "execute");
         const auto bytes = time_major ? tm_bytes(nbits) : cm_bytes(nbits);
         if (packed.size() != bytes) {
@@ -554,6 +556,7 @@ public:
                  DeviceSpan<float> d_dmt,
                  Stream stream) override {
         gpu_utils::set_device(m_device_id);
+        check_previous_block_finished();
         check_sizes(d_waterfall.size(), d_dmt.size(), "execute");
         const auto s = to_cuda(stream);
         m_device_work.order(s);
@@ -630,6 +633,7 @@ public:
                  DeviceSpan<float> d_dmt,
                  Stream stream) override {
         gpu_utils::set_device(m_device_id);
+        check_previous_block_finished();
         check_nbits(nbits, "execute");
         if (d_packed.size() != cm_bytes(nbits)) {
             throw std::invalid_argument(fmt::format(
@@ -648,6 +652,7 @@ public:
     void reset(std::span<const float> waterfall,
                std::span<float> dmt) override {
         gpu_utils::set_device(m_device_id);
+        check_previous_block_finished();
         check_sizes(waterfall.size(), dmt.size(), "reset");
         const auto s = host_begin();
         m_step_in_d.reserve(waterfall.size());
@@ -663,6 +668,7 @@ public:
                SizeType nbits,
                std::span<float> dmt) override {
         gpu_utils::set_device(m_device_id);
+        check_previous_block_finished();
         check_nbits(nbits, "reset");
         if (packed.size() != cm_bytes(nbits)) {
             throw std::invalid_argument(
@@ -681,6 +687,7 @@ public:
                DeviceSpan<float> d_dmt,
                Stream stream) override {
         gpu_utils::set_device(m_device_id);
+        check_previous_block_finished();
         check_sizes(d_waterfall.size(), d_dmt.size(), "reset");
         const auto s = to_cuda(stream);
         m_device_work.order(s);
@@ -696,6 +703,7 @@ public:
                DeviceSpan<float> d_dmt,
                Stream stream) override {
         gpu_utils::set_device(m_device_id);
+        check_previous_block_finished();
         check_nbits(nbits, "reset");
         if (d_packed.size() != cm_bytes(nbits)) {
             throw std::invalid_argument(
@@ -855,6 +863,9 @@ public:
 
     void reset_history() noexcept override {
         m_search_pos = 0;
+        // Abandons any unfinished stepper block along with its stream.
+        m_initialized = false;
+        m_view_valid  = false;
         try {
             gpu_utils::set_device(m_device_id);
             m_device_work.wait();
@@ -1246,6 +1257,19 @@ private:
         if (!m_initialized) {
             throw std::logic_error(
                 "FDMTFFT: Stepper is not initialized. Call reset() first.");
+        }
+    }
+    // mode='valid' keeps one block's history across calls: a stepper run
+    // that was reset() but not finalize()d would lose it.
+    void check_previous_block_finished() const {
+        if (m_mode == FDMTMode::kValid && m_initialized) {
+            throw std::logic_error(fmt::format(
+                "FDMTFFT: the previous block's stepper run stopped at level "
+                "{} of {}. In mode='valid' every block must be finalized "
+                "before the next reset()/execute(), or its cross-block "
+                "history is lost. Call finalize(), or reset_history() to "
+                "abandon the stream.",
+                m_level, total_levels() - 1));
         }
     }
 

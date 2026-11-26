@@ -38,7 +38,7 @@ std::span<const uint8_t> byte_view(const py::array& arr) {
             "(the config's BasebandFormat decides the decoding)");
     }
     if ((arr.flags() & py::array::c_style) == 0) {
-        throw py::type_error(
+        throw py::value_error(
             "CohFDMT.execute: baseband blocks must be C-contiguous");
     }
     return {static_cast<const uint8_t*>(arr.data()),

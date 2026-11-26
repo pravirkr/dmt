@@ -387,7 +387,7 @@ TEST_CASE("GPU FDMTBoxcar declared per-call masks: a search latency over one "
         0.0F, 2000.0F, tsamp, tsamp, 856.0F, 1712.0F, 4096, 1.1F);
     const plans::FDMTPlan plan(856.0F, 1712.0F, 4096, 4096, tsamp, grid,
                                "valid", 2);
-    BoxcarConfig cfg(24);
+    BoxcarConfig cfg{.max_boxcar = 24};
     const SizeType budget =
         (plan.get_history_size() + plan.get_tree_history_size()) *
         sizeof(float) * 8 / 10;
@@ -467,7 +467,7 @@ TEST_CASE("GPU FDMTBoxcar per-call mask: the catch-all through the facade",
         0.0F, 2000.0F, tsamp, tsamp, 856.0F, 1712.0F, 4096, 1.1F);
     const plans::FDMTPlan plan(856.0F, 1712.0F, 4096, 256, tsamp, grid, "valid",
                                2);
-    BoxcarConfig cfg(24);
+    BoxcarConfig cfg{.max_boxcar = 24};
     cfg.detect_thresh    = 4.5F;
     cfg.skip_cold_prefix = false;
     cfg.per_call_masks   = true;
@@ -887,7 +887,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: the screens skip tiles",
                                        << " mode " << static_cast<int>(mode)) {
                     // Dense widths: the prefix screen groups them (sparse
                     // widths leave each to the per-width check).
-                    BoxcarConfig cfg(256);
+                    BoxcarConfig cfg{.max_boxcar = 256};
                     cfg.wtsp             = 1.05F;
                     cfg.detect_thresh    = 6.0F;
                     cfg.noise_sigma      = c.sigma;
@@ -961,7 +961,7 @@ TEST_CASE("GPU FDMTBoxcar packed per-call masks: the catch-all",
     for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
                             PeakFindingMode::kAllAboveThreshold}) {
         DYNAMIC_SECTION("mode " << static_cast<int>(mode)) {
-            BoxcarConfig fl(24);
+            BoxcarConfig fl{.max_boxcar = 24};
             fl.detect_thresh    = 4.75F;
             fl.noise_sigma      = 10.0F;
             fl.peak_mode        = mode;

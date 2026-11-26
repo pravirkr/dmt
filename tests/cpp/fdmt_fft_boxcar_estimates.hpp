@@ -48,9 +48,10 @@ inline void check_fft_boxcar_estimates(const dmt::Exec& exec) {
     for (const auto& c : cases) {
         INFO(c.name);
         const auto e = FDMTFFTBoxcar::estimate_memory(
-            plan, c.config, true, exec, c.beams, true, c.kill);
+            plan, c.config, true, exec, c.beams, true,
+            algorithms::kFDMTDefaultMaxMemory, c.kill);
         const FDMTFFTBoxcar f(plan, c.config, true, exec, c.beams, true,
-                              c.kill);
+                              algorithms::kFDMTDefaultMaxMemory, c.kill);
         check(e, f);
     }
     const plans::FDMTPlan long_plan(1000.0F, 1500.0F, 256, 32768, 0.001F, 80);
@@ -60,18 +61,18 @@ inline void check_fft_boxcar_estimates(const dmt::Exec& exec) {
         FDMTFFTBoxcar::estimate_memory(long_plan, small, true, exec, 4);
     const SizeType budget = full.usage.budgeted() - 1;
     const auto e = FDMTFFTBoxcar::estimate_memory(long_plan, small, true, exec,
-                                                  4, true, {}, budget);
-    check(e, FDMTFFTBoxcar(long_plan, small, true, exec, 4, true, {}, budget));
+                                                  4, true, budget);
+    check(e, FDMTFFTBoxcar(long_plan, small, true, exec, 4, true, budget));
     CHECK(e.chunk_nsamps < full.chunk_nsamps);
     CHECK(e.usage.budgeted() <= budget);
-    CHECK_THROWS_AS(FDMTFFTBoxcar::estimate_memory(plan, cfg, true, exec, 1,
-                                                   true, {}, 1024),
-                    std::invalid_argument);
+    CHECK_THROWS_AS(
+        FDMTFFTBoxcar::estimate_memory(plan, cfg, true, exec, 1, true, 1024),
+        std::invalid_argument);
     BoxcarConfig huge   = cfg;
     huge.max_candidates = SizeType{1} << 40;
     const plans::FDMTPlan big(1000.0F, 1500.0F, 256, 4096, 0.001F, 400);
     const auto h = FDMTFFTBoxcar::estimate_memory(
-        big, huge, true, exec, SizeType{1} << 22, true, {}, SIZE_MAX / 2);
+        big, huge, true, exec, SizeType{1} << 22, true, SIZE_MAX / 2);
     CHECK(h.usage.candidates >= huge.max_candidates * sizeof(RawCandidate));
     CHECK(h.usage.state + h.usage.workspace + h.usage.history >
           (SizeType{1} << 40));

@@ -119,14 +119,14 @@ plans::CohFDMTMemoryUsage CohFDMT::estimate_memory(const CohFDMTConfig& config,
     return impl.m_engine->memory_usage();
 }
 
-template <IntegralDataType DataType>
+template <ByteDataType DataType>
 void CohFDMT::execute(std::span<const DataType> data_in,
                       std::span<float> dmt) const {
     const std::span<const uint8_t> group = as_bytes_view(data_in);
     const std::lock_guard lock(m_impl->m_mutex);
     m_impl->m_engine->execute(std::span(&group, 1), dmt);
 }
-template <IntegralDataType DataType>
+template <ByteDataType DataType>
 void CohFDMT::execute(std::span<const std::span<const DataType>> groups,
                       std::span<float> dmt) const {
     std::vector<std::span<const uint8_t>> bytes;
@@ -137,7 +137,7 @@ void CohFDMT::execute(std::span<const std::span<const DataType>> groups,
     const std::lock_guard lock(m_impl->m_mutex);
     m_impl->m_engine->execute(bytes, dmt);
 }
-template <IntegralDataType DataType>
+template <ByteDataType DataType>
 void CohFDMT::execute(DeviceSpan<const DataType> d_data_in,
                       DeviceSpan<float> d_dmt,
                       Stream stream) const {
@@ -149,7 +149,7 @@ void CohFDMT::execute(DeviceSpan<const DataType> d_data_in,
     const std::lock_guard lock(m_impl->m_mutex);
     m_impl->m_engine->execute(std::span(&group, 1), d_dmt, stream);
 }
-template <IntegralDataType DataType>
+template <ByteDataType DataType>
 void CohFDMT::execute(std::span<const DeviceSpan<const DataType>> d_groups,
                       DeviceSpan<float> d_dmt,
                       Stream stream) const {
@@ -166,27 +166,19 @@ void CohFDMT::execute(std::span<const DeviceSpan<const DataType>> d_groups,
     m_impl->m_engine->execute(bytes, d_dmt, stream);
 }
 
-// Instantiate the public execute methods for each supported DataType
-template void CohFDMT::execute<int8_t>(std::span<const int8_t>,
-                                       std::span<float>) const;
-template void CohFDMT::execute<uint8_t>(std::span<const uint8_t>,
-                                        std::span<float>) const;
-template void CohFDMT::execute<int8_t>(std::span<const std::span<const int8_t>>,
-                                       std::span<float>) const;
-template void
-    CohFDMT::execute<uint8_t>(std::span<const std::span<const uint8_t>>,
-                              std::span<float>) const;
-template void CohFDMT::execute<int8_t>(DeviceSpan<const int8_t>,
-                                       DeviceSpan<float>,
-                                       Stream) const;
-template void CohFDMT::execute<uint8_t>(DeviceSpan<const uint8_t>,
-                                        DeviceSpan<float>,
-                                        Stream) const;
-template void CohFDMT::execute<int8_t>(
-    std::span<const DeviceSpan<const int8_t>>, DeviceSpan<float>, Stream) const;
-template void
-    CohFDMT::execute<uint8_t>(std::span<const DeviceSpan<const uint8_t>>,
-                              DeviceSpan<float>,
-                              Stream) const;
+// Instantiate the public execute methods for each ByteDataType.
+#define DMT_CFDMT_INSTANTIATE(T)                                               \
+    template void CohFDMT::execute<T>(std::span<const T>, std::span<float>)    \
+        const;                                                                 \
+    template void CohFDMT::execute<T>(std::span<const std::span<const T>>,     \
+                                      std::span<float>) const;                 \
+    template void CohFDMT::execute<T>(DeviceSpan<const T>, DeviceSpan<float>,  \
+                                      Stream) const;                           \
+    template void CohFDMT::execute<T>(std::span<const DeviceSpan<const T>>,    \
+                                      DeviceSpan<float>, Stream) const;
+DMT_CFDMT_INSTANTIATE(char)
+DMT_CFDMT_INSTANTIATE(int8_t)
+DMT_CFDMT_INSTANTIATE(uint8_t)
+#undef DMT_CFDMT_INSTANTIATE
 
 } // namespace dmt::algorithms
