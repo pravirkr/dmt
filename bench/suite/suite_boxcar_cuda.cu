@@ -114,10 +114,19 @@ BoxcarConfig make_config(float wtsp,
                          bool packed,
                          BoxcarScreenMode screen_mode = BoxcarScreenMode::kAuto,
                          bool trapezoid               = false) {
-    return BoxcarConfig(max_boxcar_100ms(), wtsp, 6.0F, packed ? 12.0F : 1.0F,
-                        PeakFindingMode::kContiguousPeakPerWidth, 131072, 0,
-                        true, packed ? 8 : 32, packed ? 127.0F : 0.0F,
-                        trapezoid, OverflowPolicy::kDropNew, screen_mode);
+    return BoxcarConfig{.max_boxcar    = max_boxcar_100ms(),
+                        .wtsp          = wtsp,
+                        .detect_thresh = 6.0F,
+                        .noise_sigma   = packed ? 12.0F : 1.0F,
+                        .peak_mode = PeakFindingMode::kContiguousPeakPerWidth,
+                        .max_candidates   = 131072,
+                        .max_cands_per_dm = 0,
+                        .skip_cold_prefix = true,
+                        .input_nbits      = packed ? SizeType{8} : SizeType{32},
+                        .input_mean       = packed ? 127.0F : 0.0F,
+                        .use_trapezoid    = trapezoid,
+                        .overflow_policy  = OverflowPolicy::kDropNew,
+                        .screen_mode      = screen_mode};
 }
 
 /// DMT_BENCH_CHUNK overrides the automatic FDMT chunk length (tuning).
@@ -410,11 +419,20 @@ void bench_rt(benchmark::State& state,
               BoxcarScreenMode screen_mode = BoxcarScreenMode::kAuto,
               bool trapezoid               = false) {
     auto plan = make_rt_plan(p);
-    const BoxcarConfig config(rt_max_boxcar(p), kRtWtsp, 6.0F,
-                              packed ? 12.0F : 1.0F,
-                              PeakFindingMode::kContiguousPeakPerWidth, 131072,
-                              0, true, packed ? 8 : 32, packed ? 127.0F : 0.0F,
-                              trapezoid, OverflowPolicy::kDropNew, screen_mode);
+    const BoxcarConfig config{
+        .max_boxcar       = rt_max_boxcar(p),
+        .wtsp             = kRtWtsp,
+        .detect_thresh    = 6.0F,
+        .noise_sigma      = packed ? 12.0F : 1.0F,
+        .peak_mode        = PeakFindingMode::kContiguousPeakPerWidth,
+        .max_candidates   = 131072,
+        .max_cands_per_dm = 0,
+        .skip_cold_prefix = true,
+        .input_nbits      = packed ? SizeType{8} : SizeType{32},
+        .input_mean       = packed ? 127.0F : 0.0F,
+        .use_trapezoid    = trapezoid,
+        .overflow_policy  = OverflowPolicy::kDropNew,
+        .screen_mode      = screen_mode};
     auto ctx =
         gpu_context(fmt::format("{}/{}/{}", rt_name(DMT_GPU_NAME, p, packed),
                                 screen_mode_name(screen_mode), trapezoid),

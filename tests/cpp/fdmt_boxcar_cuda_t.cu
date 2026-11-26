@@ -416,8 +416,12 @@ TEST_CASE("GPU FDMTBoxcar kill mask agrees with the CPU",
                     }
                 }
             }
-            BoxcarConfig cfg(24, 1.5F, 3.2F, 1.0F,
-                             PeakFindingMode::kContiguousPeakPerWidth);
+            BoxcarConfig cfg{.max_boxcar    = 24,
+                             .wtsp          = 1.5F,
+                             .detect_thresh = 3.2F,
+                             .noise_sigma   = 1.0F,
+                             .peak_mode =
+                                 PeakFindingMode::kContiguousPeakPerWidth};
             cfg.max_candidates   = 4000000;
             cfg.max_cands_per_dm = 0;
             if (bits != 32) {
@@ -1021,9 +1025,17 @@ TEST_CASE("FDMTBoxcar GPU drain() after device input allocates nothing",
     }
     for (const bool packed : {false, true}) {
         DYNAMIC_SECTION("packed " << packed) {
-            const BoxcarConfig cfg(
-                24, 1.5F, 4.2F, 73.9F, PeakFindingMode::kContiguousPeakPerWidth,
-                1U << 20, 0, true, packed ? 8 : 32, packed ? 127.5F : 0.0F);
+            const BoxcarConfig cfg{
+                .max_boxcar       = 24,
+                .wtsp             = 1.5F,
+                .detect_thresh    = 4.2F,
+                .noise_sigma      = 73.9F,
+                .peak_mode        = PeakFindingMode::kContiguousPeakPerWidth,
+                .max_candidates   = 1U << 20,
+                .max_cands_per_dm = 0,
+                .skip_cold_prefix = true,
+                .input_nbits      = packed ? SizeType{8} : SizeType{32},
+                .input_mean       = packed ? 127.5F : 0.0F};
             // The windowed top replaces the tree when the tree histories
             // exceed the budget: try budgets around their size.
             const SizeType hist =
@@ -1165,7 +1177,7 @@ TEST_CASE("GPU engines with different shared-memory needs coexist",
             0.0F, 600.0F, tsamp, tsamp, 1100.0F, 1714.0F, 1152, 1.1F);
         const plans::FDMTPlan plan(1100.0F, 1714.0F, 1152, 128, tsamp, grid,
                                    "valid", 3);
-        BoxcarConfig cfg(24);
+        BoxcarConfig cfg{.max_boxcar = 24};
         cfg.detect_thresh    = 3.75F;
         cfg.noise_sigma      = 10.0F;
         cfg.input_nbits      = 8;
@@ -1199,7 +1211,7 @@ TEST_CASE("GPU engines with different shared-memory needs coexist",
         const plans::FDMTPlan plan(700, 1200, 32, 400, 0.001F,
                                    std::vector<IndexType>{0, 3, 9, 20, 41},
                                    "valid", 0);
-        BoxcarConfig wide(4000);
+        BoxcarConfig wide{.max_boxcar = 4000};
         wide.detect_thresh  = 3.0F;
         wide.noise_sigma    = 10.0F;
         wide.input_nbits    = 8;
@@ -1233,9 +1245,17 @@ TEST_CASE("GPU subband searches skip paths beyond the 32-bit index range",
                                "valid", 2);
     REQUIRE(plan.get_tree_history_size() >
             std::numeric_limits<uint32_t>::max());
-    const BoxcarConfig cfg(1562, 1.5F, 6.0F, 12.0F,
-                           PeakFindingMode::kContiguousPeakPerWidth, 1U << 20,
-                           0, true, 8, 127.0F);
+    const BoxcarConfig cfg{.max_boxcar    = 1562,
+                           .wtsp          = 1.5F,
+                           .detect_thresh = 6.0F,
+                           .noise_sigma   = 12.0F,
+                           .peak_mode =
+                               PeakFindingMode::kContiguousPeakPerWidth,
+                           .max_candidates   = 1U << 20,
+                           .max_cands_per_dm = 0,
+                           .skip_cold_prefix = true,
+                           .input_nbits      = 8,
+                           .input_mean       = 127.0F};
     const Exec exec = test::gpu_exec();
     for (const SizeType gib : {10, 40}) {
         INFO(gib << " GiB");

@@ -18,6 +18,7 @@
 #include "dmt/engines.hpp"
 #include "dmt/gpu_compat.cuh"
 
+#include "fdmt_fft_stepper_cases.hpp"
 #include "fft_estimate_cases.hpp"
 #include "test_helpers.hpp"
 
@@ -313,6 +314,12 @@ TEST_CASE("FDMTFFT GPU streams, history and stepper interleaving",
     s2.execute(noise(nch * ns, 121), junk);
     s2.finalize();
     CHECK(max_rel(step, ref) < 1e-6);
+}
+
+TEST_CASE("FDMTFFT GPU valid-mode stepper keeps its history and guards "
+          "unfinished blocks",
+          "[fdmt_fft_gpu][gpu]") {
+    test::check_fdmt_fft_valid_stepper(test::gpu_exec());
 }
 
 TEST_CASE("FDMTFFT GPU packed, time-major, kill mask and history",

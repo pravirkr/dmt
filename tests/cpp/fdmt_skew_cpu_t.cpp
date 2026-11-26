@@ -193,9 +193,17 @@ void require_search_equal(const plans::FDMTPlan& plan,
     using algorithms::detail::make_boxcar_rows;
     using algorithms::detail::make_fdmt_cpu;
 
-    const BoxcarConfig cfg(16, 1.5F, 6.0F, packed ? 12.0F : 1.0F,
-                           PeakFindingMode::kContiguousPeakPerWidth, 4096, 256,
-                           true, packed ? 8 : 32, packed ? 127.0F : 0.0F);
+    const BoxcarConfig cfg{.max_boxcar    = 16,
+                           .wtsp          = 1.5F,
+                           .detect_thresh = 6.0F,
+                           .noise_sigma   = packed ? 12.0F : 1.0F,
+                           .peak_mode =
+                               PeakFindingMode::kContiguousPeakPerWidth,
+                           .max_candidates   = 4096,
+                           .max_cands_per_dm = 256,
+                           .skip_cold_prefix = true,
+                           .input_nbits = packed ? SizeType{8} : SizeType{32},
+                           .input_mean  = packed ? 127.0F : 0.0F};
     const auto planes = make_boxcar_plans(plan, cfg, smear);
     const auto rows   = make_boxcar_rows(plan, planes);
     const FDMTEngineConfig ecfg{
@@ -667,9 +675,16 @@ SearchBlock search_block(SizeType n, unsigned seed) {
 }
 
 BoxcarConfig search_config(bool packed, float wtsp = 1.5F) {
-    return BoxcarConfig(24, wtsp, 4.2F, 73.9F,
-                        PeakFindingMode::kContiguousPeakPerWidth, 1U << 20, 0,
-                        true, packed ? 8 : 32, packed ? 127.5F : 0.0F);
+    return BoxcarConfig{.max_boxcar    = 24,
+                        .wtsp          = wtsp,
+                        .detect_thresh = 4.2F,
+                        .noise_sigma   = 73.9F,
+                        .peak_mode = PeakFindingMode::kContiguousPeakPerWidth,
+                        .max_candidates   = 1U << 20,
+                        .max_cands_per_dm = 0,
+                        .skip_cold_prefix = true,
+                        .input_nbits      = packed ? SizeType{8} : SizeType{32},
+                        .input_mean       = packed ? 127.5F : 0.0F};
 }
 
 auto cand_key(const RawCandidate& c) {
@@ -1514,10 +1529,11 @@ DMT_SIZED_TEST_CASE(
         REQUIRE_THROWS_AS(FDMT(plan, true, Exec::cpu(), 1, kFDMTAutoFuse, true,
                                0, SizeType{1} << 20),
                           std::invalid_argument);
-        REQUIRE_THROWS_AS(algorithms::FDMTBoxcar(plan, BoxcarConfig(64), true,
-                                                 Exec::cpu(), 1, kFDMTAutoFuse,
-                                                 0, SizeType{1} << 20),
-                          std::invalid_argument);
+        REQUIRE_THROWS_AS(
+            algorithms::FDMTBoxcar(plan, BoxcarConfig{.max_boxcar = 64}, true,
+                                   Exec::cpu(), 1, kFDMTAutoFuse, 0,
+                                   SizeType{1} << 20),
+            std::invalid_argument);
     }
 }
 

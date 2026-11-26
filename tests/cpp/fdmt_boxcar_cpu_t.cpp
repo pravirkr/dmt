@@ -572,7 +572,10 @@ TEST_CASE("Trapezoidal FDMTBoxcar sensitivity", "[boxcar][trapezoid][cpu]") {
         pulse_w3[c * 128 + 41] = 1.0F;
         pulse_w3[c * 128 + 42] = 0.5F;
     }
-    BoxcarConfig cfg_rect(8, 1.5F, 1.0F, 1.0F);
+    BoxcarConfig cfg_rect{.max_boxcar    = 8,
+                          .wtsp          = 1.5F,
+                          .detect_thresh = 1.0F,
+                          .noise_sigma   = 1.0F};
     BoxcarConfig cfg_trap  = cfg_rect;
     cfg_trap.use_trapezoid = true;
     FDMTBoxcar search_rect(plan, cfg_rect, true, Exec::cpu(1));
@@ -617,7 +620,11 @@ TEST_CASE("GPU FDMTBoxcar trapezoid matches CPU", "[gpu][parity][boxcar]") {
         for (const auto mode : {PeakFindingMode::kContiguousPeakPerWidth,
                                 PeakFindingMode::kContiguousPeakAcrossWidths,
                                 PeakFindingMode::kAllAboveThreshold}) {
-            BoxcarConfig cfg(16, 1.5F, 2.5F, 1.0F, mode);
+            BoxcarConfig cfg{.max_boxcar    = 16,
+                             .wtsp          = 1.5F,
+                             .detect_thresh = 2.5F,
+                             .noise_sigma   = 1.0F,
+                             .peak_mode     = mode};
             cfg.use_trapezoid = true;
             if (bits == 8) {
                 cfg.input_nbits = 8;

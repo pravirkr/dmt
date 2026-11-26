@@ -21,6 +21,7 @@
 #include "dmt/fdmt_fft_common.hpp"
 #include "dmt/fft.hpp"
 
+#include "fdmt_fft_stepper_cases.hpp"
 #include "fft_estimate_cases.hpp"
 #include "test_helpers.hpp"
 #include "test_random.hpp"
@@ -338,6 +339,12 @@ TEST_CASE("FDMTFFT stepper matches execute", "[fdmt_fft_cpu][cpu]") {
     CHECK(sub0.ndt > 0);
     fdmt.finalize();
     test::require_approx(dmt_step, dmt_one, n, 1e-4F);
+}
+
+TEST_CASE(
+    "FDMTFFT valid-mode stepper keeps its history and guards unfinished blocks",
+    "[fdmt_fft_cpu][cpu]") {
+    test::check_fdmt_fft_valid_stepper(Exec::cpu(1));
 }
 
 TEST_CASE("FDMTFFT variance matches plan", "[fdmt_fft_cpu][cpu]") {

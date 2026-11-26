@@ -190,13 +190,22 @@ void bind_fdmt_boxcar(py::module_& mod) {
                          OverflowPolicy overflow_policy,
                          BoxcarScreenMode screen_mode, bool per_call_masks,
                          SizeType max_candidates_per_plane) {
-                 BoxcarConfig c(max_boxcar, wtsp, detect_thresh, noise_sigma,
-                                peak_mode, max_candidates, max_cands_per_dm,
-                                skip_cold_prefix, input_nbits, input_mean,
-                                use_trapezoid, overflow_policy, screen_mode);
-                 c.per_call_masks           = per_call_masks;
-                 c.max_candidates_per_plane = max_candidates_per_plane;
-                 return c;
+                 return BoxcarConfig{.max_boxcar       = max_boxcar,
+                                     .wtsp             = wtsp,
+                                     .detect_thresh    = detect_thresh,
+                                     .noise_sigma      = noise_sigma,
+                                     .peak_mode        = peak_mode,
+                                     .max_candidates   = max_candidates,
+                                     .max_cands_per_dm = max_cands_per_dm,
+                                     .skip_cold_prefix = skip_cold_prefix,
+                                     .input_nbits      = input_nbits,
+                                     .input_mean       = input_mean,
+                                     .use_trapezoid    = use_trapezoid,
+                                     .overflow_policy  = overflow_policy,
+                                     .max_candidates_per_plane =
+                                         max_candidates_per_plane,
+                                     .screen_mode    = screen_mode,
+                                     .per_call_masks = per_call_masks};
              }),
              "max_boxcar"_a = 4096, py::kw_only(), "wtsp"_a = 2.0F,
              "detect_thresh"_a = 6.0F, "noise_sigma"_a = 1.0F,
@@ -549,34 +558,34 @@ void bind_fdmt_boxcar(py::module_& mod) {
     fdmt_fft_boxcar_cls
         .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
                          int nthreads, SizeType nbeams, bool frac,
-                         const py::object& kill, std::string_view backend,
-                         int device, SizeType max_memory_bytes) {
+                         std::string_view backend, int device,
+                         SizeType max_memory_bytes, const py::object& kill) {
                  const auto mask = extract_kill_mask(kill);
                  return FDMTFFTBoxcar(std::move(plan), config, smear,
                                       make_exec(backend, nthreads, device),
-                                      nbeams, frac, mask, max_memory_bytes);
+                                      nbeams, frac, max_memory_bytes, mask);
              }),
              "plan"_a, "config"_a = BoxcarConfig{}, "use_box_smearing"_a = true,
              "nthreads"_a = 1, "nbeams"_a = 1, "fractional_delays"_a = true,
-             "kill_mask"_a = py::none(), py::kw_only(), "backend"_a = "cpu",
-             "device"_a           = 0,
-             "max_memory_bytes"_a = algorithms::kFDMTDefaultMaxMemory)
+             py::kw_only(), "backend"_a = "cpu", "device"_a = 0,
+             "max_memory_bytes"_a = algorithms::kFDMTDefaultMaxMemory,
+             "kill_mask"_a        = py::none())
         .def_static(
             "estimate_memory",
             [](const plans::FDMTPlan& plan, BoxcarConfig config, bool smear,
-               int nthreads, SizeType nbeams, bool frac, const py::object& kill,
-               std::string_view backend, int device,
-               SizeType max_memory_bytes) {
+               int nthreads, SizeType nbeams, bool frac,
+               std::string_view backend, int device, SizeType max_memory_bytes,
+               const py::object& kill) {
                 const auto mask = extract_kill_mask(kill);
                 return FDMTFFTBoxcar::estimate_memory(
                     plan, config, smear, make_exec(backend, nthreads, device),
-                    nbeams, frac, mask, max_memory_bytes);
+                    nbeams, frac, max_memory_bytes, mask);
             },
             "plan"_a, "config"_a = BoxcarConfig{}, "use_box_smearing"_a = true,
             "nthreads"_a = 1, "nbeams"_a = 1, "fractional_delays"_a = true,
-            "kill_mask"_a = py::none(), py::kw_only(), "backend"_a = "cpu",
-            "device"_a           = 0,
+            py::kw_only(), "backend"_a = "cpu", "device"_a = 0,
             "max_memory_bytes"_a = algorithms::kFDMTDefaultMaxMemory,
+            "kill_mask"_a        = py::none(),
             R"doc(
             Memory an ``FDMTFFTBoxcar`` built with the same arguments would
             allocate, and its chunk (the overlap-save segment), without

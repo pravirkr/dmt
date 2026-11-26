@@ -45,7 +45,7 @@ TEST_CASE("FDMTFFTBoxcar matches materialized FDMTFFT and direct windows",
                         budget = open.usage.budgeted() - 1;
                     }
                     FDMTFFTBoxcar search(plan, cfg, smear, Exec::cpu(), 1, frac,
-                                         {}, budget);
+                                         budget);
                     CHECK(search.get_output_latency() ==
                           (frac ? algorithms::fdmt_fft::kFractionalGuard : 0U));
                     SizeType ref_cap = 0;
@@ -89,7 +89,8 @@ TEST_CASE("FDMTFFTBoxcar beams and kill mask match per-beam references",
     cfg.wtsp             = 1.5F;
     cfg.detect_thresh    = 2.7F;
     cfg.max_cands_per_dm = 0;
-    FDMTFFTBoxcar search(plan, cfg, true, Exec::cpu(), 2, true, kill);
+    FDMTFFTBoxcar search(plan, cfg, true, Exec::cpu(), 2, true,
+                         algorithms::kFDMTDefaultMaxMemory, kill);
     std::vector<RawCandidate> actual;
     for (const auto& block : input) {
         append(actual, search.execute(block));
@@ -127,7 +128,8 @@ TEST_CASE("FDMTFFTBoxcar analytical scaling predicts Gaussian noise",
             CAPTURE(mask.size(), smear);
             BoxcarConfig cfg;
             cfg.max_boxcar = 9;
-            FDMTFFTBoxcar search(plan, cfg, smear, Exec::cpu(), 1, true, mask);
+            FDMTFFTBoxcar search(plan, cfg, smear, Exec::cpu(), 1, true,
+                                 algorithms::kFDMTDefaultMaxMemory, mask);
             FDMTFFT fft(700, 1200, 16, samples, 0.001F,
                         plan.get_dt_grid_final(), smear, "valid", Exec::cpu(),
                         1, true, mask);
@@ -184,6 +186,7 @@ TEST_CASE("FDMTFFTBoxcar validates its configuration", "[boxcar][cpu]") {
     BoxcarConfig cfg;
     cfg.max_boxcar = 8;
     CHECK_THROWS_AS(FDMTFFTBoxcar(plan, cfg, true, Exec::cpu(), 1, true,
+                                  algorithms::kFDMTDefaultMaxMemory,
                                   std::vector<uint8_t>{1, 1, 1}),
                     std::invalid_argument);
     FDMTFFTBoxcar search(plan, cfg);
@@ -201,14 +204,15 @@ TEST_CASE("FDMTFFTBoxcar warmup_samples excludes killed edge channels",
     BoxcarConfig cfg;
     cfg.max_boxcar = 8;
 
-    FDMTFFTBoxcar unmasked(plan, cfg, true, Exec::cpu(), 1, true, {});
+    FDMTFFTBoxcar unmasked(plan, cfg, true, Exec::cpu(), 1, true);
     // Kill the upper half of channels (highest frequencies, which carry the
     // largest lookback shift relative to f_min).
     std::vector<uint8_t> kill_mask(16, 1);
     for (size_t c = 8; c < 16; ++c) {
         kill_mask[c] = 0;
     }
-    FDMTFFTBoxcar masked(plan, cfg, true, Exec::cpu(), 1, true, kill_mask);
+    FDMTFFTBoxcar masked(plan, cfg, true, Exec::cpu(), 1, true,
+                         algorithms::kFDMTDefaultMaxMemory, kill_mask);
 
     REQUIRE(unmasked.get_search_plans().size() == 1);
     REQUIRE(masked.get_search_plans().size() == 1);
@@ -256,7 +260,8 @@ TEST_CASE("FDMTFFTBoxcar warmup is each masked row's exact cold support",
         const auto& mask = masks[m];
         for (const bool smear : {true, false}) {
             CAPTURE(m, smear);
-            FDMTFFTBoxcar search(plan, cfg, smear, Exec::cpu(), 1, false, mask);
+            FDMTFFTBoxcar search(plan, cfg, smear, Exec::cpu(), 1, false,
+                                 algorithms::kFDMTDefaultMaxMemory, mask);
             REQUIRE(search.get_output_latency() == 0);
             const auto warmup =
                 search.get_search_plans().front().warmup_samples;
@@ -398,8 +403,7 @@ TEST_CASE("FDMTFFTBoxcar memory budget shortens the segments",
             FDMTFFTBoxcar open(plan, cfg, true, Exec::cpu(), 1, frac);
             const SizeType full   = open.get_memory_usage().total();
             const SizeType budget = full * 6 / 10;
-            FDMTFFTBoxcar capped(plan, cfg, true, Exec::cpu(), 1, frac, {},
-                                 budget);
+            FDMTFFTBoxcar capped(plan, cfg, true, Exec::cpu(), 1, frac, budget);
             CHECK(capped.get_memory_usage().total() <= budget);
             CHECK(capped.get_chunk_nsamps() < open.get_chunk_nsamps());
             std::vector<RawCandidate> a;
@@ -419,7 +423,7 @@ TEST_CASE("FDMTFFTBoxcar memory budget shortens the segments",
                 compare_near_threshold(b, a, cfg.detect_thresh);
             }
             CHECK_THROWS_WITH(
-                FDMTFFTBoxcar(plan, cfg, true, Exec::cpu(), 1, frac, {},
+                FDMTFFTBoxcar(plan, cfg, true, Exec::cpu(), 1, frac,
                               SizeType{1} << 10),
                 Catch::Matchers::ContainsSubstring("max_memory_bytes"));
         }
@@ -438,7 +442,7 @@ TEST_CASE("FDMTFFTBoxcar estimate_memory equals the constructed instance (cpu)",
         FDMTFFTBoxcar::estimate_memory(plan, cfg, true, Exec::cpu(), 4);
     const auto before = utils::fft_allocation_count();
     const auto e      = FDMTFFTBoxcar::estimate_memory(
-        plan, cfg, true, Exec::cpu(), 4, true, {}, full.usage.budgeted() - 1);
+        plan, cfg, true, Exec::cpu(), 4, true, full.usage.budgeted() - 1);
     CHECK(utils::fft_allocation_count() == before);
     CHECK(e.chunk_nsamps < full.chunk_nsamps);
 }

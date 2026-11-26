@@ -161,8 +161,8 @@ FDMTFFTBoxcar::FDMTFFTBoxcar(plans::FDMTPlan plan,
                              Exec exec,
                              SizeType nbeams,
                              bool fractional_delays,
-                             std::span<const uint8_t> kill_mask,
-                             SizeType max_memory_bytes)
+                             SizeType max_memory_bytes,
+                             std::span<const uint8_t> kill_mask)
     : m_impl(std::make_unique<Impl>(std::move(plan),
                                     config,
                                     use_box_smearing,
@@ -178,8 +178,8 @@ FDMTFFTBoxcar::estimate_memory(const plans::FDMTPlan& plan,
                                Exec exec,
                                SizeType nbeams,
                                bool fractional_delays,
-                               std::span<const uint8_t> kill_mask,
-                               SizeType max_memory_bytes) {
+                               SizeType max_memory_bytes,
+                               std::span<const uint8_t> kill_mask) {
     const Impl impl(plan, config, use_box_smearing, exec, nbeams,
                     fractional_delays, kill_mask, max_memory_bytes,
                     /*estimate_only=*/true);

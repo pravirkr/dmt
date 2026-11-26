@@ -9,6 +9,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstring>
 #include <numeric>
 #include <span>
 #include <stdexcept>
@@ -389,6 +390,27 @@ inline void check_layout_independence(const Exec& exec) {
     SECTION("a second engine gives the same result") {
         const CohFDMT s(cfg, exec);
         CHECK(run(s, noisy, n, 0, 1.0F) == reference);
+    }
+    SECTION("char and int8_t views of the same bytes") {
+        // ByteDataType: char (std::ifstream::read / mmap buffers), int8_t
+        // and uint8_t all link; the format decides the decoding.
+        static_assert(ByteDataType<char> && ByteDataType<int8_t> &&
+                      ByteDataType<uint8_t>);
+        static_assert(!ByteDataType<bool> && !ByteDataType<int16_t> &&
+                      !ByteDataType<char8_t> && !ByteDataType<int32_t>);
+        const CohFDMT s(cfg, exec);
+        const auto bytes = utils::pack_baseband(noisy, cfg.nsub, n, cfg.format,
+                                                1.0F, 0, 0, 0, n);
+        std::vector<char> as_char(bytes.size());
+        std::vector<int8_t> as_int8(bytes.size());
+        std::memcpy(as_char.data(), bytes.data(), bytes.size());
+        std::memcpy(as_int8.data(), bytes.data(), bytes.size());
+        std::vector<float> out(s.get_dmt_size());
+        s.execute<char>(std::span<const char>(as_char), out);
+        CHECK(out == reference);
+        std::ranges::fill(out, 0.0F);
+        s.execute<int8_t>(std::span<const int8_t>(as_int8), out);
+        CHECK(out == reference);
     }
 }
 

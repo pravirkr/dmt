@@ -300,19 +300,9 @@ void bind_ddmt_fft(py::module_& mod) {
                 const auto waterfall = require_contiguous_array<float>(
                     waterfall_obj, "DDMTFFT.execute", "float32");
                 const auto ndim = waterfall.ndim();
-                if (ndim != 2 && ndim != 3) {
-                    throw std::invalid_argument(
-                        "DDMTFFT.execute: waterfall must be 2D (nchans, "
-                        "nsamps) or 3D (nbeams, nchans, nsamps)");
-                }
-                const auto nbeams =
-                    ndim == 3 ? static_cast<SizeType>(waterfall.shape(0)) : 1;
-                if (nbeams != e.get_nbeams()) {
-                    throw std::invalid_argument(fmt::format(
-                        "DDMTFFT.execute: waterfall has {} beam(s), but this "
-                        "instance was configured for {}",
-                        nbeams, e.get_nbeams()));
-                }
+                check_input_shape("DDMTFFT.execute", "waterfall", waterfall,
+                                  e.get_nbeams(), e.get_plan().get_nchans(), 0,
+                                  "nchans, nsamps");
                 const auto nsamps =
                     static_cast<SizeType>(waterfall.shape(ndim - 1));
                 auto out = output_array(e, nsamps, ndim == 3);
@@ -336,6 +326,11 @@ void bind_ddmt_fft(py::module_& mod) {
             [](DDMTFFT& e, const py::array& packed_obj, SizeType nsamps) {
                 const auto packed = require_contiguous_array<uint8_t>(
                     packed_obj, "DDMTFFT.execute", "uint8");
+                check_ddmt_packed_shape(
+                    e, "DDMTFFT.execute", "waterfall_packed",
+                    std::span<const py::ssize_t>(
+                        packed.shape(), static_cast<SizeType>(packed.ndim())),
+                    nsamps, false);
                 auto out = output_array(e, nsamps, e.get_nbeams() > 1);
                 const std::span<const uint8_t> in_span(packed.data(),
                                                        packed.size());
@@ -353,6 +348,11 @@ void bind_ddmt_fft(py::module_& mod) {
             [](DDMTFFT& e, const py::array& packed_obj, SizeType nsamps) {
                 const auto packed = require_contiguous_array<uint8_t>(
                     packed_obj, "DDMTFFT.execute_time_major", "uint8");
+                check_ddmt_packed_shape(
+                    e, "DDMTFFT.execute_time_major", "filterbank_packed",
+                    std::span<const py::ssize_t>(
+                        packed.shape(), static_cast<SizeType>(packed.ndim())),
+                    nsamps, true);
                 auto out = output_array(e, nsamps, e.get_nbeams() > 1);
                 const std::span<const uint8_t> in_span(packed.data(),
                                                        packed.size());
@@ -393,6 +393,12 @@ void bind_ddmt_fft(py::module_& mod) {
                     "DDMTFFT.execute", e.backend(), e.device(), packed, stream);
                 const auto input =
                     call.consume<uint8_t>(packed.obj, "waterfall", false);
+                const auto& dl = input.tensor();
+                check_ddmt_packed_shape(
+                    e, "DDMTFFT.execute", "waterfall_packed",
+                    std::span<const int64_t>(dl.shape,
+                                             static_cast<SizeType>(dl.ndim)),
+                    nsamps, false);
                 return ddmt_execute_device<uint8_t, float>(
                     e, call, packed.obj, input, nsamps, e.get_nbeams() > 1, out,
                     [&](DeviceSpan<const uint8_t> in, DeviceSpan<float> dmt,

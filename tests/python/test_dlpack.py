@@ -68,7 +68,8 @@ class Lib:
     def synchronize(self) -> None:
         raise NotImplementedError
 
-    def used_bytes(self) -> int:
+    def used_bytes(self) -> int | None:
+        """Bytes this library has allocated, or None when it cannot tell."""
         raise NotImplementedError
 
     def full(self, shape: int | tuple[int, ...], value: float, dtype: Any) -> Any:  # noqa: ANN401
@@ -219,9 +220,10 @@ class Numba(Lib):
     def synchronize(self) -> None:
         self.cuda.synchronize()
 
-    def used_bytes(self) -> int:
-        free, total = self.cuda.current_context().get_memory_info()
-        return total - free
+    def used_bytes(self) -> int | None:
+        # Numba has no allocator count of its own; the device-wide free
+        # memory races with other processes (parallel pytest workers).
+        return None
 
 
 LIBS = {"cupy": CuPy, "torch": Torch, "numba": Numba}
@@ -266,13 +268,33 @@ class TestFDMT:
         assert tuple(got.shape) == want.shape
         np.testing.assert_array_equal(xp.get(got), want)
 
+    @pytest.mark.parametrize("cls", [FDMT, FDMTFFT])
+    def test_transposed_input_is_rejected(self, cls: type, cuda: str, xp: Lib) -> None:
+        engine = cls(*FDMT_ARGS, backend=cuda)
+        wf_t = xp.asarray(np.zeros((256, 64), dtype=np.float32))
+        packed_t = xp.asarray(np.zeros((256, 64), dtype=np.uint8))
+        with pytest.raises(ValueError, match="shape"):
+            engine.execute(wf_t)
+        with pytest.raises(ValueError, match="shape"):
+            engine.execute(packed_t, nbits=8)
+        with pytest.raises(ValueError, match="shape"):
+            engine.reset(wf_t)
+        with pytest.raises(ValueError, match="shape"):
+            engine.reset(packed_t, nbits=8)
+        for ddmt_cls in (DDMT, DDMTFFT):
+            dms = np.array([0.0, 10.0], dtype=np.float32)
+            dd = ddmt_cls(1000.0, 1500.0, 64, 0.001, dms, nbits=8, backend=cuda)
+            with pytest.raises(ValueError, match="shape"):
+                dd.execute(packed_t, nsamps=256)
+
     def test_out_is_written_in_place(self, cuda: str, xp: Lib) -> None:
         fdmt = FDMT(*FDMT_ARGS, backend=cuda)
         wf = xp.asarray(np.random.default_rng(1).standard_normal((64, 256), np.float32))
         out = xp.full(fdmt.plan.dmt_size + 7, -1.0, dtype=np.float32)
         used = xp.used_bytes()
         got = fdmt.execute(wf, out=out)
-        assert xp.used_bytes() == used  # no copy of the input or output
+        if used is not None:
+            assert xp.used_bytes() == used  # no copy of the input or output
         assert xp.ptr(got) == xp.ptr(out)
         assert tuple(got.shape) == (fdmt.plan.dmt_ndms, fdmt.plan.dmt_nsamps)
         assert float(out[-1]) == -1.0
@@ -475,9 +497,9 @@ class TestDDMT:
 
     def test_errors(self, cuda: str, xp: Lib) -> None:
         dev = DDMT(*DDMT_ARGS, backend=cuda)
-        with pytest.raises(ValueError, match="channels"):
+        with pytest.raises(ValueError, match="shape"):
             dev.execute(xp.asarray(np.zeros((32, 128), dtype=np.float32)))
-        with pytest.raises(ValueError, match="beam"):
+        with pytest.raises(ValueError, match="shape"):
             dev.execute(xp.asarray(np.zeros((2, 64, 128), dtype=np.float32)))
 
     @pytest.mark.parametrize("method", ["brute", "nufft"])

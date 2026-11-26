@@ -216,6 +216,7 @@ public:
 
     void execute(std::span<const float> waterfall,
                  std::span<float> dmt) override {
+        check_previous_block_finished();
         check_buffers(waterfall.size(), dmt, "execute");
         run(float_source(waterfall), dmt);
     }
@@ -224,6 +225,7 @@ public:
                  SizeType nbits,
                  bool time_major,
                  std::span<float> dmt) override {
+        check_previous_block_finished();
         if (!time_major) {
             const auto src = packed_source(packed, nbits, "execute");
             check_buffers(m_nbeams * m_nchans * m_nsamps, dmt, "execute");
@@ -263,6 +265,7 @@ public:
 
     void reset(std::span<const float> waterfall,
                std::span<float> dmt) override {
+        check_previous_block_finished();
         check_buffers(waterfall.size(), dmt, "reset");
         start_stepper(float_source(waterfall), dmt);
     }
@@ -337,7 +340,8 @@ public:
                     m_frac_s.size() * sizeof(double) +
                     (m_geo ? m_geo->twiddle_bytes() : 0) +
                     (m_step_geo ? m_step_geo->twiddle_bytes() : 0),
-                .state = m_deferred.size(m_spectra) * sizeof(float) +
+                .state = (m_deferred.size(m_spectra) + m_step_overlap.size()) *
+                             sizeof(float) +
                          (m_deferred.size(m_out_spec) + m_step_spectra.size() +
                           m_state_a.size() + m_state_b.size()) *
                              sizeof(ComplexType),
@@ -349,6 +353,7 @@ public:
     void reset(std::span<const uint8_t> packed,
                SizeType nbits,
                std::span<float> dmt) override {
+        check_previous_block_finished();
         const auto src = packed_source(packed, nbits, "reset");
         check_buffers(m_nbeams * m_nchans * m_nsamps, dmt, "reset");
         start_stepper(src, dmt);
@@ -444,9 +449,11 @@ public:
             step_inverse(m_state_in + (b * m_state_stride), m_ndms,
                          m_single_skip, m_nsamps_out,
                          m_dmt_target_ptr + (b * m_ndms * m_nsamps_out));
-            if (m_mode == FDMTMode::kValid) {
-                update_overlap(m_step_src, b);
-            }
+        }
+        if (m_mode == FDMTMode::kValid) {
+            // The block's history, taken at reset(): the caller's input
+            // need not outlive reset().
+            std::ranges::copy(m_step_overlap, m_overlap.begin());
         }
         m_is_initialized = false;
         m_view_valid     = false;
@@ -455,6 +462,9 @@ public:
     void reset_history() noexcept override {
         std::ranges::fill(m_overlap, 0.0F);
         m_search_pos = 0;
+        // Abandons any unfinished stepper block along with its stream.
+        m_is_initialized = false;
+        m_view_valid     = false;
     }
 
     [[nodiscard]] SizeType history_state_size() const noexcept override {
@@ -566,7 +576,9 @@ private:
     std::vector<ComplexType> m_state_a;
     std::vector<ComplexType> m_state_b;
     mutable std::vector<float> m_view_time;
-    Source m_step_src{}; // the stepper's block (read again by finalize())
+    // The overlap history after the stepper's block (valid mode), computed
+    // at reset() and committed by finalize().
+    std::vector<float> m_step_overlap;
     float* m_dmt_target_ptr{nullptr};
     ComplexType* m_state_in{nullptr};
     ComplexType* m_state_out{nullptr};
@@ -939,7 +951,6 @@ private:
 
     void start_stepper(const Source& src, std::span<float> dmt) {
         ensure_stepper_state();
-        m_step_src       = src;
         m_dmt_target_ptr = dmt.data();
         m_current_level  = 0;
         m_state_in       = m_state_a.data();
@@ -952,7 +963,30 @@ private:
             step_forward(src, b);
             step_level0(m_state_in + (b * m_state_stride));
         }
+        if (m_mode == FDMTMode::kValid) {
+            // The forward transforms above read the old history; the new
+            // one is copied out of the block now, so finalize() does not
+            // read the caller's buffer again.
+            std::ranges::copy(m_overlap, m_step_overlap.begin());
+            for (SizeType b = 0; b < m_nbeams; ++b) {
+                advance_overlap(src, b, m_step_overlap);
+            }
+        }
         m_is_initialized = true;
+    }
+
+    // mode='valid' keeps one block's history across calls: a stepper run
+    // that was reset() but not finalize()d would lose it.
+    void check_previous_block_finished() const {
+        if (m_mode == FDMTMode::kValid && m_is_initialized) {
+            throw std::logic_error(fmt::format(
+                "FDMTFFT: the previous block's stepper run stopped at level "
+                "{} of {}. In mode='valid' every block must be finalized "
+                "before the next reset()/execute(), or its cross-block "
+                "history is lost. Call finalize(), or reset_history() to "
+                "abandon the stream.",
+                m_current_level, total_levels() - 1));
+        }
     }
 
     [[nodiscard]] Workspace& ws() {
@@ -1040,6 +1074,13 @@ private:
     }
 
     void update_overlap(const Source& src, SizeType beam) {
+        advance_overlap(src, beam, m_overlap);
+    }
+
+    // Shifts one beam's block into `overlap` (m_overlap's layout).
+    void advance_overlap(const Source& src,
+                         SizeType beam,
+                         std::vector<float>& overlap) const {
         if (m_overlap_len == 0) {
             return;
         }
@@ -1047,7 +1088,7 @@ private:
 #pragma omp parallel for schedule(static) num_threads(m_nthreads)
         for (std::int64_t ci = 0; ci < nchans; ++ci) {
             const auto c = static_cast<SizeType>(ci);
-            float* ov    = &m_overlap[((beam * m_nchans) + c) * m_overlap_len];
+            float* ov    = &overlap[((beam * m_nchans) + c) * m_overlap_len];
             advance_overlap_window(src, (beam * m_nchans) + c, ov,
                                    m_overlap_len);
         }
@@ -1284,6 +1325,9 @@ private:
         m_state_stride = m_max_coords * g.n_bins;
         m_state_a.assign(m_nbeams * m_state_stride, ComplexType{});
         m_state_b.assign(m_nbeams * m_state_stride, ComplexType{});
+        if (m_mode == FDMTMode::kValid) {
+            m_step_overlap.assign(m_overlap.size(), 0.0F);
+        }
         for (auto& ws : m_ws) {
             const auto nt = utils::fft_row_stride<float>(g.n_fft);
             if (ws.time.size() < nt) {

@@ -229,6 +229,59 @@ class TestStrictWaterfallInput:
         with pytest.raises(ValueError, match="C-contiguous"):
             fft_eng.load_history(hist_noncontig)
 
+    def test_transposed_waterfalls_are_rejected(self) -> None:
+        """A time-major (nsamps, nchans) array has the right element count but
+        is not a channel-major waterfall: every host binding raises."""
+        nchans, nsamps, nbits = 16, 64, 8
+        dms = np.linspace(0.0, 50.0, 8, dtype=np.float32)
+        wf = np.zeros((nchans, nsamps), dtype=np.float32)
+        packed = np.zeros((nchans, nsamps), dtype=np.uint8)
+        for cls in (dmtlib.FDMT, dmtlib.FDMTFFT):
+            engine = cls(1000.0, 1500.0, nchans, nsamps, 0.001, 8, nthreads=1)
+            for call in (engine.execute, engine.reset):
+                with pytest.raises(ValueError, match="shape"):
+                    call(np.ascontiguousarray(wf.T))
+                with pytest.raises(ValueError, match="shape"):
+                    call(np.ascontiguousarray(packed.T), nbits=nbits)
+                with pytest.raises(ValueError, match="shape"):
+                    call(wf.ravel())
+                with pytest.raises(ValueError, match="shape"):
+                    call(wf[None, None])
+            # (1, nchans, nsamps) is one beam.
+            engine.execute(wf[None])
+        fft = dmtlib.FDMTFFT(1000.0, 1500.0, nchans, nsamps, 0.001, 8, nthreads=1)
+        fft.execute_time_major(np.zeros((nsamps, nchans), np.uint8), nbits=nbits)
+        with pytest.raises(ValueError, match="shape"):
+            fft.execute_time_major(np.zeros((nchans, nsamps), np.uint8), nbits=nbits)
+        beams = dmtlib.FDMT(1000.0, 1500.0, nchans, nsamps, 0.001, 8, nbeams=2)
+        with pytest.raises(ValueError, match="shape"):
+            beams.execute(wf)
+        with pytest.raises(ValueError, match="shape"):
+            beams.execute(np.zeros((3, nchans, nsamps), np.float32))
+
+        for cls in (dmtlib.DDMT, dmtlib.SDMT):
+            engine = cls(1000.0, 1500.0, nchans, 0.001, dms)
+            with pytest.raises(ValueError, match="channels|shape"):
+                engine.execute(np.ascontiguousarray(wf.T))
+            packed_engine = cls(1000.0, 1500.0, nchans, 0.001, dms, nbits=nbits)
+            with pytest.raises(ValueError, match="shape"):
+                packed_engine.execute(np.ascontiguousarray(packed.T), nsamps=nsamps)
+            with pytest.raises(ValueError, match="shape"):
+                packed_engine.execute_time_major(packed, nsamps=nsamps)
+            packed_engine.execute(packed, nsamps=nsamps)
+            packed_engine.execute_time_major(
+                np.ascontiguousarray(packed.T), nsamps=nsamps
+            )
+        fft_dd = dmtlib.DDMTFFT(1000.0, 1500.0, nchans, 0.001, dms)
+        with pytest.raises(ValueError, match="shape"):
+            fft_dd.execute(np.ascontiguousarray(wf.T))
+        packed_fft = dmtlib.DDMTFFT(1000.0, 1500.0, nchans, 0.001, dms, nbits=nbits)
+        with pytest.raises(ValueError, match="shape"):
+            packed_fft.execute(np.ascontiguousarray(packed.T), nsamps=nsamps)
+        with pytest.raises(ValueError, match="shape"):
+            packed_fft.execute_time_major(packed, nsamps=nsamps)
+        packed_fft.execute(packed, nsamps=nsamps)
+
     def test_host_load_history_rejects_wrong_dtype_and_non_contiguous(self) -> None:
         """Host load_history takes exact dtype, C order (FDMT, DDMT, DDMTFFT)."""
         nchans, nsamps = 16, 64

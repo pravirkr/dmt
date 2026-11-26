@@ -202,7 +202,7 @@ class TestFDMT:
             thefdmt.reset(waterfall, dmt=undersized_buf)
 
         # Invalid waterfall dimension
-        with pytest.raises(RuntimeError):
+        with pytest.raises(ValueError, match="shape"):
             thefdmt.reset(waterfall.ravel())
 
         # Subband index out of range
@@ -1037,7 +1037,7 @@ class TestFDMT:
         assert fdmt_multi.nbeams == nbeams
 
         waterfall_single_beam_sized = np.ones((nchans, nsamps), dtype=np.float32)
-        with pytest.raises(ValueError, match="Invalid size of waterfall"):
+        with pytest.raises(ValueError, match="shape"):
             fdmt_multi.execute(waterfall_single_beam_sized)
 
     def test_save_and_load_history(self) -> None:
@@ -1233,7 +1233,7 @@ class TestFDMTUsageContract:
         assert got.base is out or np.shares_memory(got, out)
         with pytest.raises(ValueError):
             fdmt.execute(wf, out=np.empty(fdmt.plan.dmt_size - 1, np.float32))
-        with pytest.raises(TypeError):
+        with pytest.raises(ValueError, match="out must be"):
             fdmt.execute(wf, out=np.empty(fdmt.plan.dmt_size, np.float64))
 
     def test_batched_result_is_a_strided_view(self) -> None:
