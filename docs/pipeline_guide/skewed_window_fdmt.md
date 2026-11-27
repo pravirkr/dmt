@@ -182,12 +182,14 @@ depend on the padding it pushes through).
   their full windows in the state halves, with no history and no target
   rings (which would need 13 GB at depth 4). The local windows of levels
   3–6 are still wide (mean spread 753 samples at level 3 against a chunk of
-  1024), so the windowed top runs best at long chunks: 2.8 s per block at
-  chunk 1024, 1.7 s at 2048 and 1.25 s at 4096 on `parkes_uwl` uint8.
+  1024), so the windowed top runs best at long chunks: before the slicing below,
+  2.8 s per block at chunk 1024, 1.7 s at 2048 and 1.25 s at 4096 on
+  `parkes_uwl` uint8.
   The skewed level-3 kernel stages each slice's channels once for up to 16
   rows; a slice groups rows whose shifts lie within 1024 samples (256 left
   about one row per slice on these local windows: 1.27 → 1.17 s per block
-  for uint8, 1.82 → 1.62 s for float32).
+  for uint8, 1.82 → 1.62 s for float32 at chunk 4096; under the default
+  10 GiB budget float32 runs at chunk 1024, 2.34 s).
 
 Both are tested against the tree path (`tests/cpp/fdmt_skew_cpu_t.cpp`,
 `[skew][boxcar]`): identical candidates and S/N at depths 1, 3 and 5,
@@ -225,7 +227,7 @@ float and packed, CPU and GPU.
   The ring width is known at construction only for an `FDMTBoxcar` with a
   packed configuration (`BoxcarConfig` input bits). A bare `FDMT` is built
   for float input and keeps the float choice ($K = 1$) when it is later fed
-  packed blocks: 4.76 s per block on 8-bit `parkes_uwl` instead of 4.08 s.
+  packed blocks: 4.77 s per block on 8-bit `parkes_uwl` instead of 4.08 s.
 - **GPU:** by building engines (deferred: sized, not allocated) and
   measuring them. A subband search (`FDMTBoxcar`, `subband_depth > 0`)
   takes the first that fits of (`detail::gpu_search_list`,
@@ -288,15 +290,12 @@ boxcar suite (`bench/results/parkes_uwl/plots/summary.md`):
 
 | search | GPU | CPU, 8 threads |
 | :--- | ---: | ---: |
-| full band, uint8 | 0.36 s per block (5.8× real time) | 4.17 s (0.50×) |
-| full band, float32 | 0.36 s (5.8×) | 5.25 s (0.40×) |
+| full band, uint8 | 0.36 s per block (5.8× real time) | – |
+| full band, float32 | 0.36 s (5.8×) | – |
 | depth 4, uint8 | 1.17 s (1.80×) | 6.21 s (0.34×) |
 | depth 4, float32 | 2.34 s (0.90×) | 9.89 s (0.21×) |
 
-(The CPU full-band rows are not in the suite; they come from a standalone
-FDMTBoxcar loop over 5 blocks on the same machine and threads. The float32 row
-was 13.5 s before the leaf level was chosen by speed, see the budget
-section above.)
+(The suite does not time the CPU full-band search.)
 
 The GPU searches depth 4 at the native 64 µs faster than real time within
 10 GiB on 8-bit input; float32 input runs just below real time. The CPU

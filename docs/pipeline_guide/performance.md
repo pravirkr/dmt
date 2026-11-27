@@ -119,14 +119,14 @@ computes the ends of the tree directly instead:
   subband batch at a time (up to 24 batches balanced by $\text{rows} \times
   \text{chunk} + \text{spread}$) in a shared device ping-pong workspace, and
   `DirectTopD` reads level $k_{\text{top}}$ at relative offset $d -
-  s_{\text{lo}}(r) \le \text{spread}(r)$. On `parkes_uwl` this keeps the CUDA
-  FDMT engine in 1.84 GiB (down from 9.05 GB) and runs a 32K block in 353 ms
-  on an L40S (~6× real time). A subband search (`subband_depth > 0`) needs
-  the levels in between, so it takes the *windowed top* instead: level
-  $k_{\text{top}}$ keeps each row's carried spread, and the levels above it
-  are merged over their full windows with every searched row emitted at a
-  fixed lag (see [skewed-window FDMT](skewed_window_fdmt.md#subband-search)):
-  `parkes_uwl` at depth 4 runs in 9.9 GB (8-bit input, chunk 4096) instead
+  s_{\text{lo}}(r) \le \text{spread}(r)$. On `parkes_uwl` the full-band GPU
+  search (transform and boxcars) then fits in 2.1–2.8 GiB and runs 5.8× faster
+  than real time on an L40S (boxcar suite, uint8 and float32 input). A
+  subband search (`subband_depth > 0`) needs the levels in between, so it
+  takes the *windowed top* instead: level $k_{\text{top}}$ keeps each row's
+  carried spread, and the levels above it are merged over their full windows
+  with every searched row emitted at a fixed lag (see [skewed-window FDMT](skewed_window_fdmt.md#subband-search)):
+  `parkes_uwl` at depth 4 runs in 9.8 GiB (8-bit input, chunk 4096) instead
   of the tree path's 15 GB.
 
 Integer-valued input gives the tree's values exactly. Float input agrees with
@@ -143,15 +143,14 @@ the rings when `save_history()` (or a stepper block) needs them, and after
 (on the skewed-window path, `save_history()` saves the compact raw and target
 rings directly; see [skewed-window FDMT](skewed_window_fdmt.md)).
 
-L40S, device-resident 32 768-sample blocks, transform only, median of 3
-runs:
+L40S, device-resident 32 768-sample blocks, transform only, default path
+(direct levels 0–3 and direct top), median of 3 runs (main suite):
 
-| preset | tree (L2 chunks, `fuse_levels=0`) | + direct levels 0–3 | + direct top (default) |
-| :--- | ---: | ---: | ---: |
-| `cryopaf_low` | 37.9 ms | 24.4 ms | 21.8 ms |
-| `cryopaf_lband` | 17.2 ms | 13.8 ms | 11.6 ms |
-| `meerkat_lband` | 46.5 ms | 39.8 ms | 25.7 ms |
-| `parkes_uwl` | – | – | 353 ms (1.84 GiB) |
+| preset | time per block |
+| :--- | ---: |
+| `cryopaf_low` | 21.8 ms |
+| `cryopaf_lband` | 11.6 ms |
+| `meerkat_lband` | 25.7 ms |
 
 Fusion applies to `execute()` only. The stepper (`reset()` / `advance()`)
 always runs level by level, so every level stays inspectable. An explicit
@@ -183,15 +182,16 @@ and map onto GPU thread blocks.
 :::
 
 Measured on the CPU (float input, valid mode, box smearing, 4096 channels,
-`dt_max=2048`; AMD EPYC, 1 and 8 threads, minimum of 5 runs):
+`dt_max=2048`; AMD EPYC 9654, 1 thread and 8 threads one per CCD, minimum
+of 5 runs):
 
 | samples | threads | unfused | automatic (depth) | speedup |
 | ---: | ---: | ---: | ---: | ---: |
-| 4096 | 8 | 12.3 ms | 5.45 ms (8) | 2.25× |
-| 16 384 | 1 | 181.3 ms | 111.6 ms (9) | 1.63× |
-| 16 384 | 8 | 38.7 ms | 21.7 ms (8) | 1.79× |
-| 65 536 | 1 | 724.2 ms | 457.8 ms (9) | 1.58× |
-| 65 536 | 8 | 123.8 ms | 82.5 ms (8) | 1.50× |
+| 4096 | 8 | 18.1 ms | 7.56 ms (8) | 2.40× |
+| 16 384 | 1 | 318.2 ms | 186.9 ms (9) | 1.70× |
+| 16 384 | 8 | 53.5 ms | 29.0 ms (8) | 1.85× |
+| 65 536 | 1 | 1285 ms | 750.1 ms (9) | 1.71× |
+| 65 536 | 8 | 193.8 ms | 111.5 ms (8) | 1.74× |
 
 :::{dropdown} How the automatic rule was fitted
 :icon: info
@@ -211,8 +211,9 @@ mode's automatic budget is 1.75 MiB per group, described below. Pass an
 explicit `fuse_levels` if a sweep on your hardware (`BM_fdmt_fused`, see
 [Reproducing](#reproducing-the-numbers)) finds a better depth.
 
-The table and the budget above are for the whole-block fused path, which
-modes `"full"` and `"roll"` still use.
+The budget above is for the whole-block fused path, which modes `"full"`
+and `"roll"` still use; the table times valid mode, which fuses in time
+tiles (below).
 
 **Valid mode: time-tiled fusion.** At high DM the fused groups no longer fit
 in cache. For the `cryopaf_low` preset (512 channels at 512 µs, DM 0–2000) the
@@ -293,15 +294,15 @@ minimum of 5 runs):
 
 | input | samples | unfused | automatic (depth 3) | speedup | best fixed depth |
 | :--- | ---: | ---: | ---: | ---: | :--- |
-| float | 16 384 | 3.24 ms | 2.26 ms | 1.43× | 3: 2.25 ms |
-| float | 32 768 | 6.47 ms | 4.52 ms | 1.43× | 3: 4.50 ms |
-| 1-bit, `int_tree` | 16 384 | 2.01 ms | 1.80 ms | 1.11× | 3: 1.81 ms |
-| 1-bit, `int_tree` | 32 768 | 4.03 ms | 3.62 ms | 1.11× | 3: 3.62 ms |
+| float | 16 384 | 3.21 ms | 2.15 ms | 1.49× | 3: 2.15 ms |
+| float | 32 768 | 6.40 ms | 4.32 ms | 1.48× | 3: 4.31 ms |
+| 1-bit, `int_tree` | 16 384 | 1.97 ms | 1.70 ms | 1.16× | 3: 1.70 ms |
+| 1-bit, `int_tree` | 32 768 | 3.98 ms | 3.42 ms | 1.16× | 3: 3.41 ms |
 
 Fusion saves less on packed input, because the integer tree has already made
 the early levels small. Deeper tiles also cost more there: at depth 4 the
-tile shrinks to 160 samples, and 1-bit input becomes 29% *slower* than at
-depth 3 (float 17%). Depth 3 is the best for every input.
+tile shrinks to 160 samples, and 1-bit input becomes 26% *slower* than at
+depth 3 (float 16%). Depth 3 is the best for every input.
 
 :::{dropdown} Tile size against resident blocks
 :icon: info
@@ -384,13 +385,17 @@ Speedup over float input, both at the default configuration (automatic
 fusion, `int_tree` on; 4096 channels, `dt_max=2048`, 16 384 samples; minimum
 of 5 runs):
 
-| input | AMD EPYC, 1 thread | AMD EPYC, 8 threads | L40S (device-resident) |
+| input | AMD EPYC 9654, 1 thread | AMD EPYC 9654, 8 threads | L40S (device-resident) |
 | :--- | ---: | ---: | ---: |
-| 1-bit | 1.60× | 1.80× | 1.25× |
-| 2-bit | 1.53× | 1.83× | 1.23× |
-| 4-bit | 1.13× | 1.43× | 1.14× |
-| 8-bit | 1.26× | 1.36× | 1.04× |
-| 16-bit | 1.06× | 1.07× | 0.99× |
+| 1-bit | 1.40× | 1.65× | 1.26× |
+| 2-bit | 1.09× | 1.61× | 1.26× |
+| 4-bit | 1.13× | 1.38× | 1.18× |
+| 8-bit | 1.11× | 1.20× | 1.09× |
+| 16-bit | 0.91× | 0.94× | 0.99× |
+
+On one thread the automatic depth is slower than `fuse_levels=0` for 1- to
+4-bit input on this CPU (1-bit: 134 against 90 ms), which keeps that column
+low; on 8 threads the automatic depth is the faster one.
 
 Packed input without the integer tree runs no faster than float input: **the
 gain comes from the narrow tree state**. At 16 bits nearly every level stays
@@ -398,7 +403,7 @@ float, so the per-channel unpack becomes a small net cost; pass 16-bit data
 as float if you already have it in that form. Against the original
 level-by-level float path (`fuse_levels=0`, `int_tree=False`), the default
 configuration with 1-bit input is 3.2× faster on 8 EPYC threads
-(32.7 → 10.2 ms) and 1.8× on the L40S (3.24 → 1.80 ms).
+(56.7 → 17.5 ms) and 1.9× on the L40S (3.21 → 1.70 ms).
 
 :::{dropdown} Streaming stores on the integer levels
 :icon: info
@@ -425,8 +430,8 @@ construct the engine with `int_tree=False`.
 ## Threads, block size and construction
 
 - **Threads** (`nthreads`): on the CPU, scaling is good up to the point where
-  the memory bus saturates; on an AMD EPYC CPU, 8 threads give 4.5–5.8× over
-  1 thread (float input). On a GPU backend, `nthreads` (default 1) caps the
+  the memory bus saturates; on an AMD EPYC CPU, 8 threads give 6.2–6.7× over
+  1 thread (float input, automatic fusion). On a GPU backend, `nthreads` (default 1) caps the
   host worker threads that pipeline host-memory results through pinned buffers
   (up to 4 on `FDMT`, `FDMTFFT`, `DDMTFFT`, `CohFDMT`; pass `nthreads=4` for
   multi-threaded host-output staging on large planes; device-memory calls do
@@ -568,8 +573,8 @@ levels); the chunked state does not.
 
 | constructor argument | default | applies to | effect |
 | :--- | :--- | :--- | :--- |
-| `int_tree` | `True` | packed input, CPU + CUDA | uint8/uint16 tree levels where exact; 1.04–1.25× over float for ≤ 8-bit input on CUDA, 1.1–1.8× on the CPU (1 and 8 threads) |
-| `fuse_levels` | automatic (`None` in Python, `kFDMTAutoFuse` in C++) | `execute()`, CPU + CUDA | first levels computed on-chip; 1.5–2.25× on the CPU, 1.1–1.43× on CUDA |
+| `int_tree` | `True` | packed input, CPU + CUDA | uint8/uint16 tree levels where exact; 1.09–1.26× over float for ≤ 8-bit input on CUDA, 1.09–1.65× on the CPU (1 and 8 threads) |
+| `fuse_levels` | automatic (`None` in Python, `kFDMTAutoFuse` in C++) | `execute()`, CPU + CUDA | first levels computed on-chip; 1.70–2.40× on the CPU, 1.16–1.49× on CUDA |
 | `chunk_nsamps` | automatic (`None` in Python, `0` in C++) | `execute()` in valid mode, CPU + CUDA | tree state of one chunk instead of one block; bounds memory at high DM |
 
 Pass `fuse_levels=0, int_tree=False` to get the original level-by-level float
@@ -592,7 +597,7 @@ python bench/scripts/fdmt_cache_benchmark.py --section fusion --nchans 4096 --dt
 
 The `fuse` counter in each benchmark row is the depth actually used.
 
-These are the tuning microbenchmarks (`dmt_bench`). The cross-algorithm,
-cross-machine numbers on the [Benchmarks](../benchmarks.md) page come from
+These are the tuning microbenchmarks (`dmt_bench`). The cross-algorithm
+numbers on the [Benchmarks](../benchmarks.md) page come from
 the separate published suite (`dmt_bench_suite`); `bench/README.md` describes
 how to run it.

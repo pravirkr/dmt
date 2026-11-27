@@ -40,7 +40,7 @@ numbers are only comparable while they stay as they are.
   neighbours, then 8 + 7, 4 + 3, 2 + 1 and the full band). Its DM 2000
   sweep is 16.23 s (253891 samples), eight reference blocks, so histories
   are warmed before timing. It is not in the five-engine plots: FDMT-FFT
-  needs ~50 GB (510k-sample segments) and brute-force CPU DDMT takes hours.
+  needs ~480 GiB of device memory and brute-force CPU DDMT takes hours.
   Tolerance 1.6 keeps the grid under 5000 trials (1.1 would need 12941).
 
 The CohFDMT baseband search has its own configuration (`cfdmt`, below).
@@ -178,8 +178,9 @@ smoke tests only.
   and after each run.
 - The FDMT is L3-bound. On CPUs whose L3 is split per core complex (AMD
   EPYC: 32 MB per 8-core CCD), `OMP_PLACES=cores` packs 8 threads into one
-  CCD: the `cryopaf_low` transform takes 619 ms there against 258 ms with
-  one thread per CCD (`OMP_PLACES='{0}:8:8'`).
+  CCD: the `cryopaf_low` transform (32768 samples, 8 threads) takes 606 ms
+  on the eight cores of one CCD (`'{8}:8'`) against 257 ms with one thread
+  per CCD (`'{8}:8:8'`).
 - The runner starts the binaries under `setarch -R`. Google Benchmark 1.10
   re-executes itself to turn off ASLR, and the re-executed process inherits
   the one-core affinity libgomp gave the main thread. Running a binary by

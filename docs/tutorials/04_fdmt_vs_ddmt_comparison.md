@@ -149,8 +149,8 @@ print(f"input {waterfall_u8.dtype} {waterfall_u8.shape} -> output {out_u8.dtype}
 ```
 
 FDMT takes the same layout through `execute(packed, nbits=...)`. Its tree stays in
-narrow integers where the value range allows, which makes 1-bit FDMT about
-2–3× faster than float input.
+narrow integers where the value range allows, which makes 1-bit FDMT up to
+about 1.6× faster than float input (see [Benchmarks](../benchmarks.md)).
 
 ## Which one to use
 

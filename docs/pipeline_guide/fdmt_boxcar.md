@@ -206,7 +206,7 @@ direct top of the float transform, see the performance guide), all in exact
 integers. 8-bit input then takes about the float32 search time (0.99–1.08×
 on the three presets, L40S). The CPU packed search does not fuse the lower
 levels and takes 1.1–1.7× the float32 time on 8 threads (the most on
-`cryopaf_lband`; 1.1–1.2× on one).
+`cryopaf_lband`).
 
 ## Running a search
 
@@ -624,8 +624,8 @@ a fast path that fits in the rest (rule 3 above):
 
 On a GPU, host-memory input is copied to the device one chunk at a time,
 into a `beams x nchans x chunk` buffer reserved at construction and
-counted in `max_memory_bytes` (Parkes UWL, 8-bit, chunk 4096: 27 MiB;
-float32: 109 MiB). Host calls allocate nothing, and the buffer is held
+counted in `max_memory_bytes` (Parkes UWL, 8-bit, chunk 4096: 26 MiB;
+float32: 104 MiB). Host calls allocate nothing, and the buffer is held
 whether or not host input is used.
 
 On the skewed path a subband search reads every searched row (tree,
@@ -710,7 +710,7 @@ preset (`bench/README.md`) with widths up to 100 ms
 (`max_boxcar = floor(0.1 s / tsamp)`) and the default memory budget:
 
 ```bash
-OMP_PLACES='{0}:8:8' python bench/scripts/run_suite.py --suite boxcar \
+OMP_PLACES='{8}:8:8' python bench/scripts/run_suite.py --suite boxcar \
     --config meerkat_lband          # or cryopaf_lband, cryopaf_low, parkes_uwl
 ```
 
@@ -755,7 +755,7 @@ also counts host-side tables and the host candidate buffer. Float32 input on
 the GPU fits the 10 GiB budget only at 1024-sample chunks, which keeps it
 just below real time (0.90×); the 8-bit tree is narrower and fits 4096.
 
-The full band alone takes 0.36 s on the GPU (5.8× real time, 2.1–2.7 GiB).
+The full band alone takes 0.36 s on the GPU (5.8× real time, 2.1–2.8 GiB).
 Searching at a coarser resolution is much cheaper: at 256 µs the GPU runs
 depth 4 at 44–46× real time and 8 CPU threads keep up (3.5–4.2×), and at
 512 µs the CPU is 13–18× faster than real time (the real-time sweep on the

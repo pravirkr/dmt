@@ -231,8 +231,8 @@ box length, about `nchans` (no longer the number of channel samples summed).
   alignment are fused into the per-channel inverse-FFT pass.
 - **GPU front end.** On the GPU, the block's front end (unpack, forward cuFFT, channel powers)
   runs in fixed 24 MiB chunks of subbands (a quarter of the L40S's L2, on any
-  device). Each chunk's passes then stay on chip, which made long multi-pass transforms (30720
-  points) 1.7× faster on an L40S. The chunks also pace the host-array upload.
+  device), so each chunk's passes can stay on chip. The chunks also pace the
+  host-array upload.
 - **GPU coherent stage.** The GPU coherent stage is one fused kernel per coarse trial: gather times
   chirp, an in-shared-memory inverse FFT, detection, normalisation and the
   delay-aligned write. It reads the spectrum once and writes the waterfall once.
@@ -243,7 +243,7 @@ box length, about `nchans` (no longer the number of channel samples summed).
   through a work buffer, about 4.7× slower for this stage. The output matches
   the CPU engine to 1e-4 relative.
 - **Fine FDMT.** With many coarse trials, the fine FDMT becomes the largest GPU cost per
-  trial: 4.7 ms per trial for DM 50–250, against 1.2 ms for the coherent
+  trial: 1.9 ms per trial for DM 50–250, against 1.2 ms for the coherent
   stage.
 - **Host arrays.** The host-array `execute()` on the GPU uploads the block chunk by chunk on a
   copy stream. The front end of each chunk starts as soon as its bytes have

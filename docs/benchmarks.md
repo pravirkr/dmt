@@ -14,7 +14,8 @@ differently.
 | `cryopaf_low` | 704–1216 MHz | 512 | 512 µs | 1545 | 16.8 s |
 
 - **Timing.** Steady-state streaming (valid mode, box smearing): the median
-  of 3 `execute()` calls on a 32 768-sample block, after warm-up.
+  of 3 `execute()` calls on a 32 768-sample block, after warm-up (one call
+  for CPU DDMT and SDMT points above 10¹⁰ additions).
 - **GPU.** Device-resident input and output, timed with CUDA events (no host
   copies).
 - **Grid.** Every engine gets the same piecewise-uniform Levin grid
@@ -228,7 +229,8 @@ differently.
   1.0–1.4× faster than float32 (least on `meerkat_lband`).
 - **GPU.** Only `cryopaf_lband` gains from 1–2-bit input; on the other
   presets float32 uses the faster direct bottom and top kernels.
-- **16-bit** input is no faster than float32 (slower on the GPU).
+- **16-bit** input is no faster than float32 for FDMT (slower on the GPU);
+  DDMT and SDMT gain up to 10% (45% for GPU DDMT on `cryopaf_lband`).
 - **DDMT** sums packed input two samples per instruction; **SDMT** shares sums
   only for float32 and 16-bit input on the GPU. **The Fourier-domain engines**
   transform complex floats whatever the input, so their curves are flat.
@@ -289,7 +291,7 @@ is compute-bound and reuses its input from cache.
 by `FDMTBoxcar` at subband depth 4 (about 218 000 searched rows) with
 boxcars to 100 ms, within the default 10 GiB memory budget. The sweep repeats
 the search downsampled to 256, 512 and 1024 µs, on 2.1 s blocks. The other
-engines are not run here (FDMT-FFT needs ~50 GB; CPU DDMT takes hours).
+engines are not run here (FDMT-FFT needs ~480 GiB; CPU DDMT takes hours).
 
 ```{image} ../bench/results/parkes_uwl/plots/light/uwl_realtime.png
 :class: only-light
@@ -302,7 +304,7 @@ engines are not run here (FDMT-FFT needs ~50 GB; CPU DDMT takes hours).
 
 - **The GPU keeps up at the native 64 µs on 8-bit input.** Float32 fits the
   budget only with short chunks and runs just below real time.
-- **Each halving of the resolution is 3–6× cheaper on the GPU and 2–5× on
+- **Each halving of the resolution is 3–7× cheaper on the GPU and 2–5× on
   the CPU.** From 256 µs, 8 CPU threads keep up. At high DM the bottom
   channels are smeared far beyond 256 µs anyway, so a real-time system can
   search at 256–512 µs and keep the 64 µs data around triggers.
