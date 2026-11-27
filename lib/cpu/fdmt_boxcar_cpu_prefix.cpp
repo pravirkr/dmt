@@ -58,23 +58,25 @@ inline bool check_width_range(const plans::BoxcarPlanePlan& plane,
         const Prefix* lo      = prefix + lookback + 1 - width;
         const auto th         = static_cast<Prefix>(thr_row[f]);
         const uint64_t first_valid = row.warmup + width - 1;
-        bool hit                   = false;
+        // Integer OR reductions: Clang does not vectorize `||` ones.
+        uint32_t hit = 0;
         if (w_edge == 0) {
-#pragma omp simd reduction(|| : hit)
+#pragma omp simd reduction(| : hit)
             for (SizeType t = 0; t < n; ++t) {
-                hit = hit || (hi[t] - lo[t] >= th &&
-                              (!cold || start + t >= first_valid));
+                hit |= static_cast<uint32_t>(hi[t] - lo[t] >= th) &
+                       static_cast<uint32_t>(!cold || start + t >= first_valid);
             }
         } else {
             const Prefix* lo_in = prefix + lookback + 1 - width + w_edge;
             const Prefix* hi_in = prefix + lookback + 1 - w_edge;
-#pragma omp simd reduction(|| : hit)
+#pragma omp simd reduction(| : hit)
             for (SizeType t = 0; t < n; ++t) {
                 const Prefix sum = (hi[t] - lo[t]) + (hi_in[t] - lo_in[t]);
-                hit = hit || (sum >= th && (!cold || start + t >= first_valid));
+                hit |= static_cast<uint32_t>(sum >= th) &
+                       static_cast<uint32_t>(!cold || start + t >= first_valid);
             }
         }
-        if (hit) {
+        if (hit != 0) {
             return true;
         }
     }
@@ -389,14 +391,16 @@ bool FDMTBoxcarCpuEngine::screen_tile(const plans::BoxcarPlanePlan& plane,
         const double* b = mins + lookback + 1 - grp.w_lo - span + 1;
         // A trapezoid (always a group of one) is not bounded by the
         // range minimum: check it exactly.
-        bool any = m_config.use_trapezoid && trapezoid_edge_width(grp.w_lo) > 0;
-        if (!any) {
-#pragma omp simd reduction(|| : any)
+        uint32_t any = static_cast<uint32_t>(
+            m_config.use_trapezoid && trapezoid_edge_width(grp.w_lo) > 0);
+        if (any == 0) {
+#pragma omp simd reduction(| : any)
             for (SizeType t = 0; t < n; ++t) {
-                any = any || (hi[t] - std::min(a[t], b[t]) >= thresh);
+                any |= static_cast<uint32_t>(hi[t] - std::min(a[t], b[t]) >=
+                                             thresh);
             }
         }
-        if (!any) {
+        if (any == 0) {
             continue;
         }
         if (check_width_range(plane, thr_row, row, prefix, lookback, start, n,
@@ -444,14 +448,16 @@ bool FDMTBoxcarCpuEngine::screen_tile_int(const plans::BoxcarPlanePlan& plane,
         const double* mins  = range_min + (grp.level * stride);
         const double* a     = mins + lookback + 1 - grp.w_hi;
         const double* b     = mins + lookback + 1 - grp.w_lo - span + 1;
-        bool any = m_config.use_trapezoid && trapezoid_edge_width(grp.w_lo) > 0;
-        if (!any) {
-#pragma omp simd reduction(|| : any)
+        uint32_t any        = static_cast<uint32_t>(
+            m_config.use_trapezoid && trapezoid_edge_width(grp.w_lo) > 0);
+        if (any == 0) {
+#pragma omp simd reduction(| : any)
             for (SizeType t = 0; t < n; ++t) {
-                any = any || (hi[t] - std::min(a[t], b[t]) >= thresh);
+                any |= static_cast<uint32_t>(hi[t] - std::min(a[t], b[t]) >=
+                                             thresh);
             }
         }
-        if (!any) {
+        if (any == 0) {
             continue;
         }
         if (check_width_range(plane, ithr_row, row, prefix, lookback, start, n,

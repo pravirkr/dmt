@@ -202,7 +202,10 @@ public:
                     r.needed > std::numeric_limits<SizeType>::max() - boxcar_est
                         ? std::numeric_limits<SizeType>::max()
                         : boxcar_est + r.needed;
-                return over(std::max(budget + 1, need), false);
+                // The need as estimated, even when it is within the budget
+                // (the estimate was short): estimate_minimum_memory() then
+                // steps the budget up instead of by one byte.
+                return over(need, false);
             };
             auto res = build(cfg, used, &fdmt_bytes);
             if (!res.ok) {
@@ -871,10 +874,94 @@ void FDMTBoxcar::reset_history(Stream stream) {
     }
 }
 CandidateResultView FDMTBoxcar::drain() {
-    return detail::drain_stream(*m_impl->engine, m_impl->plan, m_impl->beams,
-                                m_impl->config.input_nbits,
-                                m_impl->engine->search_latency(),
-                                m_impl->drain_state);
+    return detail::drain_stream(
+        *m_impl->engine, m_impl->plan, m_impl->beams, m_impl->config,
+        m_impl->planes, m_impl->engine->search_latency(), m_impl->drain_state);
+}
+
+namespace {
+
+void check_tail(const plans::FDMTPlan& plan, SizeType n_tail) {
+    if (n_tail == 0 || n_tail > plan.get_nsamps()) {
+        throw std::invalid_argument(fmt::format(
+            "FDMTBoxcar::drain: n_tail must be 1..nsamps ({}), got {}",
+            plan.get_nsamps(), n_tail));
+    }
+}
+
+} // namespace
+
+CandidateResultView FDMTBoxcar::drain(std::span<const float> tail,
+                                      SizeType n_tail,
+                                      std::span<const uint8_t> kill_mask) {
+    m_impl->drain_state.check_open("FDMTBoxcar::drain");
+    check_tail(m_impl->plan, n_tail);
+    return detail::drain_stream(
+        *m_impl->engine, m_impl->plan, m_impl->beams, m_impl->config,
+        m_impl->planes, m_impl->engine->search_latency(), m_impl->drain_state,
+        n_tail, [&] {
+            return m_impl->run_masked(kill_mask, tail.size(), [&] {
+                return m_impl->engine->execute(tail);
+            });
+        });
+}
+CandidateResultView FDMTBoxcar::drain(std::span<const uint8_t> tail,
+                                      SizeType n_tail,
+                                      std::span<const uint8_t> kill_mask) {
+    m_impl->drain_state.check_open("FDMTBoxcar::drain");
+    check_tail(m_impl->plan, n_tail);
+    return detail::drain_stream(
+        *m_impl->engine, m_impl->plan, m_impl->beams, m_impl->config,
+        m_impl->planes, m_impl->engine->search_latency(), m_impl->drain_state,
+        n_tail, [&] {
+            return m_impl->run_masked(kill_mask, tail.size(), [&] {
+                return m_impl->engine->execute(tail);
+            });
+        });
+}
+CandidateResultView FDMTBoxcar::drain(DeviceSpan<const float> tail,
+                                      SizeType n_tail,
+                                      Stream stream) {
+    return drain(tail, n_tail, std::span<const uint8_t>{}, stream);
+}
+CandidateResultView FDMTBoxcar::drain(DeviceSpan<const float> tail,
+                                      SizeType n_tail,
+                                      std::span<const uint8_t> kill_mask,
+                                      Stream stream) {
+    m_impl->drain_state.check_open("FDMTBoxcar::drain");
+    check_tail(m_impl->plan, n_tail);
+    detail::check_device(tail.device, backend(), device(), "FDMTBoxcar::drain");
+    return detail::drain_stream(
+        *m_impl->engine, m_impl->plan, m_impl->beams, m_impl->config,
+        m_impl->planes, m_impl->engine->search_latency(), m_impl->drain_state,
+        n_tail, [&] {
+            static_cast<void>(m_impl->run_masked(kill_mask, tail.size(), [&] {
+                return m_impl->engine->execute(tail, stream);
+            }));
+            return m_impl->engine->copy_result(stream);
+        });
+}
+CandidateResultView FDMTBoxcar::drain(DeviceSpan<const uint8_t> tail,
+                                      SizeType n_tail,
+                                      Stream stream) {
+    return drain(tail, n_tail, std::span<const uint8_t>{}, stream);
+}
+CandidateResultView FDMTBoxcar::drain(DeviceSpan<const uint8_t> tail,
+                                      SizeType n_tail,
+                                      std::span<const uint8_t> kill_mask,
+                                      Stream stream) {
+    m_impl->drain_state.check_open("FDMTBoxcar::drain");
+    check_tail(m_impl->plan, n_tail);
+    detail::check_device(tail.device, backend(), device(), "FDMTBoxcar::drain");
+    return detail::drain_stream(
+        *m_impl->engine, m_impl->plan, m_impl->beams, m_impl->config,
+        m_impl->planes, m_impl->engine->search_latency(), m_impl->drain_state,
+        n_tail, [&] {
+            static_cast<void>(m_impl->run_masked(kill_mask, tail.size(), [&] {
+                return m_impl->engine->execute(tail, stream);
+            }));
+            return m_impl->engine->copy_result(stream);
+        });
 }
 uint64_t FDMTBoxcar::get_searched_nsamps() const noexcept {
     return detail::searched_nsamps(*m_impl->engine, m_impl->drain_state,

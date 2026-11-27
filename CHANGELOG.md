@@ -27,6 +27,33 @@ All notable changes to `dmt` are listed here. The format follows
   large planes.
 - Keyword-only `out=` on host `FDMTFFT.execute` / `execute_time_major`
   (Python) and `dmt::dispersion_delay()` in `dmt/common/types.hpp`.
+- **Short final blocks:** `FDMT::execute_tail()` (valid mode) and
+  `FDMTBoxcar::drain(tail, n_tail, ...)` (with optional per-call `kill_mask`)
+  take a whole block of which only the first `n_tail` samples are data (host
+  or device, float or packed; Python `FDMT.execute_tail(block, n_tail)` and
+  `FDMTBoxcar.drain(block, n_tail=..., kill_mask=...)`). Neither the first
+  `n_tail` outputs nor any returned candidate depends on the padding; the
+  stream then ends.
+- **Mirrored baseband:** `BasebandFormat::descending` (subbands stored from
+  the top down) and `BasebandFormat::lower_sideband` (inverted subband
+  spectra), e.g. GUPPI `CHAN_BW < 0`, read directly by `CohFDMT` on the CPU
+  and GPU (Python keyword-only `descending=`, `lower_sideband=`);
+  `pack_baseband` writes them.
+- **Python device arrays on `FDMTBoxcar` and `FDMTFFTBoxcar`:** `execute()`
+  (and `FDMTBoxcar.drain(tail, ...)`) read PyTorch, CuPy, Numba and other
+  DLPack / `__cuda_array_interface__` arrays in place, with `kill_mask=` and
+  keyword-only `stream=`, and return host candidates.
+- **Python parity:** `CohFDMTPlan.fdmt_nsamps`, `fdmt_window_start`,
+  `row_offsets` and `channel_taper`; `DDMTPlan(..., kill_mask=)`;
+  keyword-only `out=` on host `DDMT` / `SDMT` / `DDMTFFT` `execute` and
+  `execute_time_major`; `dmtlib.dedisperse(..., device=)`.
+- `CohFDMT::execute<char>` (alongside `int8_t` and `uint8_t`); the
+  `dmt::ByteDataType` concept rejects other types at compile time.
+- **Docs:** `FDMTBoxcar`, `FDMTFFTBoxcar`, the candidate types, build
+  information and the simulation utilities in the C++ API reference;
+  `FDMTBoxcar` in both quickstarts; known limits (subband candidate times,
+  `CohFDMTPlan.dm_grid_final` layout, packed cold start, 32-bit GPU indices)
+  and cross-compiling for login nodes and containers.
 
 ### Changed
 
@@ -49,14 +76,50 @@ All notable changes to `dmt` are listed here. The format follows
   samples; per-call kill masks work on any block length; GPU subband and CPU
   packed searches favour faster skewed chunks where applicable; `drain()` no
   longer allocates a zero input block.
-- **Python bindings:** GIL released around host transforms and history calls;
-  `dmtlib.simulate.generate_pure_frb` wraps C++ `libdmt.generate_pure_frb`
-  (float `dt`, single precision; Numba version removed).
+- **Python bindings:** GIL released around host transforms and history
+  calls, engine construction, `estimate_memory` / `estimate_minimum_memory`
+  and `pack_baseband`; `dmtlib.simulate.generate_pure_frb` wraps C++
+  `libdmt.generate_pure_frb` (float `dt`; Numba version removed) and returns
+  the dispersed-sample count as an `int`.
+- **Breaking — `BoxcarConfig` is an aggregate:** its positional constructors
+  are removed; set fields by name (`BoxcarConfig{.max_boxcar = 64,
+  .detect_thresh = 7.0F}`). Python is unchanged.
+- **Breaking — `FDMTFFTBoxcar` argument order:** the constructor and
+  `estimate_memory()` end with `(..., max_memory_bytes, kill_mask)` as on
+  `FDMTBoxcar`; in Python `kill_mask` is keyword-only after
+  `max_memory_bytes`.
+- **Breaking — input shapes in Python:** `FDMT`, `FDMTFFT`, `DDMT`, `SDMT`
+  and `DDMTFFT` (host and device, `execute` and `reset`) check every axis:
+  a transposed, time-major `(nsamps, nchans)` array with the right element
+  count raises `ValueError` instead of being read as channel-major. Wrong
+  `ndim`, non-contiguous `CohFDMT` blocks and bad host `out=` buffers raise
+  `ValueError` (was `RuntimeError` / `TypeError`).
+- **Dispersion constants are `double`:** `kDispConst` (`1 / 2.41e-4`),
+  `kDispConstMT`, `kDispConstLK` and `kDispConstSI`; `kDispConstD` is
+  removed. Candidate DMs and `CohFDMT` output move at the float rounding
+  level.
+- **`drain()` keeps the call's quotas:** `max_candidates`,
+  `max_candidates_per_plane` and `kKeepBrightest` now hold over the whole
+  drained tail, not each internal step.
+- **Logging without spdlog:** debug messages go to `stderr` under a mutex
+  (`[dmt] [debug] ...`); spdlog is no longer a dependency and fmt is not
+  installed.
+- **CMake:** `DMT_BUILD_PYTHON` defaults to `ON` only under `pip install`
+  (scikit-build-core), so a plain C++ configure needs no Python; a CMake
+  install no longer copies the Python module; FFTW is linked privately.
+- **Wheels:** Intel macOS wheels target `x86-64-v3` (AVX2/FMA) like the Linux
+  x86-64 ones; `matplotlib` joins the `tests` extra.
+- **CPU SIMD:** AVX2 and ARM64 NEON prefix scans and AVX2 streaming stores on
+  the skewed-window path (previously AVX-512 only; ~18% faster packed
+  `FDMTBoxcar` on an x86-64-v3 build of `cryopaf_low`); integer `|` SIMD
+  reductions in the prefix screen, which Clang vectorizes.
 
 ### Removed
 
 - `BoxcarScreenMode::kKadaneSurrogate` (`KADANE_SURROGATE`); use `kKadane`.
 - `dmt::AlignedAllocator` and `dmt::AlignedVector` from `dmt/common/types.hpp`.
+- `dmt::kDispConstD` (`kDispConst` is now `double`) and the `BoxcarConfig`
+  positional constructors.
 - No-op `DDMTFFT::set_gulp_size()` / `get_gulp_size()` (C++ and Python).
 - `dmtlib.generate_optimal_dm_grid` and `generate_optimal_dt_grid`.
 - Internal `DMT_HD`, `DMT_D` and `DMT_H` macros from `dmt/common/types.hpp`.
@@ -75,6 +138,31 @@ All notable changes to `dmt` are listed here. The format follows
   (`ValueError`) instead of failing with a CUDA error; `CohFDMTPlan`
   rejects automatic `nbin` > 2^20; NaN/inf saved history headers are rejected
   under `-ffast-math`.
+- `generate_pure_frb` computes in double and no longer writes negative or
+  spurious values into sample 0 when the sweep starts before the block.
+- CPU `FDMTFFT` stepper: `reset()` no longer keeps a pointer to the caller's
+  block (read again by `finalize()`); on CPU and GPU, `execute()` and
+  `reset()` in mode `"valid"` raise while a stepper block is unfinished, as
+  on `FDMT`. Python `reset()` keeps the running block's buffers when it is
+  rejected.
+- GPU `DDMTFFT` splits NUFFT runs until their grids fit the spread kernel's
+  dynamic shared memory (it failed on 64 KiB GPUs, e.g. `meerkat_lband`).
+  GPU engines take the per-block shared-memory limit where the opt-in limit
+  is 0 (ROCm), subtract each kernel's static shared memory, and set kernel
+  attributes only when they allocate, never in `estimate_memory()`.
+- GPU `FDMTBoxcar` sizes the packed-input width screen in floats (it reserved
+  twice that and dropped the screen for wide boxes on 64 KiB GPUs and for
+  3073–4096 on 99 KiB ones).
+- A NaN or infinity in one block no longer blinds the Kadane-screened search
+  for the rest of the stream: non-finite carries restart at 0 between calls.
+- HIP builds: `cudaMemcpy2D`, `hipHostFree` in the tests, `cuda::std` only
+  from a libhipcxx CMake found, and 64-bit warp shuffles as two 32-bit ones.
+- `find_package(FFTW)` and `find_package(dmt)` in one project no longer
+  fail on duplicate `FFTW::*` targets.
+- `DDMT` / `SDMT` reject plans whose delays or DM trial counts exceed `int`;
+  `BasebandFormat::levels_2bit` must be finite;
+  `FDMTBoxcar::estimate_minimum_memory()` steps the budget up when an
+  estimate falls short instead of by one byte.
 
 ## [0.8.0] - 2026-11-11
 

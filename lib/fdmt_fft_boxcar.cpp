@@ -161,8 +161,8 @@ FDMTFFTBoxcar::FDMTFFTBoxcar(plans::FDMTPlan plan,
                              Exec exec,
                              SizeType nbeams,
                              bool fractional_delays,
-                             std::span<const uint8_t> kill_mask,
-                             SizeType max_memory_bytes)
+                             SizeType max_memory_bytes,
+                             std::span<const uint8_t> kill_mask)
     : m_impl(std::make_unique<Impl>(std::move(plan),
                                     config,
                                     use_box_smearing,
@@ -178,8 +178,8 @@ FDMTFFTBoxcar::estimate_memory(const plans::FDMTPlan& plan,
                                Exec exec,
                                SizeType nbeams,
                                bool fractional_delays,
-                               std::span<const uint8_t> kill_mask,
-                               SizeType max_memory_bytes) {
+                               SizeType max_memory_bytes,
+                               std::span<const uint8_t> kill_mask) {
     const Impl impl(plan, config, use_box_smearing, exec, nbeams,
                     fractional_delays, kill_mask, max_memory_bytes,
                     /*estimate_only=*/true);
@@ -219,8 +219,8 @@ void FDMTFFTBoxcar::reset_history(Stream stream) {
 }
 CandidateResultView FDMTFFTBoxcar::drain() {
     return detail::drain_stream(*m_impl->engine, m_impl->plan, m_impl->beams,
-                                m_impl->config.input_nbits, m_impl->latency,
-                                m_impl->drain_state);
+                                m_impl->config, get_search_plans(),
+                                m_impl->latency, m_impl->drain_state);
 }
 uint64_t FDMTFFTBoxcar::get_searched_nsamps() const noexcept {
     return detail::searched_nsamps(*m_impl->engine, m_impl->drain_state,

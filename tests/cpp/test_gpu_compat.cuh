@@ -30,7 +30,7 @@
 #define cudaFree hipFree
 #define cudaHostAlloc hipHostMalloc
 #define cudaHostGetDevicePointer hipHostGetDevicePointer
-#define cudaFreeHost hipFreeHost
+#define cudaFreeHost hipHostFree
 #define cudaMemcpy hipMemcpy
 #define cudaMemcpyAsync hipMemcpyAsync
 #define cudaMemset hipMemset

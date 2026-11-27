@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -461,6 +462,9 @@ private:
     // Estimate-only: plan tables and history are sized into m_planned,
     // never uploaded.
     bool m_estimate_only;
+    /// The chosen kernel's shared-memory opt-in (run by init() outside
+    /// estimates).
+    std::function<void()> m_kernel_setup;
     DDMTMemoryUsage m_planned{};
     SizeType m_max_delay{0};
     SizeType m_ndm{0};
@@ -708,7 +712,11 @@ private:
         }
 
         if (m_estimate_only) {
-            return; // estimates create no streams or events
+            return; // estimates create no streams or events, set no kernel
+                    // attributes
+        }
+        if (m_kernel_setup) {
+            m_kernel_setup();
         }
         gpu_utils::check_gpu_call(cudaStreamCreate(&m_htod_stream),
                                   "Failed to create H2D stream");
@@ -813,32 +821,32 @@ private:
         if (m_ndm == 0 || active.empty()) {
             return;
         }
-        int optin = 0;
-        if (cudaDeviceGetAttribute(&optin,
-                                   cudaDevAttrMaxSharedMemoryPerBlockOptin,
-                                   m_device_id) != cudaSuccess ||
-            optin <= 0) {
-            optin = 48 * 1024;
-        }
-        // At least two resident blocks per SM hide the staging latency.
-        const auto budget =
-            static_cast<SizeType>(std::min(optin, 96 * 1024)) / 2;
         auto try_cfg = [&]<bool kWide>() {
-            using Cfg   = typename CfgFor<NBITS, kWide>::type;
-            using Shape = TileShape<NBITS, Cfg>;
+            using Cfg         = typename CfgFor<NBITS, kWide>::type;
+            using Shape       = TileShape<NBITS, Cfg>;
+            const auto kernel = ddmt_gpu::ddmt_tiled_kernel<NBITS, Cfg>;
+            // At least two resident blocks per SM hide the staging latency.
+            const auto budget =
+                std::min<SizeType>(
+                    gpu_utils::dynamic_smem_limit(kernel, m_device_id,
+                                                  "DDMT: shared memory limit"),
+                    96 * 1024) /
+                2;
             if (!kWide || m_ndm > static_cast<SizeType>(Shape::kTDM / 2)) {
                 const int spread = tile_spread(delays, active, Shape::kTDM);
                 if (spread < 32768 && Shape::smem_bytes(spread) <= budget) {
                     m_spread = spread;
                     m_kind   = kWide ? KernelKind::kWide : KernelKind::kNarrow;
                     build_tile_tables(delays, active, Shape::kTDM);
-                    // Ceiling is per kernel specialization in this process;
-                    // use device opt-in max so multiple DDMT plans coexist.
-                    gpu_utils::check_gpu_call(
-                        cudaFuncSetAttribute(
-                            ddmt_gpu::ddmt_tiled_kernel<NBITS, Cfg>,
-                            cudaFuncAttributeMaxDynamicSharedMemorySize, optin),
-                        "DDMT: setting tiled kernel shared memory failed");
+                    // The ceiling is per kernel specialization in this
+                    // process and only ever raised; set by init() outside
+                    // estimates.
+                    const auto bytes = Shape::smem_bytes(spread);
+                    m_kernel_setup   = [kernel, bytes] {
+                        gpu_utils::raise_dynamic_smem(
+                            kernel, bytes,
+                            "DDMT: setting tiled kernel shared memory failed");
+                    };
                     return true;
                 }
             }
@@ -865,16 +873,13 @@ private:
         if (m_ndm == 0 || active.empty()) {
             return false;
         }
-        using E   = sdmt_gpu::Elem<NBITS>;
-        int optin = 0;
-        if (cudaDeviceGetAttribute(&optin,
-                                   cudaDevAttrMaxSharedMemoryPerBlockOptin,
-                                   m_device_id) != cudaSuccess ||
-            optin <= 0) {
-            optin = 48 * 1024;
-        }
+        using E = sdmt_gpu::Elem<NBITS>;
+        // The shared-sum kernels declare no static shared memory.
         const auto budget =
-            static_cast<SizeType>(std::min(optin, 96 * 1024)) / 2;
+            std::min<SizeType>(gpu_utils::max_shared_mem_per_block(
+                                   m_device_id, "SDMT: shared memory limit"),
+                               96 * 1024) /
+            2;
         const auto nchans = m_plan.get_nchans();
         std::optional<sdmt_gpu::Plan> best;
         int best_cfg = 0;
@@ -939,12 +944,13 @@ private:
         upload(m_sdmt_nodes_d, best->nodes.begin(), best->nodes.end());
         upload(m_sdmt_trials_d, best->trials.begin(), best->trials.end());
         with_sdmt_cfg(best_cfg, [&]<class Cfg>() {
-            gpu_utils::check_gpu_call(
-                cudaFuncSetAttribute(
-                    sdmt_gpu::sdmt_kernel<NBITS, Cfg::kTY, Cfg::kDPT,
-                                          Cfg::kSPW>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize, optin),
-                "SDMT: setting kernel shared memory failed");
+            const auto kernel =
+                sdmt_gpu::sdmt_kernel<NBITS, Cfg::kTY, Cfg::kDPT, Cfg::kSPW>;
+            const auto bytes = m_sdmt_smem;
+            m_kernel_setup   = [kernel, bytes] {
+                gpu_utils::raise_dynamic_smem(
+                    kernel, bytes, "SDMT: setting kernel shared memory failed");
+            };
         });
         return true;
     }

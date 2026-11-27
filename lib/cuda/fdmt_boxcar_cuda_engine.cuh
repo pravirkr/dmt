@@ -3,6 +3,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -986,6 +987,28 @@ template <typename T> inline const T* raw(const thrust::device_vector<T>& v) {
     return thrust::raw_pointer_cast(v.data());
 }
 
+// Probe matching the boxcar scorer kernels' launch bounds, extern __shared__
+// alignment, block votes (__syncthreads_or, up to 6 inlined call sites in
+// score_tile_bookkeeping + keep_drain + any_open_peaks + outer loop) and
+// 64-bit shuffles so cudaFuncGetAttributes / hipFuncGetAttributes reports any
+// compiler- or runtime-reserved static LDS before layout selection.
+template <int kBlockThreads>
+__global__ void __launch_bounds__(kBlockThreads, 4)
+    kernel_boxcar_smem_probe(uint64_t* out) {
+    extern __shared__ __align__(16) unsigned char storage[];
+    int vote = storage[threadIdx.x] != 0 ? 1 : 0;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        vote = __syncthreads_or(vote != 0);
+    }
+    const uint64_t v =
+        shfl_up<uint64_t>(static_cast<uint64_t>(vote), 1U) ^
+        gpu_compat::shfl<uint64_t>(static_cast<uint64_t>(vote), 0);
+    if (out != nullptr && threadIdx.x == 0) {
+        *out = v;
+    }
+}
+
 class FDMTBoxcarCudaEngine final : public FDMTBoxcarEngine {
 public:
     FDMTBoxcarCudaEngine(const plans::FDMTPlan& plan,
@@ -1050,27 +1073,65 @@ private:
         bool release_pending = false;
     };
 
+    // Checks that `kernel` can take `smem` bytes of dynamic shared memory
+    // (a read-only query) and queues its opt-in and carveout for
+    // allocate(): estimates and deferred constructions set no attributes.
     template <typename Kernel>
-    void configure_kernel(Kernel kernel, SizeType smem = 0) const {
-        gpu_utils::raise_dynamic_smem(kernel, smem != 0 ? smem : m_smem,
-                                      "FDMTBoxcar: shared-memory opt-in");
+    void configure_kernel(Kernel kernel, SizeType smem = 0) {
+        const SizeType bytes = smem != 0 ? smem : m_smem;
+        const auto limit     = gpu_utils::dynamic_smem_limit(
+            kernel, m_device, "FDMTBoxcar: shared memory limit");
+        if (bytes > limit) {
+            throw std::invalid_argument(fmt::format(
+                "FDMTBoxcar: the search kernel needs {} B of shared memory "
+                "per block; the device allows {} B",
+                bytes, limit));
+        }
+        m_kernel_setup.emplace_back([kernel, bytes] {
+            gpu_utils::raise_dynamic_smem(kernel, bytes,
+                                          "FDMTBoxcar: shared-memory opt-in");
 #if !defined(DMT_ENABLE_HIP)
-        // Several resident rows per SM need the shared-memory carveout.
-        gpu_utils::check_gpu_call(
-            cudaFuncSetAttribute(kernel,
-                                 cudaFuncAttributePreferredSharedMemoryCarveout,
-                                 cudaSharedmemCarveoutMaxShared),
-            "FDMTBoxcar: shared-memory carveout");
+            // Several resident rows per SM need the shared-memory carveout.
+            gpu_utils::check_gpu_call(
+                cudaFuncSetAttribute(
+                    kernel, cudaFuncAttributePreferredSharedMemoryCarveout,
+                    cudaSharedmemCarveoutMaxShared),
+                "FDMTBoxcar: shared-memory carveout");
 #endif
+        });
+        if (m_allocated) {
+            run_kernel_setup();
+        }
     }
 
+    // The queued kernel attributes (allocate() and non-deferred
+    // construction).
+    void run_kernel_setup() {
+        for (const auto& setup : m_kernel_setup) {
+            setup();
+        }
+        m_kernel_setup.clear();
+    }
+
+    // Dynamic shared memory per block available to the boxcar scorer kernels:
+    // the device limit less compiler/runtime-reserved static shared memory
+    // (padded to storage's 16-byte alignment), queried before layout selection
+    // so HIP kernels with static LDS fall back cleanly instead of failing in
+    // configure_kernel().
     [[nodiscard]] SizeType shared_mem_limit() const {
-        int optin = 0;
-        gpu_utils::check_gpu_call(
-            cudaDeviceGetAttribute(
-                &optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, m_device),
-            "FDMTBoxcar: shared memory limit");
-        return static_cast<SizeType>(optin);
+        constexpr std::string_view kMsg = "FDMTBoxcar: shared memory limit";
+        const SizeType raw =
+            gpu_utils::max_shared_mem_per_block(m_device, kMsg);
+        const SizeType lim  = std::min({
+            gpu_utils::dynamic_smem_limit(kernel_boxcar_smem_probe<64>,
+                                          m_device, kMsg),
+            gpu_utils::dynamic_smem_limit(kernel_boxcar_smem_probe<128>,
+                                          m_device, kMsg),
+            gpu_utils::dynamic_smem_limit(kernel_boxcar_smem_probe<256>,
+                                          m_device, kMsg),
+        });
+        const SizeType used = ((raw - lim) + 15) / 16 * 16;
+        return raw > used ? raw - used : 0;
     }
 
     template <typename T, typename HeaderBytes>
@@ -1084,7 +1145,9 @@ private:
                 header_bytes(std::integral_constant<int, kBlockThreads>{}) +
                 (ring * sizeof(T));
             if (screen) {
-                bytes = ((bytes + 15) / 16 * 16) + (ring * sizeof(T));
+                // The width screen's range minimum (s_screen) holds floats
+                // for every input type.
+                bytes = ((bytes + 15) / 16 * 16) + (ring * sizeof(float));
             }
             return bytes;
         };
@@ -1128,16 +1191,23 @@ private:
         const SizeType ring           = std::bit_ceil(m_width + kBlockTile);
         const SizeType fixed          = header_bytes + (ring * sizeof(T));
         const SizeType tables = m_filters * (sizeof(T) + sizeof(uint32_t));
-        m_block_threads       = kBlockThreads;
-        m_mask                = static_cast<uint32_t>(ring - 1);
+        const auto total_with = [&](SizeType extra) {
+            SizeType bytes = fixed + extra;
+            if (with_screen) {
+                bytes = ((bytes + 15) / 16 * 16) + (ring * sizeof(float));
+            }
+            return bytes;
+        };
+        m_block_threads = kBlockThreads;
+        m_mask          = static_cast<uint32_t>(ring - 1);
         m_shared_tables =
-            m_filters <= kSharedFilters && fixed + tables <= limit;
+            m_filters <= kSharedFilters && total_with(tables) <= limit;
         m_smem          = fixed + (m_shared_tables ? tables : 0);
         m_screen_offset = 0;
         if (with_screen) {
             m_smem          = (m_smem + 15) / 16 * 16;
             m_screen_offset = m_smem;
-            m_smem += ring * sizeof(T);
+            m_smem += ring * sizeof(float); // s_screen: floats for every T
         }
         m_group_offset = 0;
         m_smem_noise   = m_smem;
@@ -1407,6 +1477,8 @@ private:
     /// destroyed first, after nothing else refers to it).
     gpu_utils::PendingList m_deferred;
     bool m_allocated = false;
+    /// Kernel attributes set by allocate() (configure_kernel()).
+    std::vector<std::function<void()>> m_kernel_setup;
 };
 
 } // namespace dmt::algorithms::detail::fdmt_boxcar_cuda

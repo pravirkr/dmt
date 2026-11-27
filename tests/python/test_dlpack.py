@@ -68,7 +68,8 @@ class Lib:
     def synchronize(self) -> None:
         raise NotImplementedError
 
-    def used_bytes(self) -> int:
+    def used_bytes(self) -> int | None:
+        """Bytes this library has allocated, or None when it cannot tell."""
         raise NotImplementedError
 
     def full(self, shape: int | tuple[int, ...], value: float, dtype: Any) -> Any:  # noqa: ANN401
@@ -219,9 +220,10 @@ class Numba(Lib):
     def synchronize(self) -> None:
         self.cuda.synchronize()
 
-    def used_bytes(self) -> int:
-        free, total = self.cuda.current_context().get_memory_info()
-        return total - free
+    def used_bytes(self) -> int | None:
+        # Numba has no allocator count of its own; the device-wide free
+        # memory races with other processes (parallel pytest workers).
+        return None
 
 
 LIBS = {"cupy": CuPy, "torch": Torch, "numba": Numba}
@@ -266,13 +268,33 @@ class TestFDMT:
         assert tuple(got.shape) == want.shape
         np.testing.assert_array_equal(xp.get(got), want)
 
+    @pytest.mark.parametrize("cls", [FDMT, FDMTFFT])
+    def test_transposed_input_is_rejected(self, cls: type, cuda: str, xp: Lib) -> None:
+        engine = cls(*FDMT_ARGS, backend=cuda)
+        wf_t = xp.asarray(np.zeros((256, 64), dtype=np.float32))
+        packed_t = xp.asarray(np.zeros((256, 64), dtype=np.uint8))
+        with pytest.raises(ValueError, match="shape"):
+            engine.execute(wf_t)
+        with pytest.raises(ValueError, match="shape"):
+            engine.execute(packed_t, nbits=8)
+        with pytest.raises(ValueError, match="shape"):
+            engine.reset(wf_t)
+        with pytest.raises(ValueError, match="shape"):
+            engine.reset(packed_t, nbits=8)
+        for ddmt_cls in (DDMT, DDMTFFT):
+            dms = np.array([0.0, 10.0], dtype=np.float32)
+            dd = ddmt_cls(1000.0, 1500.0, 64, 0.001, dms, nbits=8, backend=cuda)
+            with pytest.raises(ValueError, match="shape"):
+                dd.execute(packed_t, nsamps=256)
+
     def test_out_is_written_in_place(self, cuda: str, xp: Lib) -> None:
         fdmt = FDMT(*FDMT_ARGS, backend=cuda)
         wf = xp.asarray(np.random.default_rng(1).standard_normal((64, 256), np.float32))
         out = xp.full(fdmt.plan.dmt_size + 7, -1.0, dtype=np.float32)
         used = xp.used_bytes()
         got = fdmt.execute(wf, out=out)
-        assert xp.used_bytes() == used  # no copy of the input or output
+        if used is not None:
+            assert xp.used_bytes() == used  # no copy of the input or output
         assert xp.ptr(got) == xp.ptr(out)
         assert tuple(got.shape) == (fdmt.plan.dmt_ndms, fdmt.plan.dmt_nsamps)
         assert float(out[-1]) == -1.0
@@ -409,6 +431,116 @@ def host_history(cls: type, block: np.ndarray, backend: str) -> np.ndarray:
     return eng.save_history()
 
 
+def _boxcar_plan() -> dmtlib.FDMTPlan:
+    return dmtlib.FDMTPlan(1000.0, 1500.0, 64, 256, 0.001, 40)
+
+
+def _same_candidates(got: np.ndarray, want: np.ndarray) -> None:
+    order = ("peak_sample", "dm_idx", "width", "beam_idx")
+    np.testing.assert_array_equal(np.sort(got, order=order), np.sort(want, order=order))
+
+
+class TestBoxcar:
+    """FDMTBoxcar / FDMTFFTBoxcar on device blocks: the same candidates as
+    host blocks of the same stream, returned as host results."""
+
+    @pytest.mark.parametrize("packed", [False, True])
+    def test_fdmt_boxcar_stream_matches_host(
+        self, packed: bool, cuda: str, xp: Lib
+    ) -> None:
+        rng = np.random.default_rng(31)
+        if packed:
+            cfg = dmtlib.BoxcarConfig(
+                16,
+                detect_thresh=4.0,
+                input_nbits=8,
+                input_mean=128.0,
+                noise_sigma=20.0,
+            )
+            blocks = [
+                rng.integers(80, 176, (64, 256)).astype(np.uint8) for _ in range(3)
+            ]
+        else:
+            cfg = dmtlib.BoxcarConfig(16, detect_thresh=4.0)
+            blocks = [rng.standard_normal((64, 256), np.float32) for _ in range(3)]
+        mask = np.ones(64, dtype=np.uint8)
+        mask[5] = 0
+        host = dmtlib.FDMTBoxcar(_boxcar_plan(), cfg, backend=cuda)
+        dev = dmtlib.FDMTBoxcar(_boxcar_plan(), cfg, backend=cuda)
+        for k, block in enumerate(blocks):
+            kill = mask if k == 1 else None
+            want = host.execute(block, kill_mask=kill)
+            got = dev.execute(xp.asarray(block), kill_mask=kill)
+            assert isinstance(got, dmtlib.BoxcarResult)
+            assert got.emitted_count == want.emitted_count
+            assert got.input_sample_begin == want.input_sample_begin
+            _same_candidates(got.candidates, want.candidates)
+        _same_candidates(dev.flush().candidates, host.flush().candidates)
+
+    def test_fdmt_boxcar_on_a_stream(self, cuda: str, xp: Lib) -> None:
+        cfg = dmtlib.BoxcarConfig(16, detect_thresh=4.0)
+        block = np.random.default_rng(32).standard_normal((64, 256), np.float32)
+        want = dmtlib.FDMTBoxcar(_boxcar_plan(), cfg, backend=cuda).execute(block)
+        dev = dmtlib.FDMTBoxcar(_boxcar_plan(), cfg, backend=cuda)
+        stream = xp.stream()
+        with xp.use(stream):
+            data = xp.asarray(block)
+        got = dev.execute(data, stream=stream)
+        _same_candidates(got.candidates, want.candidates)
+
+    def test_fdmt_fft_boxcar_matches_host(self, cuda: str, xp: Lib) -> None:
+        cfg = dmtlib.BoxcarConfig(16, detect_thresh=4.0)
+        rng = np.random.default_rng(33)
+        blocks = [rng.standard_normal((64, 256), np.float32) for _ in range(2)]
+        host = dmtlib.FDMTFFTBoxcar(_boxcar_plan(), cfg, backend=cuda)
+        dev = dmtlib.FDMTFFTBoxcar(_boxcar_plan(), cfg, backend=cuda)
+        for block in blocks:
+            want = host.execute(block)
+            got = dev.execute(xp.asarray(block))
+            assert got.emitted_count == want.emitted_count
+            _same_candidates(got.candidates, want.candidates)
+
+    def test_short_tail(self, cuda: str, xp: Lib) -> None:
+        """FDMT.execute_tail and FDMTBoxcar.drain(tail) on device blocks."""
+        rng = np.random.default_rng(34)
+        block = rng.standard_normal((64, 256), np.float32)
+        host = FDMT(*FDMT_ARGS, backend=cuda)
+        dev = FDMT(*FDMT_ARGS, backend=cuda)
+        want = host.execute_tail(block, 100)
+        got = dev.execute_tail(xp.asarray(block), 100)
+        np.testing.assert_array_equal(xp.get(got)[:, :100], want[:, :100])
+        with pytest.raises(RuntimeError, match="execute_tail"):
+            host.save_history()
+        with pytest.raises(RuntimeError, match="execute_tail"):
+            dev.save_history(xp.empty(dev.history_state_size(), np.float32))
+        mask = np.ones(64, dtype=np.uint8)
+        mask[[3, 19]] = 0
+        masked_block = block.copy()
+        masked_block[mask == 0, :100] = 50.0
+        cfg = dmtlib.BoxcarConfig(16, detect_thresh=3.0, per_call_masks=True)
+        host_s = dmtlib.FDMTBoxcar(_boxcar_plan(), cfg, backend=cuda)
+        dev_s = dmtlib.FDMTBoxcar(_boxcar_plan(), cfg, backend=cuda)
+        with pytest.raises(TypeError):
+            dev_s.drain(
+                xp.asarray(masked_block), n_tail=100, kill_mask=xp.asarray(mask)
+            )
+        want_c = host_s.drain(masked_block, n_tail=100, kill_mask=mask)
+        got_c = dev_s.drain(xp.asarray(masked_block), n_tail=100, kill_mask=mask)
+        _same_candidates(got_c.candidates, want_c.candidates)
+        assert dev_s.searched_nsamps == 100
+
+    def test_errors(self, cuda: str, xp: Lib) -> None:
+        cfg = dmtlib.BoxcarConfig(16)
+        dev = dmtlib.FDMTBoxcar(_boxcar_plan(), cfg, backend=cuda)
+        with pytest.raises(ValueError, match="shape"):
+            dev.execute(xp.asarray(np.zeros((256, 64), np.float32)))
+        with pytest.raises(TypeError):
+            dev.execute(xp.asarray(np.zeros((64, 256), np.float64)))
+        cpu = dmtlib.FDMTBoxcar(_boxcar_plan(), cfg)
+        with pytest.raises(ValueError, match="cpu backend"):
+            cpu.execute(xp.asarray(np.zeros((64, 256), np.float32)))
+
+
 DDMT_ARGS = (1000.0, 1500.0, 64, 0.001, 50.0, 1.0)
 
 
@@ -475,9 +607,9 @@ class TestDDMT:
 
     def test_errors(self, cuda: str, xp: Lib) -> None:
         dev = DDMT(*DDMT_ARGS, backend=cuda)
-        with pytest.raises(ValueError, match="channels"):
+        with pytest.raises(ValueError, match="shape"):
             dev.execute(xp.asarray(np.zeros((32, 128), dtype=np.float32)))
-        with pytest.raises(ValueError, match="beam"):
+        with pytest.raises(ValueError, match="shape"):
             dev.execute(xp.asarray(np.zeros((2, 64, 128), dtype=np.float32)))
 
     @pytest.mark.parametrize("method", ["brute", "nufft"])

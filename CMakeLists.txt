@@ -30,14 +30,22 @@ endif()
 
 # Configuration options
 option(DMT_BUILD_DOCS "Build documentation" OFF)
-# Python bindings and tests default to ON only when dmt is the top-level
-# project, not when it is pulled in via add_subdirectory/FetchContent/CPM.
+# Tests default to ON only when dmt is the top-level project, not when it is
+# pulled in via add_subdirectory/FetchContent/CPM. Python bindings default to
+# ON only under scikit-build-core (pip install), so a plain C++ configure
+# needs neither Python nor pybind11.
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
   set(DMT_IS_TOP_LEVEL ON)
 else()
   set(DMT_IS_TOP_LEVEL OFF)
 endif()
-option(DMT_BUILD_PYTHON "Build Python bindings" ${DMT_IS_TOP_LEVEL})
+if(DEFINED SKBUILD)
+  set(_dmt_python_default ON)
+else()
+  set(_dmt_python_default OFF)
+endif()
+option(DMT_BUILD_PYTHON "Build Python bindings" ${_dmt_python_default})
+unset(_dmt_python_default)
 option(DMT_BUILD_TESTING "Build C++ tests" ${DMT_IS_TOP_LEVEL})
 option(DMT_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(DMT_ENABLE_COVERAGE "Enable coverage reporting" OFF)
@@ -147,11 +155,13 @@ if(DMT_HAS_WNO_MISSING_DESIGNATED_FIELD_INITIALIZERS)
     INTERFACE $<$<NOT:$<COMPILE_LANGUAGE:CUDA,HIP>>:-Wno-missing-designated-field-initializers>
   )
 endif()
-if(DMT_ENABLE_COVERAGE)
-  set(DMT_CXX_CONFIG_FLAGS_DEBUG -O0 -g)
-else()
-  set(DMT_CXX_CONFIG_FLAGS_DEBUG -O1 -g)
-endif()
+# Debug builds (also the asan and coverage presets) keep assertions at -O1,
+# the level the sanitizers are designed for.
+set(DMT_DEBUG_OPT_LEVEL
+    "-O1"
+    CACHE STRING "Optimization flag for Debug builds (also coverage builds)"
+)
+set(DMT_CXX_CONFIG_FLAGS_DEBUG ${DMT_DEBUG_OPT_LEVEL} -g)
 set(DMT_CXX_CONFIG_FLAGS_RELEASE -O3 -DNDEBUG -ffast-math)
 if(DMT_MARCH_FLAG)
   list(APPEND DMT_CXX_CONFIG_FLAGS_RELEASE "${DMT_MARCH_FLAG}")
@@ -211,8 +221,7 @@ function(dmt_enable_coverage target)
   endif()
   target_compile_options(
     ${target}
-    PUBLIC $<BUILD_INTERFACE:$<$<COMPILE_LANGUAGE:CXX>:-O0>>
-           $<BUILD_INTERFACE:$<$<COMPILE_LANGUAGE:CXX>:-g>>
+    PUBLIC $<BUILD_INTERFACE:$<$<COMPILE_LANGUAGE:CXX>:-g>>
            $<BUILD_INTERFACE:$<$<COMPILE_LANGUAGE:CXX>:--coverage>>
   )
   target_link_options(${target} PUBLIC $<BUILD_INTERFACE:--coverage>)
@@ -258,12 +267,12 @@ install(
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
-if(DMT_GPU_OPTIONS)
-  install(TARGETS ${DMT_GPU_OPTIONS} EXPORT dmtTargets)
-endif()
-
 # Install headers
-install(DIRECTORY ${PROJECT_SOURCE_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(
+  DIRECTORY ${PROJECT_SOURCE_DIR}/include/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  PATTERN ".DS_Store" EXCLUDE
+)
 # dmtConfig.cmake's find_dependency(FFTW) (static builds) needs the finder.
 install(FILES ${PROJECT_SOURCE_DIR}/cmake/FindFFTW.cmake DESTINATION ${DMT_CMAKE_PACKAGE_DIR})
 

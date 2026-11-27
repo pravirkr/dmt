@@ -4,6 +4,7 @@
 // decoding, shared by the CPU and GPU unpackers.
 
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -67,6 +68,16 @@ inline void validate_baseband_format(const BasebandFormat& format) {
     if (format.nbits != 2 && format.nbits != 4 && format.nbits != 8) {
         throw std::invalid_argument(fmt::format(
             "BasebandFormat: nbits={} unsupported (2, 4 or 8)", format.nbits));
+    }
+    if (format.nbits == 2) {
+        for (const float level : format.levels_2bit) {
+            // Bit test: -ffast-math folds std::isfinite.
+            const volatile auto bits = std::bit_cast<std::uint32_t>(level);
+            if ((bits & 0x7F800000U) == 0x7F800000U) {
+                throw std::invalid_argument(
+                    "BasebandFormat: levels_2bit must be finite");
+            }
+        }
     }
 }
 

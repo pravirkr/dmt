@@ -110,6 +110,25 @@ CMAKE_ARGS="-DDMT_GPU=HIP" uv pip install .    # AMD (ROCm)
 :::
 ::::
 
+#### Login nodes, containers and mixed clusters
+
+By default the build targets the machine it runs on: `-march=native` for
+the CPU and the GPU it finds. On an HPC login node (often no GPU, and a
+different CPU from the compute nodes) or in a container image, name the
+targets instead, or the build stops at the GPU check or produces code that
+dies with `SIGILL` on other nodes:
+
+```bash
+CMAKE_ARGS="-DDMT_ENABLE_NATIVE_ARCH=OFF -DDMT_CPU_ARCH=x86-64-v3 \
+  -DDMT_GPU=CUDA -DDMT_GPU_CHECK_DEVICE=OFF \
+  -DDMT_CUDA_ARCHITECTURES='80;89;90'" uv pip install .
+```
+
+`x86-64-v3` (AVX2/FMA) runs on x86 CPUs since Haswell / Zen; use
+`x86-64-v4` only where every node has AVX-512. List the compute capability
+of each GPU model the jobs will use (`80` A100, `89` L40S/RTX Ada, `90`
+H100). The `portable` CMake preset sets the same options for C++ builds.
+
 To check the install:
 
 ```python
@@ -233,7 +252,7 @@ With CPM: `CPMAddPackage("gh:pravirkr/dmt#main")`. With a vendored copy:
 
 | CMake option | Default | Description |
 | :--- | :--- | :--- |
-| `DMT_BUILD_PYTHON` | `ON` (top level), `OFF` (subproject) | Build Python bindings via pybind11 |
+| `DMT_BUILD_PYTHON` | `ON` under `pip install` (scikit-build-core), else `OFF` | Build Python bindings via pybind11 (the presets that need them set it) |
 | `DMT_BUILD_TESTING` | `ON` (top level), `OFF` (subproject) | Build the Catch2 C++ unit tests |
 | `DMT_BUILD_BENCHMARKS` | `OFF` | Build the Google Benchmark suites (`dmt_bench`) |
 | `DMT_BUILD_DOCS` | `OFF` | Configure Doxygen and Sphinx documentation targets |
@@ -244,7 +263,7 @@ With CPM: `CPMAddPackage("gh:pravirkr/dmt#main")`. With a vendored copy:
 | `DMT_ENABLE_NATIVE_ARCH`| `ON` | `-march=native` in Release builds. Turn `OFF` for binaries or wheels that must run on other CPUs |
 | `DMT_CPU_ARCH` | (empty) | Fixed Release `-march` value that overrides native, e.g. `x86-64-v3` (AVX2), `x86-64-v4` (AVX-512) |
 | `DMT_ENABLE_IPO` | `OFF` | Link-time optimization in Release builds |
-| `DMT_USE_SYSTEM_DEPS` | `OFF` | Prefer compatible system packages over the pinned bundled dependencies (fmt, spdlog) |
+| `DMT_USE_SYSTEM_DEPS` | `OFF` | Prefer compatible system packages over the pinned bundled dependencies (fmt) |
 | `DMT_ENABLE_COVERAGE` | `OFF` | Coverage instrumentation |
 | `BUILD_SHARED_LIBS` | `OFF` | Build shared library (`ON`) or static library (`OFF`) |
 

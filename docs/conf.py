@@ -547,6 +547,35 @@ Compute Engines (``dmt::algorithms``)
 .. doxygenvariable:: dmt::algorithms::kFDMTAutoFuse
    :project: dmt
 
+Candidate Search (``FDMTBoxcar``, ``FDMTFFTBoxcar``)
+----------------------------------------------------
+
+.. doxygenclass:: dmt::algorithms::FDMTBoxcar
+   :project: dmt
+   :members:
+
+.. doxygenclass:: dmt::algorithms::FDMTFFTBoxcar
+   :project: dmt
+   :members:
+
+.. doxygenstruct:: dmt::algorithms::FDMTBoxcarMemoryUsage
+   :project: dmt
+   :members:
+
+.. doxygenstruct:: dmt::algorithms::FDMTBoxcarMemoryEstimate
+   :project: dmt
+   :members:
+
+.. doxygenfile:: candidate.hpp
+   :project: dmt
+
+.. doxygenstruct:: dmt::plans::BoxcarPlanePlan
+   :project: dmt
+   :members:
+
+.. doxygenfunction:: dmt::plans::generate_box_width_trials
+   :project: dmt
+
 Backends (``dmt/common/backend.hpp``)
 -------------------------------------
 
@@ -624,6 +653,18 @@ Types (``dmt/common/types.hpp``)
 --------------------------------
 
 .. doxygenfile:: types.hpp
+   :project: dmt
+
+Build information (``dmt/common/build_info.hpp``)
+-------------------------------------------------
+
+.. doxygenfile:: build_info.hpp
+   :project: dmt
+
+Simulation utilities (``dmt::utils``, ``dmt/utils/simulate.hpp``)
+-----------------------------------------------------------------
+
+.. doxygenfile:: simulate.hpp
    :project: dmt
 
 Logging (``dmt/common/logging.hpp``)

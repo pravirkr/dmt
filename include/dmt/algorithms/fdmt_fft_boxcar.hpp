@@ -55,13 +55,13 @@ namespace dmt::algorithms {
 class FDMTFFTBoxcar {
 public:
     explicit FDMTFFTBoxcar(plans::FDMTPlan plan,
-                           BoxcarConfig config                = {},
-                           bool use_box_smearing              = true,
-                           Exec exec                          = {},
-                           SizeType nbeams                    = 1,
-                           bool fractional_delays             = true,
-                           std::span<const uint8_t> kill_mask = {},
-                           SizeType max_memory_bytes = kFDMTDefaultMaxMemory);
+                           BoxcarConfig config       = {},
+                           bool use_box_smearing     = true,
+                           Exec exec                 = {},
+                           SizeType nbeams           = 1,
+                           bool fractional_delays    = true,
+                           SizeType max_memory_bytes = kFDMTDefaultMaxMemory,
+                           std::span<const uint8_t> kill_mask = {});
     /**
      * @brief Memory an instance built with these arguments would allocate,
      * and its chunk (the overlap-save segment), computed without allocating
@@ -75,8 +75,8 @@ public:
                     Exec exec                          = {},
                     SizeType nbeams                    = 1,
                     bool fractional_delays             = true,
-                    std::span<const uint8_t> kill_mask = {},
-                    SizeType max_memory_bytes          = kFDMTDefaultMaxMemory);
+                    SizeType max_memory_bytes          = kFDMTDefaultMaxMemory,
+                    std::span<const uint8_t> kill_mask = {});
     ~FDMTFFTBoxcar();
     FDMTFFTBoxcar(FDMTFFTBoxcar&&) noexcept;
     FDMTFFTBoxcar& operator=(FDMTFFTBoxcar&&) noexcept;

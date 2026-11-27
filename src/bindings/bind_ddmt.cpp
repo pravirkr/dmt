@@ -40,10 +40,16 @@ py::object ddmt_packed_device(DDMT& ddmt,
                               SizeType nsamps,
                               const py::object& out,
                               const py::object& stream,
+                              bool time_major,
                               Run&& run) {
     const DeviceCall call =
         device_call(what, ddmt.backend(), ddmt.device(), packed, stream);
     const auto input = call.consume<uint8_t>(packed.obj, "waterfall", false);
+    const auto& dl   = input.tensor();
+    check_ddmt_packed_shape(
+        ddmt, what, time_major ? "filterbank_packed" : "waterfall_packed",
+        std::span<const int64_t>(dl.shape, static_cast<SizeType>(dl.ndim)),
+        nsamps, time_major);
     return ddmt_execute_device<uint8_t, int32_t>(
         ddmt, call, packed.obj, input, nsamps, ddmt.get_nbeams() > 1, out,
         [&](DeviceSpan<const uint8_t> in, DeviceSpan<int32_t> dmt, Stream s) {
@@ -61,6 +67,8 @@ template <typename T, typename Cls> void def_ddmt_inits(Cls& cls) {
                         SizeType nbeams, std::string_view backend, int device,
                         std::optional<float> f_ref) {
                 const auto km_vec = extract_kill_mask(kill_mask);
+                // Pure C++ from here: other Python threads run meanwhile.
+                const py::gil_scoped_release release;
                 return T(f_min, f_max, nchans, tsamp, dm_max, dm_step, dm_min,
                          make_exec(backend, nthreads, device), nbits, km_vec,
                          nbeams, f_ref);
@@ -76,6 +84,8 @@ template <typename T, typename Cls> void def_ddmt_inits(Cls& cls) {
                          std::optional<float> f_ref) {
                  const auto km_vec = extract_kill_mask(kill_mask);
                  const auto dms    = copy_native_1d<float>(dm_arr, "dm_arr");
+                 // Pure C++ from here: other Python threads run meanwhile.
+                 const py::gil_scoped_release release;
                  return T(f_min, f_max, nchans, tsamp,
                           std::span<const float>(dms.data(), dms.size()),
                           make_exec(backend, nthreads, device), nbits, km_vec,
@@ -91,6 +101,8 @@ template <typename T, typename Cls> void def_ddmt_inits(Cls& cls) {
                          std::string_view backend, int device,
                          std::optional<float> f_ref) {
                  const auto km_vec = extract_kill_mask(kill_mask);
+                 // Pure C++ from here: other Python threads run meanwhile.
+                 const py::gil_scoped_release release;
                  return T(f_min, f_max, nchans, tsamp, levin,
                           make_exec(backend, nthreads, device), nbits, km_vec,
                           nbeams, f_ref);
@@ -101,6 +113,8 @@ template <typename T, typename Cls> void def_ddmt_inits(Cls& cls) {
              "f_ref"_a = py::none())
         .def(py::init([](const DDMTPlan& plan, int nthreads, SizeType nbeams,
                          std::string_view backend, int device) {
+                 // Pure C++ from here: other Python threads run meanwhile.
+                 const py::gil_scoped_release release;
                  return T(plan, make_exec(backend, nthreads, device), nbeams);
              }),
              "plan"_a, "nthreads"_a = 1, "nbeams"_a = 1, py::kw_only(),
@@ -109,6 +123,8 @@ template <typename T, typename Cls> void def_ddmt_inits(Cls& cls) {
         "estimate_memory",
         [](const DDMTPlan& plan, SizeType nsamps, int nthreads, SizeType nbeams,
            SizeType gulp_size, std::string_view backend, int device) {
+            // Pure C++ from here: other Python threads run meanwhile.
+            const py::gil_scoped_release release;
             return T::estimate_memory(plan, nsamps,
                                       make_exec(backend, nthreads, device),
                                       nbeams, gulp_size);
@@ -271,7 +287,8 @@ void bind_ddmt(py::module_& mod) {
             "DDMTMemoryUsage: bytes held now (see estimate_memory).")
         .def(
             "execute",
-            [](DDMT& ddmt, const py::array& waterfall_obj) {
+            [](DDMT& ddmt, const py::array& waterfall_obj,
+               const std::optional<py::array>& out) {
                 const auto waterfall = require_contiguous_array<float>(
                     waterfall_obj, "DDMT.execute", "float32");
                 const auto& plan = ddmt.get_plan();
@@ -317,7 +334,7 @@ void bind_ddmt(py::module_& mod) {
                 const auto nsamps_out = ddmt.get_output_nsamps(nsamps_in);
                 const auto dm_count   = plan.get_container().dm_arr.size();
 
-                py::array_t<float, py::array::c_style> dmt(
+                auto dmt = shaped_output<float>(
                     ndim == 3
                         ? std::vector<py::ssize_t>{static_cast<py::ssize_t>(
                                                        nbeams),
@@ -325,9 +342,11 @@ void bind_ddmt(py::module_& mod) {
                                                        dm_count),
                                                    static_cast<py::ssize_t>(
                                                        nsamps_out)}
-                        : std::vector<py::ssize_t>{
-                              static_cast<py::ssize_t>(dm_count),
-                              static_cast<py::ssize_t>(nsamps_out)});
+                        : std::vector<py::ssize_t>{static_cast<py::ssize_t>(
+                                                       dm_count),
+                                                   static_cast<py::ssize_t>(
+                                                       nsamps_out)},
+                    "DDMT.execute", out);
                 const std::span<const float> in_span(waterfall.data(),
                                                      waterfall.size());
                 const std::span<float> out_span =
@@ -340,25 +359,35 @@ void bind_ddmt(py::module_& mod) {
                 }
                 return dmt;
             },
-            "waterfall"_a.noconvert(),
+            "waterfall"_a.noconvert(), py::kw_only(), "out"_a = py::none(),
             R"doc(
             Dedisperse a float32 waterfall of shape ``(nchans, nsamps)``, or
             ``(nbeams, nchans, nsamps)`` if this instance's nbeams > 1.
             Produces ``(n_dm, output_nsamps)`` or ``(nbeams, n_dm, output_nsamps)``.
+            Keyword-only ``out``: a writeable, C-contiguous array of at least
+            that many elements (float32; int32 for packed input), filled and
+            returned as that shape instead of a new array (the packed
+            overloads take it too).
             )doc")
         .def(
             "execute",
             [](DDMT& ddmt, const py::array& waterfall_packed_obj,
-               SizeType nsamps) {
+               SizeType nsamps, const std::optional<py::array>& out) {
                 const auto waterfall_packed = require_contiguous_array<uint8_t>(
                     waterfall_packed_obj, "DDMT.execute", "uint8");
+                check_ddmt_packed_shape(
+                    ddmt, "DDMT.execute", "waterfall_packed",
+                    std::span<const py::ssize_t>(
+                        waterfall_packed.shape(),
+                        static_cast<SizeType>(waterfall_packed.ndim())),
+                    nsamps, false);
                 const auto& plan      = ddmt.get_plan();
                 const auto& plan_c    = plan.get_container();
                 const auto nsamps_out = ddmt.get_output_nsamps(nsamps);
                 const auto dm_count   = plan_c.dm_arr.size();
                 const auto nbeams     = ddmt.get_nbeams();
 
-                py::array_t<int32_t, py::array::c_style> dmt(
+                auto dmt = shaped_output<int32_t>(
                     nbeams > 1
                         ? std::vector<py::ssize_t>{static_cast<py::ssize_t>(
                                                        nbeams),
@@ -366,9 +395,11 @@ void bind_ddmt(py::module_& mod) {
                                                        dm_count),
                                                    static_cast<py::ssize_t>(
                                                        nsamps_out)}
-                        : std::vector<py::ssize_t>{
-                              static_cast<py::ssize_t>(dm_count),
-                              static_cast<py::ssize_t>(nsamps_out)});
+                        : std::vector<py::ssize_t>{static_cast<py::ssize_t>(
+                                                       dm_count),
+                                                   static_cast<py::ssize_t>(
+                                                       nsamps_out)},
+                    "DDMT.execute", out);
                 const std::span<const uint8_t> in_span(waterfall_packed.data(),
                                                        waterfall_packed.size());
                 const std::span<int32_t> out_span =
@@ -382,6 +413,7 @@ void bind_ddmt(py::module_& mod) {
                 return dmt;
             },
             "waterfall_packed"_a.noconvert(), py::kw_only(), "nsamps"_a,
+            "out"_a = py::none(),
             R"doc(
             Dedisperse a channel-major packed integer waterfall of shape
             ``(nchans, row_bytes)``, or ``(nbeams, nchans, row_bytes)`` if
@@ -392,17 +424,23 @@ void bind_ddmt(py::module_& mod) {
         .def(
             "execute_time_major",
             [](DDMT& ddmt, const py::array& filterbank_packed_obj,
-               SizeType nsamps) {
+               SizeType nsamps, const std::optional<py::array>& out) {
                 const auto filterbank_packed =
                     require_contiguous_array<uint8_t>(filterbank_packed_obj,
                                                       "DDMT.execute_time_major",
                                                       "uint8");
+                check_ddmt_packed_shape(
+                    ddmt, "DDMT.execute_time_major", "filterbank_packed",
+                    std::span<const py::ssize_t>(
+                        filterbank_packed.shape(),
+                        static_cast<SizeType>(filterbank_packed.ndim())),
+                    nsamps, true);
                 const auto& plan_c    = ddmt.get_plan().get_container();
                 const auto nsamps_out = ddmt.get_output_nsamps(nsamps);
                 const auto dm_count   = plan_c.dm_arr.size();
                 const auto nbeams     = ddmt.get_nbeams();
 
-                py::array_t<int32_t, py::array::c_style> dmt(
+                auto dmt = shaped_output<int32_t>(
                     nbeams > 1
                         ? std::vector<py::ssize_t>{static_cast<py::ssize_t>(
                                                        nbeams),
@@ -410,9 +448,11 @@ void bind_ddmt(py::module_& mod) {
                                                        dm_count),
                                                    static_cast<py::ssize_t>(
                                                        nsamps_out)}
-                        : std::vector<py::ssize_t>{
-                              static_cast<py::ssize_t>(dm_count),
-                              static_cast<py::ssize_t>(nsamps_out)});
+                        : std::vector<py::ssize_t>{static_cast<py::ssize_t>(
+                                                       dm_count),
+                                                   static_cast<py::ssize_t>(
+                                                       nsamps_out)},
+                    "DDMT.execute_time_major", out);
                 // Always called, even with no output yet: the block still
                 // feeds the stream history.
                 const std::span<const uint8_t> in_span(
@@ -426,6 +466,7 @@ void bind_ddmt(py::module_& mod) {
                 return dmt;
             },
             "filterbank_packed"_a.noconvert(), py::kw_only(), "nsamps"_a,
+            "out"_a = py::none(),
             R"doc(
             Dedisperse a time-major packed filterbank of shape
             ``(nsamps, samp_bytes)``, or ``(nbeams, nsamps, samp_bytes)`` if
@@ -494,6 +535,7 @@ void bind_ddmt(py::module_& mod) {
                const py::object& out, const py::object& stream) {
                 return ddmt_packed_device(
                     ddmt, "DDMT.execute", waterfall_packed, nsamps, out, stream,
+                    false,
                     [&](DeviceSpan<const uint8_t> in, SizeType n,
                         DeviceSpan<int32_t> dmt,
                         Stream s) { ddmt.execute(in, n, dmt, s); });
@@ -508,7 +550,7 @@ void bind_ddmt(py::module_& mod) {
                const py::object& stream) {
                 return ddmt_packed_device(
                     ddmt, "DDMT.execute_time_major", filterbank_packed, nsamps,
-                    out, stream,
+                    out, stream, true,
                     [&](DeviceSpan<const uint8_t> in, SizeType n,
                         DeviceSpan<int32_t> dmt,
                         Stream s) { ddmt.execute_time_major(in, n, dmt, s); });

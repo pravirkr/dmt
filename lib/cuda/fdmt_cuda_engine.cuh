@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <span>
 #include <stdexcept>
@@ -538,6 +539,7 @@ private:
         gpu_utils::PlannedVector<float> win_ring;
         gpu_utils::PlannedVector<uint8_t> win_ring_u8;
         gpu_utils::PlannedVector<uint16_t> win_ring_u16;
+        std::vector<std::function<void()>> kernel_setup;
     };
     std::unique_ptr<DirectLevelsD> m_direct;
     bool m_direct_eligible{false};
@@ -834,10 +836,15 @@ private:
 
     [[nodiscard]] SizeType max_optin_smem_bytes() const;
 
+    [[nodiscard]] SizeType fused_smem_limit() const;
+
     /// Shared memory per fused block for kAutoBlocksPerSM resident blocks
     /// (less the ~1 KiB the runtime reserves per block), at most the
     /// no-opt-in limit.
     [[nodiscard]] SizeType auto_smem_bytes() const;
+
+    /// Runs queued kernel shared-memory opt-ins once the engine allocates.
+    void run_kernel_setup();
 
     /**
      * Resolves the fuse_levels constructor argument for this plan and device

@@ -22,7 +22,8 @@ namespace dmt {
  * - `P`  polarisation (2),
  * - `RI` real/imaginary component (2, real first),
  * - `T`  time (the block's samples per subband),
- * - `F`  subband (the group's subbands, ascending frequency),
+ * - `F`  subband (the group's subbands, ascending frequency; descending
+ *        with @ref descending),
  *
  * stored in the order given by @ref order, outermost axis first. Every
  * permutation of the four tokens is accepted, for example:
@@ -38,7 +39,15 @@ namespace dmt {
  * @ref msb_first).
  *
  * Each subband is complex baseband centred on DC at its centre frequency
- * and critically sampled (sampling interval 1 / bw_sub), upper sideband.
+ * and critically sampled (sampling interval 1 / bw_sub), upper sideband
+ * unless @ref lower_sideband is set.
+ *
+ * A band recorded with a negative channel width (e.g. GUPPI `CHAN_BW < 0`)
+ * stores its subbands from the highest frequency down (@ref descending);
+ * when the whole band is mirrored, each subband's spectrum is inverted as
+ * well (@ref lower_sideband). The two are independent: set each as the
+ * backend records the data (a known pulsar checks both). CohFDMT reads
+ * either directly, with no reordering on the host.
  */
 struct BasebandFormat {
     /// Axis order, outermost first: a permutation of "P", "RI", "T", "F".
@@ -54,6 +63,13 @@ struct BasebandFormat {
     bool msb_first{true};
     /// 2-bit: value of each code 0..3 (default: VDIF offset binary).
     std::array<float, 4> levels_2bit{-3.3359F, -1.0F, 1.0F, 3.3359F};
+    /// The F axis (and CohFDMTConfig::subband_groups) runs from the highest
+    /// subband down instead of up. f_center and bw_sub (> 0) still describe
+    /// the band.
+    bool descending{false};
+    /// Lower sideband: each subband's spectrum is frequency-inverted (its
+    /// voltages are the complex conjugates of upper-sideband ones).
+    bool lower_sideband{false};
 };
 
 /**
@@ -105,7 +121,8 @@ struct CohFDMTConfig {
     /// Input layout and encoding.
     BasebandFormat format{};
     /// Subbands per input group (e.g. one group per GUPPI node file), in
-    /// ascending frequency; must sum to nsub. Empty = one group.
+    /// the input's subband order (ascending frequency, or descending with
+    /// format.descending); must sum to nsub. Empty = one group.
     std::vector<SizeType> subband_groups;
 };
 

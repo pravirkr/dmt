@@ -62,6 +62,7 @@ public:
     [[nodiscard]] bool zero_blocks() const noexcept override;
     CandidateResultView execute_zero() override;
     void set_search_stop(uint64_t stop) noexcept override;
+    void set_valid_nsamps(SizeType n_valid) noexcept override;
     [[nodiscard]] uint64_t stream_position() const noexcept override;
     [[nodiscard]] uint64_t search_latency() const noexcept override;
     [[nodiscard]] uint64_t open_begin_min() const noexcept override;

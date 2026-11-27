@@ -83,7 +83,8 @@ constexpr int kBThreads    = 32 * kBWarps;
 constexpr int kSpreadThr   = 512;
 constexpr int kSpreadChunk = 1024; // channels staged per spread pass
 // Largest NUFFT sub-run: its fine grid (~2.2 x trials complex floats) must
-// fit the shared memory of one block.
+// also fit the spread kernel's dynamic shared memory on the device (runs are
+// split further where it does not, e.g. on 64 KiB GPUs).
 constexpr SizeType kMaxSubRun = 4096;
 constexpr SizeType kMaxWidth  = 8;  // NUFFT kernel width bound (nufft_cpu)
 constexpr int kTile           = 32; // deconvolution transpose tile
@@ -764,6 +765,7 @@ private:
     // Estimate-only engines: the buffers sized, not allocated (declared
     // before every device buffer, which deregisters from it).
     gpu_utils::PendingList m_deferred;
+    bool m_spread_smem_set{false};
     // Methods: NUFFT sub-runs (plans per distinct length) and the trials
     // left to brute force (their output rows and exact delays).
     std::map<SizeType, std::unique_ptr<nufft::Type1Plan>> m_plans;
@@ -795,13 +797,30 @@ private:
     void setup_methods() {
         std::vector<bool> by_nufft(m_ndm, false);
         if (m_opts.method == DDMTFFTMethod::kNUFFT && m_nact > 0) {
+            const SizeType cells = spread_smem_limit() / sizeof(float2);
             for (const auto& r : m_model.runs) {
                 if (!m_model.nufft_run(r, /*explicit_nufft=*/true)) {
                     continue;
                 }
                 ++m_nruns_model;
-                // Equal sub-runs whose fine grid fits shared memory.
-                const auto nsub = (r.count + kMaxSubRun - 1) / kMaxSubRun;
+                // Equal sub-runs of at most kMaxSubRun trials, split further
+                // until every sub-run's fine grid fits the spread kernel's
+                // shared memory (the two sub-run lengths of a split, floor
+                // and ceil, are checked: fine grids are not monotonic).
+                auto nsub       = (r.count + kMaxSubRun - 1) / kMaxSubRun;
+                const auto fits = [&](SizeType n) {
+                    for (const SizeType m :
+                         {r.count / n, (r.count + n - 1) / n}) {
+                        if (m > 0 && nufft::Type1Plan::fine_grid_for(
+                                         m, m_opts.tolerance) > cells) {
+                            return false;
+                        }
+                    }
+                    return true;
+                };
+                while (nsub < r.count && !fits(nsub)) {
+                    ++nsub;
+                }
                 for (SizeType i = 0; i < nsub; ++i) {
                     const auto b0 = (r.count * i) / nsub;
                     const auto b1 = (r.count * (i + 1)) / nsub;
@@ -813,16 +832,6 @@ private:
                 std::fill_n(by_nufft.begin() +
                                 static_cast<std::ptrdiff_t>(r.begin),
                             r.count, true);
-            }
-            if (!m_runs.empty()) {
-                const auto smem = m_nf_max * sizeof(float2);
-                const auto set  = [&](auto kernel) {
-                    gpu_utils::raise_dynamic_smem(
-                        kernel, smem, "DDMTFFT (gpu): NUFFT shared memory");
-                };
-                dispatch_width(m_width, [&](auto w) {
-                    set(kernel_nufft_spread<decltype(w)::value>);
-                });
             }
         }
         for (SizeType d = 0; d < m_ndm; ++d) {
@@ -840,16 +849,12 @@ private:
         if (!p) {
             p = std::make_unique<nufft::Type1Plan>(r.count, m_opts.tolerance);
         }
-        int optin = 0;
-        gpu_utils::check_gpu_call(
-            cudaDeviceGetAttribute(
-                &optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, m_device_id),
-            "DDMTFFT (gpu): shared memory limit");
-        if (p->fine_grid() * sizeof(float2) > static_cast<SizeType>(optin)) {
+        const auto limit = spread_smem_limit();
+        if (p->fine_grid() * sizeof(float2) > limit) {
             throw std::runtime_error(fmt::format(
-                "DDMTFFT (gpu): a NUFFT grid of {} cells exceeds the device's "
-                "{} B of shared memory per block",
-                p->fine_grid(), optin));
+                "DDMTFFT (gpu): a NUFFT grid of {} cells exceeds the {} B of "
+                "dynamic shared memory per block the spread kernel can take",
+                p->fine_grid(), limit));
         }
         if (static_cast<SizeType>(p->width()) > kMaxWidth ||
             p->kernel_degree() != p->width() + 2) {
@@ -863,6 +868,35 @@ private:
         m_runs.push_back(std::move(run));
         m_nf_max = std::max(m_nf_max, p->fine_grid());
         m_width  = p->width();
+    }
+
+    // Dynamic shared memory the spread kernel of this tolerance's width can
+    // take: the device's per-block limit less its static arrays (~26 KiB).
+    // A read-only query (estimates included).
+    [[nodiscard]] SizeType spread_smem_limit() const {
+        SizeType limit = 0;
+        dispatch_width(
+            nufft::Type1Plan::width_for(m_opts.tolerance), [&](auto w) {
+                limit = gpu_utils::dynamic_smem_limit(
+                    kernel_nufft_spread<decltype(w)::value>, m_device_id,
+                    "DDMTFFT (gpu): shared memory limit");
+            });
+        return limit;
+    }
+
+    // The spread kernel's shared-memory opt-in, once, at the first call
+    // (kernel attributes are process state: estimates never set them).
+    void ensure_spread_smem() {
+        if (m_spread_smem_set || m_runs.empty()) {
+            return;
+        }
+        dispatch_width(m_width, [&](auto w) {
+            gpu_utils::raise_dynamic_smem(
+                kernel_nufft_spread<decltype(w)::value>,
+                m_nf_max * sizeof(float2),
+                "DDMTFFT (gpu): NUFFT shared memory");
+        });
+        m_spread_smem_set = true;
     }
 
     template <typename F> static void dispatch_width(int w, const F& f) {
@@ -1108,6 +1142,7 @@ private:
     }
 
     void core(const float* data, SizeType n_new, float* out, cudaStream_t st) {
+        ensure_spread_smem();
         if (m_hist_zero) {
             gpu_utils::check_gpu_call(
                 cudaMemsetAsync(hist(), 0, history_state_size() * sizeof(float),

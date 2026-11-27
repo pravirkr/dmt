@@ -441,9 +441,14 @@ TEST_CASE("FDMTBoxcar per-call mask: the catch-all through the facade",
         0.0F, 400.0F, tsamp, tsamp, 1100.0F, 1714.0F, 1152, 1.1F);
     const plans::FDMTPlan plan(1100.0F, 1714.0F, 1152, 1024, tsamp, grid,
                                "valid", 3);
-    BoxcarConfig cfg(24, 1.5F, 4.2F, 1.0F,
-                     PeakFindingMode::kContiguousPeakPerWidth, 1U << 20, 0,
-                     false);
+    BoxcarConfig cfg{.max_boxcar     = 24,
+                     .wtsp           = 1.5F,
+                     .detect_thresh  = 4.2F,
+                     .noise_sigma    = 1.0F,
+                     .peak_mode      = PeakFindingMode::kContiguousPeakPerWidth,
+                     .max_candidates = 1U << 20,
+                     .max_cands_per_dm = 0,
+                     .skip_cold_prefix = false};
     cfg.per_call_masks = true;
     const auto min =
         FDMTBoxcar::estimate_minimum_memory(plan, cfg, true, Exec::cpu());
@@ -1311,8 +1316,14 @@ DMT_SIZED_TEST_CASE("FDMTBoxcar packed per-call masks: the catch-all",
                                       << static_cast<int>(mode)) {
                 // Cold windows skipped (the default): with skip_cold_prefix
                 // false the packed and float searches differ there.
-                BoxcarConfig base(24, 1.5F, 4.2F, 1.0F, mode, 1U << 20, 0,
-                                  true);
+                BoxcarConfig base{.max_boxcar       = 24,
+                                  .wtsp             = 1.5F,
+                                  .detect_thresh    = 4.2F,
+                                  .noise_sigma      = 1.0F,
+                                  .peak_mode        = mode,
+                                  .max_candidates   = 1U << 20,
+                                  .max_cands_per_dm = 0,
+                                  .skip_cold_prefix = true};
                 base.screen_mode    = screen;
                 base.per_call_masks = true;
                 // As the GPU catch-all test: a threshold that keeps the

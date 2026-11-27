@@ -537,9 +537,10 @@ TEST_CASE("DDMT add_frb_track-style peak on the injected DM", "[ddmt][cpu]") {
         utils::generate_pure_frb(nchans, nsamps, f_min, f_max, dt, toa, 1.0F);
     REQUIRE(n_disp > 0);
 
-    const float dm = static_cast<float>(dt) * tsamp /
-                     (kDispConst * (std::pow(f_min, kDispCoeff) -
-                                    std::pow(f_max, kDispCoeff)));
+    const auto dm =
+        static_cast<float>(static_cast<double>(dt) * tsamp /
+                           (kDispConst * (std::pow(f_min, kDispCoeff) -
+                                          std::pow(f_max, kDispCoeff))));
     DDMT ddmt(f_min, f_max, nchans, tsamp, std::vector<float>{0.0F, dm});
     const auto& plan_c        = ddmt.get_plan().get_container();
     const auto max_delay      = *std::ranges::max_element(plan_c.delay_table);

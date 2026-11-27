@@ -77,7 +77,7 @@
     {
       "name": "coverage",
       "displayName": "Coverage",
-      "description": "gcov instrumentation, Debug (-O0), CPU only, no Python; build-coverage/",
+      "description": "gcov instrumentation, Debug (-O1), CPU only, no Python; build-coverage/",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
@@ -98,18 +98,6 @@
         "DMT_BUILD_PYTHON": "ON",
         "DMT_ENABLE_NATIVE_ARCH": "OFF"
       }
-    },
-    {
-      "name": "ci-tidy",
-      "displayName": "CI tidy",
-      "description": "Static analysis: Debug compile database, CPU only, Python; build-ci-tidy/",
-      "inherits": "base",
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "DMT_GPU": "OFF",
-        "DMT_BUILD_PYTHON": "ON",
-        "DMT_ENABLE_NATIVE_ARCH": "OFF"
-      }
     }
   ],
   "buildPresets": [
@@ -119,8 +107,7 @@
     { "name": "portable", "configurePreset": "portable" },
     { "name": "asan", "configurePreset": "asan" },
     { "name": "coverage", "configurePreset": "coverage" },
-    { "name": "ci", "configurePreset": "ci" },
-    { "name": "ci-tidy", "configurePreset": "ci-tidy" }
+    { "name": "ci", "configurePreset": "ci" }
   ],
   "testPresets": [
     {

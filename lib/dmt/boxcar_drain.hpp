@@ -6,11 +6,16 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
+#include <limits>
+#include <map>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
+#include "dmt/common/boxcar_plans.hpp"
 #include "dmt/common/candidate.hpp"
 #include "dmt/common/plans.hpp"
 
@@ -54,6 +59,99 @@ inline uint64_t searched_nsamps(const FDMTBoxcarEngine& engine,
 }
 
 /**
+ * drain() is one call: its internal steps (padding blocks, then flush())
+ * each kept their own quotas, so their union can exceed them. Applies the
+ * config's quotas once more over the union, as one call would: per DM row
+ * (max_cands_per_dm), per plane (max_candidates_per_plane), then the call
+ * (max_candidates); kDropNew keeps the first candidates (the steps' order),
+ * kKeepBrightest the brightest (brighter()). The kept candidates stay in
+ * their order; every one dropped here moves from the emitted to the dropped
+ * counters (dropped_per_dm or dropped_global) of the call and of its plane.
+ */
+inline void reduce_drained(std::vector<RawCandidate>& candidates,
+                           CandidateCounts& counts,
+                           std::vector<CandidateCounts>& plane_counts,
+                           const BoxcarConfig& config,
+                           std::span<const plans::BoxcarPlanePlan> planes) {
+    const bool keep  = config.overflow_policy == OverflowPolicy::kKeepBrightest;
+    const SizeType n = candidates.size();
+    std::map<std::tuple<uint32_t, uint32_t, bool>, SizeType> plane_of;
+    for (SizeType p = 0; p < planes.size(); ++p) {
+        plane_of[{planes[p].subband_level, planes[p].subband_idx,
+                  planes[p].staggered}] = p;
+    }
+    std::vector<SizeType> plane(n, 0);
+    for (SizeType i = 0; i < n; ++i) {
+        const auto& c = candidates[i];
+        const auto it =
+            plane_of.find({c.subband_level, c.subband_idx, c.staggered != 0});
+        plane[i] = it != plane_of.end() ? it->second : 0;
+    }
+    std::vector<bool> kept(n, true);
+    // Keeps at most `cap` of the kept members of each group (the first ones,
+    // or the brightest under kKeepBrightest); returns the indices dropped.
+    const auto limit = [&](const auto& key_of, SizeType cap) {
+        std::vector<SizeType> dropped;
+        if (cap == 0) {
+            return dropped;
+        }
+        std::map<decltype(key_of(SizeType{0})), std::vector<SizeType>> groups;
+        for (SizeType i = 0; i < n; ++i) {
+            if (kept[i]) {
+                groups[key_of(i)].push_back(i);
+            }
+        }
+        for (auto& [key, members] : groups) {
+            if (members.size() <= cap) {
+                continue;
+            }
+            if (keep) {
+                std::ranges::stable_sort(members, [&](SizeType a, SizeType b) {
+                    return brighter(candidates[a], candidates[b]);
+                });
+            }
+            for (SizeType j = cap; j < members.size(); ++j) {
+                kept[members[j]] = false;
+                dropped.push_back(members[j]);
+            }
+        }
+        return dropped;
+    };
+    const auto move_counts = [&](const std::vector<SizeType>& dropped,
+                                 bool per_dm) {
+        const auto move = [&](CandidateCounts& c) {
+            --c.emitted_count;
+            ++(per_dm ? c.dropped_per_dm : c.dropped_global);
+        };
+        for (const SizeType i : dropped) {
+            move(counts);
+            if (plane[i] < plane_counts.size()) {
+                move(plane_counts[plane[i]]);
+            }
+        }
+    };
+    move_counts(limit(
+                    [&](SizeType i) {
+                        const auto& c = candidates[i];
+                        return std::make_tuple(c.beam_idx, plane[i], c.dm_idx);
+                    },
+                    config.max_cands_per_dm),
+                true);
+    move_counts(limit([&](SizeType i) { return plane[i]; },
+                      config.max_candidates_per_plane),
+                false);
+    move_counts(limit([](SizeType /*i*/) { return 0; }, config.max_candidates),
+                false);
+    SizeType out = 0;
+    for (SizeType i = 0; i < n; ++i) {
+        if (kept[i]) {
+            candidates[out++] = candidates[i];
+        }
+    }
+    candidates.resize(out);
+}
+
+/**
  * Ends the stream at its current position `end`: endpoints at or after `end`
  * are never searched (FDMTSearchInput::search_stop), ceil(latency / nsamps)
  * blocks of padding move every row's search up to `end`, and the open
@@ -64,14 +162,21 @@ inline uint64_t searched_nsamps(const FDMTBoxcarEngine& engine,
  * packed input); with fractional FFT delays the padding is zero signal, the
  * band-limited interpolation of a stream that ends.
  */
-inline CandidateResultView drain_stream(FDMTBoxcarEngine& engine,
-                                        const plans::FDMTPlan& plan,
-                                        SizeType nbeams,
-                                        SizeType nbits,
-                                        uint64_t latency,
-                                        DrainState& state) {
+inline CandidateResultView
+drain_stream(FDMTBoxcarEngine& engine,
+             const plans::FDMTPlan& plan,
+             SizeType nbeams,
+             const BoxcarConfig& config,
+             std::span<const plans::BoxcarPlanePlan> planes,
+             uint64_t latency,
+             DrainState& state,
+             uint64_t n_tail                                  = 0,
+             const std::function<CandidateResultView()>& tail = {}) {
+    const SizeType nbits = config.input_nbits;
     state.check_open("drain");
-    const uint64_t end = engine.stream_position();
+    // A short last block (`tail`, a whole block of which the first n_tail
+    // samples are data) moves the end n_tail samples on.
+    const uint64_t end = engine.stream_position() + (tail ? n_tail : 0);
     state.candidates.clear();
     state.plane_counts.clear();
     CandidateCounts counts{};
@@ -90,10 +195,48 @@ inline CandidateResultView drain_stream(FDMTBoxcarEngine& engine,
             add(state.plane_counts[p], v.plane_counts[p]);
         }
     };
+    struct SearchStopGuard {
+        FDMTBoxcarEngine& eng;
+        bool committed{false};
+        explicit SearchStopGuard(FDMTBoxcarEngine& e) noexcept : eng(e) {}
+        ~SearchStopGuard() noexcept {
+            if (!committed) {
+                eng.set_search_stop(std::numeric_limits<uint64_t>::max());
+            }
+        }
+        SearchStopGuard(const SearchStopGuard&)            = delete;
+        SearchStopGuard& operator=(const SearchStopGuard&) = delete;
+        SearchStopGuard(SearchStopGuard&&)                 = delete;
+        SearchStopGuard& operator=(SearchStopGuard&&)      = delete;
+    };
+    struct ValidSamplesGuard {
+        FDMTBoxcarEngine& eng;
+        ValidSamplesGuard(FDMTBoxcarEngine& e, SizeType n_valid) noexcept
+            : eng(e) {
+            eng.set_valid_nsamps(n_valid);
+        }
+        ~ValidSamplesGuard() noexcept {
+            eng.set_valid_nsamps(std::numeric_limits<SizeType>::max());
+        }
+        ValidSamplesGuard(const ValidSamplesGuard&)            = delete;
+        ValidSamplesGuard& operator=(const ValidSamplesGuard&) = delete;
+        ValidSamplesGuard(ValidSamplesGuard&&)                 = delete;
+        ValidSamplesGuard& operator=(ValidSamplesGuard&&)      = delete;
+    };
     engine.set_search_stop(end);
+    SearchStopGuard stop_guard{engine};
+    if (tail) {
+        const ValidSamplesGuard valid_guard(engine,
+                                            static_cast<SizeType>(n_tail));
+        append(tail());
+    }
     if (end > 0 && latency > 0) {
+        // Rows have searched up to the stream position less the latency.
         const SizeType nsamps = plan.get_nsamps();
-        const uint64_t blocks = (latency + nsamps - 1) / nsamps;
+        const uint64_t need   = end + latency;
+        const uint64_t pos    = engine.stream_position();
+        const uint64_t blocks =
+            need > pos ? (need - pos + nsamps - 1) / nsamps : 0;
         if (engine.zero_blocks()) {
             // No input block is read, staged or allocated.
             for (uint64_t b = 0; b < blocks; ++b) {
@@ -116,8 +259,11 @@ inline CandidateResultView drain_stream(FDMTBoxcarEngine& engine,
         }
     }
     append(engine.flush());
-    state.drained = true;
-    state.end     = end;
+    reduce_drained(state.candidates, counts, state.plane_counts, config,
+                   planes);
+    state.drained        = true;
+    state.end            = end;
+    stop_guard.committed = true;
     CandidateResultView view;
     static_cast<CandidateCounts&>(view) = counts;
     view.candidates                     = state.candidates;

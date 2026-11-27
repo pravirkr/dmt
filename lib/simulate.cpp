@@ -24,65 +24,82 @@ std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
                                                            float dt,
                                                            float pulse_toa,
                                                            float amplitude) {
+    if (!is_finite_bits(f_min) || !is_finite_bits(f_max) ||
+        !is_finite_bits(dt) || !is_finite_bits(pulse_toa) ||
+        !is_finite_bits(amplitude)) {
+        throw std::invalid_argument(
+            "generate_pure_frb: f_min, f_max, dt, pulse_toa, and amplitude "
+            "must be finite");
+    }
+    if (!(f_min > 0.0F) || !(f_max > f_min)) {
+        throw std::invalid_argument(
+            "generate_pure_frb: require 0 < f_min < f_max");
+    }
+    if (dt < 0.0F) {
+        throw std::invalid_argument("generate_pure_frb: require dt >= 0");
+    }
     if (nchans == 0 || nsamps == 0) {
         return std::make_tuple(std::vector<float>{}, SizeType{0});
     }
     std::vector<float> arr(nchans * nsamps, 0.0F);
     SizeType nsamps_dispersed = 0;
 
-    const float foff      = (f_max - f_min) / static_cast<float>(nchans);
-    const float foff_half = foff / 2.0F;
+    // Sweep times in double: float32 loses ~1e-4 of a sample on long blocks,
+    // which moves the edge fractions of every channel.
+    const double fmin  = f_min;
+    const double fmax  = f_max;
+    const double toa   = pulse_toa;
+    const double total = dt;
+    const double amp   = amplitude;
+    const double foff  = (fmax - fmin) / static_cast<double>(nchans);
+    const double norm  = (1.0 / (fmin * fmin)) - (1.0 / (fmax * fmax));
+    // Fraction of the full-band delay between frequencies a < b.
+    const auto frac = [&](double a, double b) {
+        return ((1.0 / (a * a)) - (1.0 / (b * b))) / norm;
+    };
+    const auto fn = static_cast<double>(nsamps);
 
     for (SizeType ichan = 0; ichan < nchans; ++ichan) {
-        const auto freq =
-            f_min + (static_cast<float>(ichan) * foff) + foff_half;
-        const auto freq_min    = freq - foff_half;
-        const auto freq_max    = freq + foff_half;
-        const auto dt_start    = dt * utils::cff(f_min, freq_min, f_min, f_max);
-        const auto tstart      = pulse_toa - dt_start;
-        const auto tstart_int  = static_cast<IndexType>(tstart);
-        const auto tstart_frac = tstart - static_cast<float>(tstart_int);
-
-        const auto dt_sub   = dt * utils::cff(freq_min, freq_max, f_min, f_max);
-        const auto tend     = tstart - dt_sub;
-        const auto tend_int = static_cast<IndexType>(tend);
-        const auto tend_frac = 1.0F - (tend - static_cast<float>(tend_int));
-
-        float* arr_chan_start = &arr[ichan * nsamps];
-
-        if (tstart_int < 0 || std::cmp_greater_equal(tend_int, nsamps)) {
+        const double f_lo = fmin + (static_cast<double>(ichan) * foff);
+        const double f_hi = f_lo + foff;
+        // The channel's sweep covers [tend, tstart]: tstart at its bottom
+        // edge, tend at its top edge (earlier).
+        const double tstart = toa - (total * frac(fmin, f_lo));
+        const double dt_sub = total * frac(f_lo, f_hi);
+        const double tend   = tstart - dt_sub;
+        // floor, not truncation toward zero: a sweep ending in (-1, 0) lies
+        // before sample 0 and must not spill into it. Bounds are checked in
+        // double before integer conversion so extreme finite pulse_toa / dt
+        // never overflow IndexType / SizeType.
+        const double s_d = std::floor(tstart);
+        const double e_d = std::floor(tend);
+        if (s_d < 0.0 || e_d >= fn) {
             continue;
         }
-
-        if (tend_int >= 0 && tend_int <= tstart_int &&
-            std::cmp_less(tstart_int, nsamps)) {
-            if (tend_int == tstart_int) {
-                arr_chan_start[tend_int] = amplitude;
-                nsamps_dispersed += 1;
-            } else {
-                const float amp_per_sample = amplitude / dt_sub;
-                std::fill(arr_chan_start + tend_int,
-                          arr_chan_start + tstart_int + 1, amp_per_sample);
-                arr_chan_start[tend_int] *= tend_frac;
-                arr_chan_start[tstart_int] *= tstart_frac;
-                nsamps_dispersed +=
-                    static_cast<SizeType>(tstart_int - tend_int + 1);
-            }
-        } else if (tend_int < 0 && 0 <= tstart_int &&
-                   std::cmp_less(tstart_int, nsamps)) {
-            const float amp_per_sample = amplitude / dt_sub;
-            std::fill(arr_chan_start, arr_chan_start + tstart_int + 1,
-                      amp_per_sample);
-            arr_chan_start[tstart_int] *= tstart_frac;
-            nsamps_dispersed += static_cast<SizeType>(tstart_int + 1);
-        } else if (tend_int >= 0 && std::cmp_less(tend_int, nsamps) &&
-                   std::cmp_less_equal(nsamps, tstart_int)) {
-            const float amp_per_sample = amplitude / dt_sub;
-            std::fill(arr_chan_start + tend_int, arr_chan_start + nsamps,
-                      amp_per_sample);
-            arr_chan_start[tend_int] *= tend_frac;
-            nsamps_dispersed += (nsamps - tend_int);
+        float* row = arr.data() + (ichan * nsamps);
+        if (e_d == s_d) {
+            // Within one sample: all of the channel's fluence lands there.
+            row[static_cast<SizeType>(s_d)] = amplitude;
+            nsamps_dispersed += 1;
+            continue;
         }
+        const double per_sample = amp / dt_sub;
+        const SizeType first =
+            e_d > 0.0 ? static_cast<SizeType>(e_d) : SizeType{0};
+        const SizeType last =
+            s_d < fn - 1.0 ? static_cast<SizeType>(s_d) : (nsamps - 1);
+        for (SizeType i = first; i <= last; ++i) {
+            double v        = per_sample;
+            const auto idbl = static_cast<double>(i);
+            if (idbl == e_d) {
+                v *= 1.0 - (tend - e_d);
+            }
+            if (idbl == s_d) {
+                v *= tstart - s_d;
+            }
+            row[i] = static_cast<float>(v);
+        }
+        nsamps_dispersed += last - first + 1;
     }
     return {arr, nsamps_dispersed};
 }
@@ -109,7 +126,7 @@ simulate_baseband(float f_center,
     std::vector<ComplexType> v(nrows * nsamps, ComplexType{0.0F, 0.0F});
     if (!pulses.empty()) {
         const auto n        = static_cast<double>(nsamps);
-        const double k_disp = static_cast<double>(kDispConst);
+        const double k_disp = kDispConst;
 #pragma omp parallel for num_threads(std::max(1, nthreads)) schedule(static)
         for (SizeType row = 0; row < nrows; ++row) {
             const SizeType isub = row % nsub;
@@ -215,17 +232,21 @@ std::vector<uint8_t> pack_baseband(std::span<const ComplexType> voltages,
         return format.is_signed ? static_cast<unsigned>(vi) & mask
                                 : static_cast<unsigned>(vi + half);
     };
+    // Lower sideband: the conjugate voltages; descending: subband s of the
+    // input's order is ascending subband nsub - 1 - s.
+    const float im_sign = format.lower_sideband ? -1.0F : 1.0F;
     for (SizeType p = 0; p < 2; ++p) {
         for (SizeType s = 0; s < sub_count; ++s) {
-            const ComplexType* x = voltages.data() +
-                                   (((p * nsub) + sub_begin + s) * nsamps) +
-                                   t_begin;
+            const SizeType sub =
+                format.descending ? nsub - 1 - (sub_begin + s) : sub_begin + s;
+            const ComplexType* x =
+                voltages.data() + (((p * nsub) + sub) * nsamps) + t_begin;
             for (SizeType t = 0; t < t_count; ++t) {
                 const SizeType e = (p * st.pol) + (s * st.freq) + (t * st.time);
                 for (SizeType ri = 0; ri < 2; ++ri) {
                     const SizeType ei = e + (ri * st.ri);
                     const unsigned code =
-                        code_of(ri == 0 ? x[t].real() : x[t].imag());
+                        code_of(ri == 0 ? x[t].real() : im_sign * x[t].imag());
                     const auto k = static_cast<unsigned>(ei % per);
                     const unsigned shift =
                         format.msb_first ? 8U - (nbits * (k + 1U)) : nbits * k;

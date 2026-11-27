@@ -1,7 +1,9 @@
 # A downstream project that uses an installed dmt through find_package(dmt),
 # as in docs/getting_started/quickstart_cpp.md. CI builds it against
 # `cmake --install`, which checks dmtConfig.cmake, the exported dmt::dmt target
-# and (for the static library) the FFTW/OpenMP dependency chain.
+# and (for the static library) the FFTW/OpenMP dependency chain, alongside the
+# project's own find_package(FFTW) (the imported FFTW targets are created
+# once, whichever call comes first).
 #
 #   cmake --install build-ci --prefix /tmp/dmt
 #   cmake -S tests/consumer -B build-consumer -DCMAKE_PREFIX_PATH=/tmp/dmt
@@ -13,6 +15,9 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(dmt REQUIRED)
+# The pipeline's own FFTW use, with the FindFFTW.cmake dmt installs (on the
+# module path after find_package(dmt)): a second run of the finder.
+find_package(FFTW REQUIRED COMPONENTS FLOAT_LIB)
 
 add_executable(dmt_consumer main.cpp)
-target_link_libraries(dmt_consumer PRIVATE dmt::dmt)
+target_link_libraries(dmt_consumer PRIVATE dmt::dmt FFTW::Float)

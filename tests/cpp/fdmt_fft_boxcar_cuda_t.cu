@@ -71,8 +71,7 @@ TEST_CASE("FDMTFFTBoxcar GPU host and device APIs match direct reference",
                         plan, cfg, true, exec, 2, frac);
                     budget = open.usage.budgeted() - 1;
                 }
-                FDMTFFTBoxcar search(plan, cfg, true, exec, 2, frac, {},
-                                     budget);
+                FDMTFFTBoxcar search(plan, cfg, true, exec, 2, frac, budget);
                 SizeType ref_cap = 0;
                 if (segmented) {
                     CHECK(search.get_chunk_nsamps() < plan.get_nsamps());
@@ -128,7 +127,8 @@ TEST_CASE("FDMTFFTBoxcar GPU kill mask and wide windows match the reference",
     cfg.detect_thresh    = 2.7F;
     cfg.max_candidates   = 500000;
     cfg.max_cands_per_dm = 0;
-    FDMTFFTBoxcar search(plan, cfg, true, exec, 1, true, kill);
+    FDMTFFTBoxcar search(plan, cfg, true, exec, 1, true,
+                         algorithms::kFDMTDefaultMaxMemory, kill);
     std::vector<RawCandidate> actual;
     for (const auto& block : input) {
         append(actual, search.execute(block));
@@ -161,7 +161,7 @@ TEST_CASE("FDMTFFTBoxcar GPU memory budget shortens the segments",
     const auto open_usage = open.get_memory_usage();
     const SizeType budget =
         open_usage.staging + ((open_usage.budgeted() - open_usage.staging) / 2);
-    FDMTFFTBoxcar capped(plan, cfg, true, exec, 1, true, {}, budget);
+    FDMTFFTBoxcar capped(plan, cfg, true, exec, 1, true, budget);
     INFO(open.summary() << capped.summary());
     // On a GPU the budget bounds device memory; host storage is reported.
     CHECK(capped.get_memory_usage().budgeted() <= budget);
@@ -178,7 +178,7 @@ TEST_CASE("FDMTFFTBoxcar GPU memory budget shortens the segments",
     REQUIRE(a.size() > 20);
     compare_clusters(b, a, cfg.detect_thresh, 5e-3, 0.05);
     CHECK_THROWS_AS(
-        FDMTFFTBoxcar(plan, cfg, true, exec, 1, true, {}, SizeType{1} << 20),
+        FDMTFFTBoxcar(plan, cfg, true, exec, 1, true, SizeType{1} << 20),
         std::invalid_argument);
 }
 
@@ -196,7 +196,7 @@ TEST_CASE("FDMTFFTBoxcar GPU budget does not count host candidates",
     const SizeType host_cands = cfg.max_candidates * sizeof(RawCandidate);
     REQUIRE(usage.peaks + usage.candidates >= usage.budgeted());
     REQUIRE(usage.host >= host_cands);
-    const FDMTFFTBoxcar capped(plan, cfg, true, exec, 1, true, {},
+    const FDMTFFTBoxcar capped(plan, cfg, true, exec, 1, true,
                                usage.budgeted());
     CHECK(capped.get_memory_usage().budgeted() == usage.budgeted());
 }

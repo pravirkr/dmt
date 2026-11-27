@@ -44,7 +44,7 @@ std::vector<uint8_t> make_block(const CohFDMTConfig& cfg, SizeType n) {
                          (100.0 * static_cast<double>(plan.get_tsamp()));
     const utils::BasebandPulse pulse{
         .dm        = dm,
-        .t_arrival = t_ref - (static_cast<double>(kDispConst) * dm /
+        .t_arrival = t_ref - (kDispConst * dm /
                               (static_cast<double>(plan.get_f_ref()) *
                                static_cast<double>(plan.get_f_ref()))),
         .fluence   = 1.0E7};
@@ -145,6 +145,14 @@ TEST_CASE("CohFDMT (gpu) output is independent of layout, encoding and "
         SKIP("no GPU device");
     }
     test::cfdmt::check_layout_independence(test::gpu_exec());
+}
+
+TEST_CASE("CohFDMT (gpu) reads descending and lower-sideband subbands",
+          "[cfdmt_gpu][gpu]") {
+    if (!test::gpu_device_available()) {
+        SKIP("no GPU device");
+    }
+    test::cfdmt::check_sideband_and_order(test::gpu_exec());
 }
 
 TEST_CASE("CohFDMT (gpu) 4-bit input and dt_step recover the pulse",

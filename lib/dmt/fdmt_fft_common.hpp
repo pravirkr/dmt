@@ -85,7 +85,7 @@ inline FractionalDelays fractional_delays(const plans::FDMTPlan& plan,
                                           bool box) {
     const auto& pc    = plan.get_container();
     const auto g      = [](double f) { return 1.0 / (f * f); };
-    const double k_ts = kDispConstD / static_cast<double>(plan.get_tsamp());
+    const double k_ts = kDispConst / static_cast<double>(plan.get_tsamp());
     struct Stat {
         double n{0.0};
         double s{0.0}; // mean path shift

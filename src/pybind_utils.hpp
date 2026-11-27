@@ -233,9 +233,9 @@ float_output_buffer(SizeType needed,
     const auto& arr = *out;
     if (arr.dtype().kind() != 'f' || arr.itemsize() != 4 ||
         (arr.flags() & py::array::c_style) == 0 || !arr.writeable()) {
-        throw py::type_error(fmt::format("{}.execute: out must be a writeable, "
-                                         "C-contiguous float32 array",
-                                         name));
+        throw py::value_error(fmt::format(
+            "{}.execute: out must be a writeable, C-contiguous float32 array",
+            name));
     }
     if (std::cmp_less(arr.size(), needed)) {
         throw std::invalid_argument(fmt::format(
@@ -243,6 +243,106 @@ float_output_buffer(SizeType needed,
             arr.size(), size_expr, needed));
     }
     return py::reinterpret_borrow<py::array_t<float, py::array::c_style>>(arr);
+}
+
+/// Bytes of `n` samples packed at `nbits` (1, 2, 4, 8 or 16); 0 for any
+/// other nbits, which the engines reject themselves.
+inline SizeType packed_bytes(SizeType n, SizeType nbits) noexcept {
+    switch (nbits) {
+    case 1:
+    case 2:
+    case 4:
+    case 8:
+    case 16:
+        return ((n * nbits) + 7) / 8;
+    default:
+        return 0;
+    }
+}
+
+/// Checks an input's extents: (rows, cols) for an instance of one beam, or
+/// (nbeams, rows, cols). `cols` == 0 accepts any length (a block length the
+/// call chooses). `axes` names the two inner axes, e.g. "nchans, nsamps".
+/// A transposed array with the right number of elements (a time-major
+/// (nsamps, nchans) filterbank) is rejected here instead of being read as
+/// channel-major: raises ValueError.
+template <typename Extent>
+inline void check_input_shape(std::string_view what,
+                              std::string_view name,
+                              std::span<const Extent> shape,
+                              SizeType nbeams,
+                              SizeType rows,
+                              SizeType cols,
+                              std::string_view axes) {
+    const auto ndim = shape.size();
+    bool ok         = ndim == 2 || ndim == 3;
+    if (ok) {
+        ok = (ndim == 2) ? nbeams == 1 : std::cmp_equal(shape[0], nbeams);
+    }
+    if (ok) {
+        ok = std::cmp_equal(shape[ndim - 2], rows) &&
+             (cols == 0 || std::cmp_equal(shape[ndim - 1], cols));
+    }
+    if (ok) {
+        return;
+    }
+    std::string got;
+    for (SizeType i = 0; i < ndim; ++i) {
+        got += fmt::format("{}{}", i == 0 ? "" : ", ", shape[i]);
+    }
+    const auto inner = cols == 0 ? fmt::format("{}, *", rows)
+                                 : fmt::format("{}, {}", rows, cols);
+    const auto want = nbeams == 1 ? fmt::format("({}) or (1, {})", inner, inner)
+                                  : fmt::format("({}, {})", nbeams, inner);
+    throw std::invalid_argument(
+        fmt::format("{}: {} has shape ({}), expected {}: ({}{})", what, name,
+                    got, want, nbeams == 1 ? "" : "nbeams, ", axes));
+}
+
+/// check_input_shape() for a NumPy array.
+inline void check_input_shape(std::string_view what,
+                              std::string_view name,
+                              const py::array& arr,
+                              SizeType nbeams,
+                              SizeType rows,
+                              SizeType cols,
+                              std::string_view axes) {
+    check_input_shape(what, name,
+                      std::span<const py::ssize_t>(
+                          arr.shape(), static_cast<SizeType>(arr.ndim())),
+                      nbeams, rows, cols, axes);
+}
+
+// A host output of `shape` (T elements): the caller's `out` (a writeable,
+// C-contiguous T array of at least prod(shape) elements, returned as a
+// `shape` view of its start, no copy) or a new array.
+template <typename T>
+inline py::array_t<T, py::array::c_style>
+shaped_output(const std::vector<py::ssize_t>& shape,
+              std::string_view what,
+              const std::optional<py::array>& out) {
+    if (!out.has_value()) {
+        return py::array_t<T, py::array::c_style>(shape);
+    }
+    py::ssize_t count = 1;
+    for (const auto n : shape) {
+        count *= n;
+    }
+    const auto& arr = *out;
+    if (!arr.dtype().is(py::dtype::of<T>()) ||
+        (arr.flags() & py::array::c_style) == 0 || !arr.writeable()) {
+        throw py::value_error(
+            fmt::format("{}: out must be a writeable, C-contiguous {} array",
+                        what, py::str(py::dtype::of<T>()).cast<std::string>()));
+    }
+    if (arr.size() < count) {
+        throw std::invalid_argument(
+            fmt::format("{}: out has {} elements, needs at least {}", what,
+                        arr.size(), count));
+    }
+    py::array target = arr; // a new reference, for its writable pointer
+    return py::array_t<T, py::array::c_style>(
+        shape, static_cast<T*>(target.mutable_data()), target);
 }
 
 // The engine's output buffer: the caller's `out` (validated, reused as is)

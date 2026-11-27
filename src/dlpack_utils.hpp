@@ -20,6 +20,8 @@
 #include "dmt/common/backend.hpp"
 #include "dmt/common/types.hpp"
 
+#include "pybind_utils.hpp"
+
 namespace dmt {
 
 namespace py = pybind11;
@@ -672,28 +674,34 @@ template <typename Engine>
 SizeType ddmt_waterfall_nsamps(const Engine& eng,
                                const DeviceCall& call,
                                const DeviceTensor& waterfall) {
-    const auto shape = shape_of(waterfall);
-    if (shape.size() != 2 && shape.size() != 3) {
-        throw std::invalid_argument(
-            fmt::format("{}: waterfall must be 2D (nchans, nsamps) or 3D "
-                        "(nbeams, nchans, nsamps)",
-                        call.what));
+    const auto& dl = waterfall.tensor();
+    const std::span<const int64_t> shape(dl.shape,
+                                         static_cast<SizeType>(dl.ndim));
+    check_input_shape(call.what, "waterfall", shape, eng.get_nbeams(),
+                      eng.get_plan().get_nchans(), 0, "nchans, nsamps");
+    return static_cast<SizeType>(shape.back());
+}
+
+/// Checks a packed DDMT-family input against the engine: channel-major
+/// (nchans, row_bytes) or time-major (nsamps, sample_bytes) at the plan's
+/// nbits, with a leading beam axis for nbeams > 1.
+template <typename Engine, typename Extent>
+void check_ddmt_packed_shape(const Engine& eng,
+                             std::string_view what,
+                             std::string_view name,
+                             std::span<const Extent> shape,
+                             SizeType nsamps,
+                             bool time_major) {
+    const auto& plan  = eng.get_plan();
+    const auto nbits  = plan.get_nbits();
+    const auto nchans = plan.get_nchans();
+    if (time_major) {
+        check_input_shape(what, name, shape, eng.get_nbeams(), nsamps,
+                          packed_bytes(nchans, nbits), "nsamps, sample_bytes");
+    } else {
+        check_input_shape(what, name, shape, eng.get_nbeams(), nchans,
+                          packed_bytes(nsamps, nbits), "nchans, row_bytes");
     }
-    const auto nbeams = shape.size() == 3 ? shape[0] : 1;
-    if (nbeams != eng.get_nbeams()) {
-        throw std::invalid_argument(
-            fmt::format("{}: waterfall has {} beam(s), but this instance was "
-                        "configured for {}",
-                        call.what, nbeams, eng.get_nbeams()));
-    }
-    const auto nchans = shape[shape.size() - 2];
-    if (nchans != eng.get_plan().get_nchans()) {
-        throw std::invalid_argument(
-            fmt::format("{}: waterfall has {} channels, but this instance was "
-                        "configured for {}",
-                        call.what, nchans, eng.get_plan().get_nchans()));
-    }
-    return shape.back();
 }
 
 /// Device-memory execute() of the DDMT family (DDMT, SDMT, DDMTFFT): `In`

@@ -229,3 +229,25 @@ def test_pack_baseband_rejects_out_of_bounds_begin() -> None:
         dmtlib.pack_baseband(v, cfg.format, 1.0, sub_begin=cfg.nsub + 1)
     with pytest.raises(ValueError, match="out of bounds"):
         dmtlib.pack_baseband(v, cfg.format, 1.0, t_begin=65)
+
+
+@pytest.mark.parametrize(
+    ("descending", "lsb"), [(True, False), (False, True), (True, True)]
+)
+def test_descending_and_lower_sideband_subbands(descending: bool, lsb: bool) -> None:
+    """A mirrored recording (subbands top down, spectra inverted) searches
+    exactly as the same sky recorded ascending and upper sideband."""
+    plan = CohFDMTPlan(small_config())
+    dm = float(plan.dm_grid_coh[1])
+    sky = pulse_voltages(plan, dm, 60.0, noise=4.0)
+    fmt = BasebandFormat()
+    scale = 50.0 / max(np.abs(sky.real).max(), np.abs(sky.imag).max())
+    want = CohFDMT(small_config()).execute(dmtlib.pack_baseband(sky, fmt, scale))
+    recorded = sky[:, ::-1, :] if descending else sky
+    recorded = np.ascontiguousarray(np.conj(recorded) if lsb else recorded)
+    mirrored = BasebandFormat(descending=descending, lower_sideband=lsb)
+    data = dmtlib.pack_baseband(recorded, fmt, scale)
+    np.testing.assert_array_equal(dmtlib.pack_baseband(sky, mirrored, scale), data)
+    got = CohFDMT(small_config(format=mirrored)).execute(data)
+    np.testing.assert_array_equal(got, want)
+    assert "descending" in repr(mirrored) or not descending

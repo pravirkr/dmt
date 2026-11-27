@@ -9,6 +9,7 @@
 #include <random>
 #include <span>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -178,28 +179,25 @@ TEST_CASE("BoxcarConfig screen_mode defaults to kAuto and coexists with "
     CHECK(compat11_cfg.screen_mode == BoxcarScreenMode::kAuto);
     CHECK(compat11_cfg.use_trapezoid);
 
-    // 12-argument construction stays 100% source-compatible with OverflowPolicy
-    // as the 12th parameter and screen_mode defaulting to kAuto.
-    const BoxcarConfig compat12_cfg(
-        256, 2.0F, 6.0F, 1.0F, PeakFindingMode::kContiguousPeakPerWidth, 8192,
-        16, true, 32, 0.0F, false, OverflowPolicy::kKeepBrightest);
-    CHECK(compat12_cfg.overflow_policy == OverflowPolicy::kKeepBrightest);
-    CHECK(compat12_cfg.screen_mode == BoxcarScreenMode::kAuto);
-
-    // 13-argument construction sets both overflow_policy (12th) and
-    // screen_mode (13th).
+    // BoxcarConfig is an aggregate: designated initializers set any subset
+    // of fields by name and leave the rest at their defaults.
+    static_assert(std::is_aggregate_v<BoxcarConfig>);
     for (const auto policy :
          {OverflowPolicy::kDropNew, OverflowPolicy::kKeepBrightest}) {
         for (const auto mode :
              {BoxcarScreenMode::kPrefix, BoxcarScreenMode::kKadane,
               BoxcarScreenMode::kNone, BoxcarScreenMode::kAuto}) {
-            const BoxcarConfig cfg(
-                256, 2.0F, 6.5F, 1.2F, PeakFindingMode::kContiguousPeakPerWidth,
-                4096, 16, false, 32, 0.0F, false, policy, mode);
+            const BoxcarConfig cfg{.max_boxcar      = 256,
+                                   .detect_thresh   = 6.5F,
+                                   .overflow_policy = policy,
+                                   .screen_mode     = mode};
             CHECK(cfg.overflow_policy == policy);
             CHECK(cfg.screen_mode == mode);
             CHECK(cfg.max_boxcar == 256);
             CHECK(cfg.detect_thresh == 6.5F);
+            CHECK(cfg.wtsp == 2.0F);
+            CHECK(cfg.max_candidates_per_plane == 0);
+            CHECK_FALSE(cfg.per_call_masks);
         }
     }
 

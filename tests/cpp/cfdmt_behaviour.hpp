@@ -9,9 +9,11 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstring>
 #include <numeric>
 #include <span>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
@@ -42,9 +44,7 @@ inline CohFDMTConfig small_config() {
             .format   = BasebandFormat{.order = "FTPRI"}};
 }
 
-inline double disp(double dm, double f) {
-    return static_cast<double>(kDispConst) * dm / (f * f);
-}
+inline double disp(double dm, double f) { return kDispConst * dm / (f * f); }
 
 // Largest |v| over the stream: quantisation scale that maps it to ~100.
 inline float scale_for(const std::vector<ComplexType>& v) {
@@ -391,6 +391,107 @@ inline void check_layout_independence(const Exec& exec) {
     SECTION("a second engine gives the same result") {
         const CohFDMT s(cfg, exec);
         CHECK(run(s, noisy, n, 0, 1.0F) == reference);
+    }
+    SECTION("char and int8_t views of the same bytes") {
+        // ByteDataType: char (std::ifstream::read / mmap buffers), int8_t
+        // and uint8_t all link; the format decides the decoding.
+        static_assert(ByteDataType<char> && ByteDataType<int8_t> &&
+                      ByteDataType<uint8_t>);
+        static_assert(!ByteDataType<bool> && !ByteDataType<int16_t> &&
+                      !ByteDataType<char8_t> && !ByteDataType<int32_t>);
+        const CohFDMT s(cfg, exec);
+        const auto bytes = utils::pack_baseband(noisy, cfg.nsub, n, cfg.format,
+                                                1.0F, 0, 0, 0, n);
+        std::vector<char> as_char(bytes.size());
+        std::vector<int8_t> as_int8(bytes.size());
+        std::memcpy(as_char.data(), bytes.data(), bytes.size());
+        std::memcpy(as_int8.data(), bytes.data(), bytes.size());
+        std::vector<float> out(s.get_dmt_size());
+        s.execute<char>(std::span<const char>(as_char), out);
+        CHECK(out == reference);
+        std::ranges::fill(out, 0.0F);
+        s.execute<int8_t>(std::span<const int8_t>(as_int8), out);
+        CHECK(out == reference);
+    }
+}
+
+// Elements that differ (a count, not the planes: they are millions long).
+inline SizeType count_differences(const std::vector<float>& a,
+                                  const std::vector<float>& b) {
+    REQUIRE(a.size() == b.size());
+    SizeType n = 0;
+    for (SizeType i = 0; i < a.size(); ++i) {
+        n += a[i] != b[i] ? 1 : 0;
+    }
+    return n;
+}
+
+// Descending subbands and lower sideband (e.g. GUPPI CHAN_BW < 0) are read
+// as recorded: the same sky gives the same search, bit for bit (the
+// unpackers undo the order and the conjugation exactly), with any grouping.
+inline void check_sideband_and_order(const Exec& exec) {
+    const auto cfg = small_config();
+    const CohFDMTPlan plan(cfg);
+    const auto nsub = cfg.nsub;
+    const auto n    = plan.get_block_nsamps();
+    const double dm = plan.get_dm_grid_coh()[1];
+    const auto v    = pulse_stream(plan, n, dm, 100.0);
+    auto sky = utils::simulate_baseband(cfg.f_center, cfg.bw_sub, nsub, n, {},
+                                        5.0F, 9, 4);
+    const float sc = scale_for(v) * 0.5F;
+    for (SizeType i = 0; i < v.size(); ++i) {
+        sky[i] += v[i] * sc;
+    }
+    const auto reference = [&] {
+        const CohFDMT s(cfg, exec);
+        return run(s, sky, n, 0, 1.0F);
+    }();
+    // The ascending, upper-sideband search finds the pulse.
+    const auto pk = find_peak(reference, plan.get_output_nsamps());
+    CHECK(pk.row == nearest_row(plan, dm));
+    CHECK(std::abs(static_cast<double>(pk.t) - 100.0) <= 2.0);
+    for (const auto& [descending, lsb] :
+         {std::pair{true, false}, std::pair{false, true},
+          std::pair{true, true}}) {
+        CAPTURE(descending, lsb);
+        // As the backend records it, built without pack_baseband's flags:
+        // subbands from the top down and/or conjugate voltages.
+        std::vector<ComplexType> recorded(sky.size());
+        for (SizeType p = 0; p < 2; ++p) {
+            for (SizeType s = 0; s < nsub; ++s) {
+                const SizeType src = descending ? nsub - 1 - s : s;
+                for (SizeType t = 0; t < n; ++t) {
+                    const auto x = sky[(((p * nsub) + src) * n) + t];
+                    recorded[(((p * nsub) + s) * n) + t] =
+                        lsb ? std::conj(x) : x;
+                }
+            }
+        }
+        const auto bytes = utils::pack_baseband(recorded, nsub, n, cfg.format,
+                                                1.0F, 0, 0, 0, n);
+        auto c           = cfg;
+        c.format.descending     = descending;
+        c.format.lower_sideband = lsb;
+        CHECK(utils::pack_baseband(sky, nsub, n, c.format, 1.0F, 0, 0, 0, n) ==
+              bytes);
+        const CohFDMT s(c, exec);
+        std::vector<float> out(s.get_dmt_size());
+        s.execute<uint8_t>(std::span<const uint8_t>(bytes), out);
+        CHECK(count_differences(out, reference) == 0);
+        // Two groups in the input's order (the first holds the top six
+        // subbands when descending).
+        c.subband_groups = {6, 10};
+        const CohFDMT grouped(c, exec);
+        const auto g0 =
+            utils::pack_baseband(sky, nsub, n, c.format, 1.0F, 0, 6, 0, n);
+        const auto g1 =
+            utils::pack_baseband(sky, nsub, n, c.format, 1.0F, 6, 10, 0, n);
+        const std::array<std::span<const uint8_t>, 2> groups{
+            std::span<const uint8_t>(g0), std::span<const uint8_t>(g1)};
+        std::ranges::fill(out, 0.0F);
+        grouped.execute<uint8_t>(
+            std::span<const std::span<const uint8_t>>(groups), out);
+        CHECK(count_differences(out, reference) == 0);
     }
 }
 

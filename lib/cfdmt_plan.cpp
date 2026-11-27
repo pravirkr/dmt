@@ -5,6 +5,7 @@
 #include <map>
 #include <numbers>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -89,8 +90,7 @@ SizeType nearest_smooth7(double x) {
 
 // Dispersion delay (s) between frequencies f_lo < f_hi (MHz) at DM dm.
 double disp_delay(double dm, double f_lo, double f_hi) {
-    return static_cast<double>(kDispConst) * dm *
-           ((1.0 / (f_lo * f_lo)) - (1.0 / (f_hi * f_hi)));
+    return kDispConst * dm * ((1.0 / (f_lo * f_lo)) - (1.0 / (f_hi * f_hi)));
 }
 
 SizeType ceil_to(SizeType v, SizeType m) { return ((v + m - 1) / m) * m; }
@@ -118,6 +118,11 @@ public:
         validate();
         configure();
     }
+    Impl(const Impl&)            = default;
+    Impl& operator=(const Impl&) = delete;
+    Impl(Impl&&)                 = delete;
+    Impl& operator=(Impl&&)      = delete;
+    ~Impl()                      = default;
 
     // --- getters ---
     const CohFDMTConfig& config() const noexcept { return m_cfg; }
@@ -154,7 +159,7 @@ public:
         return m_dm_grid_coh;
     }
     float dm_step_coh() const noexcept { return m_dm_step_coh; }
-    SizeType ndm_fine() const noexcept { return m_fdmt_plan->get_dmt_ndms(); }
+    SizeType ndm_fine() const noexcept { return fdmt_plan().get_dmt_ndms(); }
     SizeType fine_dt_max() const noexcept { return m_fine_dt_max; }
     const std::vector<float>& dm_grid_final() const noexcept {
         return m_dm_grid_final;
@@ -183,7 +188,10 @@ public:
         return m_dm_grid_final.size() * m_nout;
     }
     const std::vector<float>& taper() const noexcept { return m_taper; }
-    const FDMTPlan& fdmt_plan() const noexcept { return *m_fdmt_plan; }
+    const FDMTPlan& fdmt_plan() const noexcept {
+        // Set by configure(), in the constructor.
+        return *m_fdmt_plan; // NOLINT(bugprone-unchecked-optional-access)
+    }
 
     std::vector<double> lag_correlation(SizeType max_lag) const {
         // Detected noise of a complex Gaussian channel: Cov(I_t, I_t+tau) is
@@ -215,7 +223,7 @@ public:
         if (boxcar_width == 0) {
             throw std::invalid_argument("boxcar_width must be greater than 0");
         }
-        const auto smearing = m_fdmt_plan->get_smearing_grid_final();
+        const auto smearing = fdmt_plan().get_smearing_grid_final();
         const auto nfine    = ndm_fine();
         const auto w        = static_cast<IndexType>(boxcar_width);
         IndexType s_max     = 1;
@@ -257,7 +265,7 @@ public:
     // DC gain of every row: the output for a unit constant input, sum over
     // channels of box weight x box length (~ nchans with box means).
     std::vector<float> count_grid() const {
-        const auto smearing = m_fdmt_plan->get_smearing_grid_final();
+        const auto smearing = fdmt_plan().get_smearing_grid_final();
         const auto nfine    = ndm_fine();
         std::vector<float> fine(nfine, 0.0F);
         for (SizeType i = 0; i < nfine; ++i) {
@@ -276,7 +284,7 @@ public:
     // Effective level-0 weight round(2^b / L) * 2^-b of the fine FDMT's box
     // of L samples (the FDMT runs with box smearing; fdmt_box_weights.hpp).
     double box_weight(IndexType box_len) const {
-        const auto bits = m_fdmt_plan->get_box_fraction_bits();
+        const auto bits = fdmt_plan().get_box_fraction_bits();
         return std::ldexp(static_cast<double>(algorithms::detail::box_weight(
                               static_cast<SizeType>(box_len), bits)),
                           -static_cast<int>(bits));
@@ -287,7 +295,7 @@ public:
             SizeType{2} * m_nfft * m_cfg.nsub * m_nbin * sizeof(ComplexType);
         const SizeType waterfall = m_nchans * fdmt_nsamps() * sizeof(float);
         const SizeType fdmt =
-            (2 * m_fdmt_plan->get_buffer_size() * sizeof(float)) +
+            (2 * fdmt_plan().get_buffer_size() * sizeof(float)) +
             (m_nchans * m_fine_dt_max * sizeof(float));
         const SizeType workspace =
             (m_nchans * m_mbin * 2 * sizeof(unsigned long long)) +
@@ -312,11 +320,14 @@ public:
             m_f_min, m_f_max, m_cfg.nsub, m_cfg.bw_sub, m_groups.size(),
             m_tbin);
         out += fmt::format(
-            "Input: {} order, {}-bit {}, {:.1f} MiB per block\n",
+            "Input: {} order, {}-bit {}, {} subbands, {} sideband, {:.1f} MiB "
+            "per block\n",
             m_cfg.format.order, m_cfg.format.nbits,
             m_cfg.format.nbits == 2
                 ? "levels"
                 : (m_cfg.format.is_signed ? "signed" : "offset-binary"),
+            m_cfg.format.descending ? "descending" : "ascending",
+            m_cfg.format.lower_sideband ? "lower" : "upper",
             mib(utils::baseband_block_bytes(m_cfg.format, m_block_nsamps,
                                             m_cfg.nsub)));
         out += fmt::format(
@@ -346,7 +357,7 @@ public:
             "{:.1f} MiB, workspace {:.1f} MiB; output {:.1f} MiB\n",
             mib(mem.spectrum), mib(mem.waterfall), mib(mem.fdmt),
             mib(mem.workspace), mib(mem.output));
-        out += m_fdmt_plan->summary("\t");
+        out += fdmt_plan().summary("\t");
         out += fmt::format("{:*>80}\n", "");
         return out;
     }
@@ -378,7 +389,7 @@ private:
     std::vector<IndexType> m_shifts; // (ndm_coh, nchans)
     std::vector<SizeType> m_row_offsets;
     std::vector<float> m_taper;
-    std::unique_ptr<FDMTPlan> m_fdmt_plan;
+    std::optional<FDMTPlan> m_fdmt_plan;
 
     std::vector<float> tile_fine(const std::vector<float>& fine) const {
         std::vector<float> grid;
@@ -539,10 +550,9 @@ private:
 
         // Fine FDMT over the aligned window [D - Delta - margin,
         // D + nout + Delta).
-        m_fdmt_plan = std::make_unique<FDMTPlan>(m_f_min, m_f_max, m_nchans,
-                                                 fdmt_nsamps(), m_tsamp, delta,
-                                                 -delta, c.dt_step, "valid");
-        const auto dt_grid = m_fdmt_plan->get_dt_grid_final();
+        m_fdmt_plan.emplace(m_f_min, m_f_max, m_nchans, fdmt_nsamps(), m_tsamp,
+                            delta, -delta, c.dt_step, "valid");
+        const auto dt_grid = fdmt_plan().get_dt_grid_final();
         m_row_offsets.resize(dt_grid.size());
         for (SizeType r = 0; r < dt_grid.size(); ++r) {
             // Negative-dt rows are referenced to the top channel by the
@@ -551,7 +561,7 @@ private:
                 m_fine_dt_max + m_fdmt_margin +
                 static_cast<SizeType>(std::max<IndexType>(0, -dt_grid[r]));
         }
-        const auto fine_dms = m_fdmt_plan->get_dm_grid_final();
+        const auto fine_dms = fdmt_plan().get_dm_grid_final();
         m_dm_grid_final.resize(ncoh * fine_dms.size());
         for (SizeType k = 0; k < ncoh; ++k) {
             for (SizeType r = 0; r < fine_dms.size(); ++r) {
@@ -662,10 +672,10 @@ CohFDMTPlan::~CohFDMTPlan()                                 = default;
 CohFDMTPlan::CohFDMTPlan(CohFDMTPlan&&) noexcept            = default;
 CohFDMTPlan& CohFDMTPlan::operator=(CohFDMTPlan&&) noexcept = default;
 CohFDMTPlan::CohFDMTPlan(const CohFDMTPlan& other)
-    : m_impl(std::make_unique<Impl>(other.m_impl->config())) {}
+    : m_impl(std::make_unique<Impl>(*other.m_impl)) {}
 CohFDMTPlan& CohFDMTPlan::operator=(const CohFDMTPlan& other) {
     if (this != &other) {
-        m_impl = std::make_unique<Impl>(other.m_impl->config());
+        m_impl = std::make_unique<Impl>(*other.m_impl);
     }
     return *this;
 }

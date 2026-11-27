@@ -3,6 +3,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -11,6 +12,7 @@
 #include "dmt/dmt.hpp"
 
 #include "bindings/bind.hpp"
+#include "dlpack_utils.hpp"
 #include "pybind_utils.hpp"
 
 namespace dmt {
@@ -44,6 +46,55 @@ BoxcarResult own_result(CandidateResultView view) {
     }
     return {std::move(array), view, view.input_sample_begin, view.input_nsamps,
             std::move(planes)};
+}
+
+// Device-memory execute() of FDMTBoxcar / FDMTFFTBoxcar: the block (float32,
+// or packed uint8 at the config's input_nbits) is read in place on the
+// call's stream; the result is then copied to the host (copy_result(),
+// which waits for that stream), as execute() returns it.
+template <typename Search, typename Run>
+BoxcarResult boxcar_execute_device(Search& search,
+                                   std::string_view what,
+                                   const DeviceArray& waterfall,
+                                   const py::object& stream,
+                                   Run&& run) {
+    const DeviceCall call =
+        device_call(what, search.backend(), search.device(), waterfall, stream);
+    const auto& cfg   = search.get_config();
+    const auto& plan  = search.get_plan();
+    const bool packed = cfg.input_nbits != 32;
+    auto input     = packed ? call.consume<uint8_t>(waterfall.obj, "waterfall",
+                                                    /*writable=*/false)
+                            : call.consume<float>(waterfall.obj, "waterfall",
+                                                  /*writable=*/false);
+    const auto& dl = input.tensor();
+    check_input_shape(
+        what, "waterfall",
+        std::span<const int64_t>(dl.shape, static_cast<SizeType>(dl.ndim)),
+        search.get_nbeams(), plan.get_nchans(),
+        packed ? packed_bytes(plan.get_nsamps(), cfg.input_nbits)
+               : plan.get_nsamps(),
+        packed ? "nchans, row_bytes" : "nchans, nsamps");
+    CandidateResultView view;
+    {
+        const py::gil_scoped_release release;
+        // `run` returns a device result (copied to the host here) or a
+        // host one (drain()).
+        const auto finish = [&](auto&& result) {
+            if constexpr (std::is_same_v<std::decay_t<decltype(result)>,
+                                         CandidateResultView>) {
+                view = result;
+            } else {
+                view = search.copy_result(call.native_stream());
+            }
+        };
+        if (packed) {
+            finish(run(call.span<const uint8_t>(input), call.native_stream()));
+        } else {
+            finish(run(call.span<const float>(input), call.native_stream()));
+        }
+    }
+    return own_result(view);
 }
 
 template <typename Search>
@@ -190,13 +241,22 @@ void bind_fdmt_boxcar(py::module_& mod) {
                          OverflowPolicy overflow_policy,
                          BoxcarScreenMode screen_mode, bool per_call_masks,
                          SizeType max_candidates_per_plane) {
-                 BoxcarConfig c(max_boxcar, wtsp, detect_thresh, noise_sigma,
-                                peak_mode, max_candidates, max_cands_per_dm,
-                                skip_cold_prefix, input_nbits, input_mean,
-                                use_trapezoid, overflow_policy, screen_mode);
-                 c.per_call_masks           = per_call_masks;
-                 c.max_candidates_per_plane = max_candidates_per_plane;
-                 return c;
+                 return BoxcarConfig{.max_boxcar       = max_boxcar,
+                                     .wtsp             = wtsp,
+                                     .detect_thresh    = detect_thresh,
+                                     .noise_sigma      = noise_sigma,
+                                     .peak_mode        = peak_mode,
+                                     .max_candidates   = max_candidates,
+                                     .max_cands_per_dm = max_cands_per_dm,
+                                     .skip_cold_prefix = skip_cold_prefix,
+                                     .input_nbits      = input_nbits,
+                                     .input_mean       = input_mean,
+                                     .use_trapezoid    = use_trapezoid,
+                                     .overflow_policy  = overflow_policy,
+                                     .max_candidates_per_plane =
+                                         max_candidates_per_plane,
+                                     .screen_mode    = screen_mode,
+                                     .per_call_masks = per_call_masks};
              }),
              "max_boxcar"_a = 4096, py::kw_only(), "wtsp"_a = 2.0F,
              "detect_thresh"_a = 6.0F, "noise_sigma"_a = 1.0F,
@@ -340,7 +400,11 @@ void bind_fdmt_boxcar(py::module_& mod) {
         ``2**k`` equal subbands and the ``2**k - 1`` staggered subbands of
         the same width centred on their boundaries. Candidates carry
         ``subband_level`` (the depth), ``subband_idx``, the channel extent
-        and ``staggered``.
+        and ``staggered``. A subband candidate's times (``peak_sample``,
+        ``begin_sample``, ``end_sample``) are arrival times at its own
+        subband's lower edge ``f_low_mhz``, not at the full band's
+        ``f_min``: shift them by ``dispersion_delay(dm, f_min, f_low_mhz)``
+        to compare candidates across subbands.
 
         ``max_memory_bytes`` (keyword-only, default 10 GiB) bounds
         ``memory_usage.budgeted``: everything the instance allocates on the
@@ -355,13 +419,14 @@ void bind_fdmt_boxcar(py::module_& mod) {
         (NumPy) input is copied one chunk at a time into a buffer reserved
         inside that budget, so :meth:`execute` allocates nothing.
 
-        ``kill_mask`` (keyword-only): ``None`` or one bool/integer per
+        ``kill_mask`` (keyword-only): ``None`` or one host bool/integer per
         channel, low frequency first. Channels with 0 read as zero (code 0
         for packed input) and are left out of every row's noise model, so
         S/N stays calibrated on the remaining channels. On the CPU each
         block is copied once to zero them; on a GPU the transform reads them
-        as zero, without a copy. :meth:`execute` also takes a mask per block
-        (float or packed input), ANDed with this one.
+        as zero, without a copy. :meth:`execute` and :meth:`drain` (with a
+        ``tail`` block) also take a host mask per block (float or packed
+        input), ANDed with this one.
 
         ``config.screen_mode`` (:class:`BoxcarScreenMode`, default ``AUTO``)
         chooses the Stage-1 tile screening mode on both CPU and GPU:
@@ -377,6 +442,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
                          std::string_view backend, int device,
                          SizeType max_memory_bytes, const py::object& kill) {
                  const auto mask = extract_kill_mask(kill);
+                 // Pure C++ from here: other Python threads run meanwhile.
+                 const py::gil_scoped_release release;
                  return FDMTBoxcar(std::move(plan), config, smear,
                                    make_exec(backend, nthreads, device), nbeams,
                                    fuse.value_or(algorithms::kFDMTAutoFuse),
@@ -395,6 +462,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
                std::optional<SizeType> chunk, std::string_view backend,
                int device, SizeType max_memory_bytes, const py::object& kill) {
                 const auto mask = extract_kill_mask(kill);
+                // Pure C++ from here: other Python threads run meanwhile.
+                const py::gil_scoped_release release;
                 return FDMTBoxcar::estimate_memory(
                     plan, config, smear, make_exec(backend, nthreads, device),
                     nbeams, fuse.value_or(algorithms::kFDMTAutoFuse),
@@ -426,6 +495,8 @@ void bind_fdmt_boxcar(py::module_& mod) {
                std::optional<SizeType> chunk, std::string_view backend,
                int device, const py::object& kill) {
                 const auto mask = extract_kill_mask(kill);
+                // Pure C++ from here: other Python threads run meanwhile.
+                const py::gil_scoped_release release;
                 return FDMTBoxcar::estimate_minimum_memory(
                     plan, config, smear, make_exec(backend, nthreads, device),
                     nbeams, fuse.value_or(algorithms::kFDMTAutoFuse),
@@ -495,10 +566,24 @@ void bind_fdmt_boxcar(py::module_& mod) {
             R"doc(
             Search one block and return its candidates.
 
-            ``kill_mask``: ``None`` or one bool/integer per channel, low
-            frequency first (0 = killed), for this block only. It is ANDed
-            with the constructor's mask; ``None`` means the constructor's
-            mask alone. On packed input, channels it kills (and the
+            ``waterfall``: C-contiguous float32 ``(nchans, nsamps)`` or
+            ``(nbeams, nchans, nsamps)`` (packed uint8 ``row_bytes`` per
+            row when ``config.input_nbits`` < 32), as a NumPy array or, on a
+            GPU backend, a device array (PyTorch, CuPy, Numba or any
+            ``__dlpack__`` / ``__cuda_array_interface__`` array on this
+            instance's device; read in place, never copied or converted:
+            another dtype or layout raises ``TypeError``). A device block is
+            searched on ``stream`` (keyword-only; ``None``: the array
+            library's current stream), and the call returns once the
+            candidates are copied back to the host.
+
+            ``kill_mask``: ``None`` or a host 1-D bool/integer sequence or
+            NumPy array of ``nchans`` entries, low frequency first (0 =
+            killed; passing a device array raises ``TypeError``), for this
+            block only (both NumPy and device ``waterfall`` overloads). It is
+            ANDed with the constructor's mask; ``None`` means the
+            constructor's mask alone. On packed input, channels it kills (and
+            the
             constructor's mask keeps) read the code ``input_mean``, which
             must then be a whole number (else ``ValueError``): the expected
             sums stay the constructor's, and only the thresholds and S/N
@@ -510,6 +595,91 @@ void bind_fdmt_boxcar(py::module_& mod) {
             ``max_memory_bytes``; otherwise ``ValueError``, with the stream
             unchanged.
             )doc")
+        .def(
+            "drain",
+            [](FDMTBoxcar& search, const py::array& tail, SizeType n_tail,
+               const py::object& kill) {
+                const auto mask   = extract_kill_mask(kill);
+                const auto& plan  = search.get_plan();
+                const auto& cfg   = search.get_config();
+                const bool packed = cfg.input_nbits != 32;
+                const auto row =
+                    packed ? packed_bytes(plan.get_nsamps(), cfg.input_nbits)
+                           : plan.get_nsamps();
+                if (!tail.dtype().is(packed ? py::dtype::of<uint8_t>()
+                                            : py::dtype::of<float>()) ||
+                    (tail.flags() & py::array::c_style) == 0) {
+                    throw std::invalid_argument(fmt::format(
+                        "FDMTBoxcar.drain: tail must be a C-contiguous {} "
+                        "array",
+                        packed ? "uint8" : "float32"));
+                }
+                check_input_shape("FDMTBoxcar.drain", "tail", tail,
+                                  search.get_nbeams(), plan.get_nchans(), row,
+                                  packed ? "nchans, row_bytes"
+                                         : "nchans, nsamps");
+                CandidateResultView view;
+                {
+                    const py::gil_scoped_release release;
+                    if (packed) {
+                        view = search.drain(
+                            std::span(static_cast<const uint8_t*>(tail.data()),
+                                      static_cast<SizeType>(tail.size())),
+                            n_tail, std::span<const uint8_t>(mask));
+                    } else {
+                        view = search.drain(
+                            std::span(static_cast<const float*>(tail.data()),
+                                      static_cast<SizeType>(tail.size())),
+                            n_tail, std::span<const uint8_t>(mask));
+                    }
+                }
+                return own_result(view);
+            },
+            "tail"_a.noconvert(), py::kw_only(), "n_tail"_a,
+            "kill_mask"_a = py::none(),
+            R"doc(
+            End of stream with a short last block: ``tail`` is a whole block
+            (as :meth:`execute`, NumPy or device array) whose first
+            ``n_tail`` samples per channel are data and the rest padding,
+            never searched. Searches them, then drains as :meth:`drain`:
+            :attr:`searched_nsamps` ends at the tail's ``n_tail``-th sample
+            and no candidate reaches past it. Keyword-only ``kill_mask`` (a
+            host 1-D bool/integer sequence or NumPy array, as in
+            :meth:`execute`) is ANDed with the constructor's mask for
+            ``tail``. Device tails are read on keyword-only ``stream``; the
+            result is on the host.
+            )doc")
+        .def(
+            "drain",
+            [](FDMTBoxcar& search, const DeviceArray& tail, SizeType n_tail,
+               const py::object& kill, const py::object& stream) {
+                const auto mask = extract_kill_mask(kill);
+                return boxcar_execute_device(
+                    search, "FDMTBoxcar.drain", tail, stream,
+                    [&](auto in, Stream s) {
+                        return search.drain(in, n_tail,
+                                            std::span<const uint8_t>(mask), s);
+                    });
+            },
+            "tail"_a, py::kw_only(), "n_tail"_a, "kill_mask"_a = py::none(),
+            "stream"_a = py::none(),
+            "Device-memory overload of :meth:`drain` with a tail block.")
+        .def(
+            "execute",
+            [](FDMTBoxcar& search, const DeviceArray& waterfall,
+               const py::object& kill, const py::object& stream) {
+                const auto mask = extract_kill_mask(kill);
+                return boxcar_execute_device(
+                    search, "FDMTBoxcar.execute", waterfall, stream,
+                    [&](auto in, Stream s) {
+                        return search.execute(
+                            in, std::span<const uint8_t>(mask), s);
+                    });
+            },
+            "waterfall"_a, "kill_mask"_a = py::none(), py::kw_only(),
+            "stream"_a = py::none(),
+            "Device-memory overload of :meth:`execute` (GPU backends); see "
+            "above.")
         .def_property_readonly(
             "search_latency", &FDMTBoxcar::get_search_latency,
             "Input samples a stream sample waits for before every searched "
@@ -549,34 +719,38 @@ void bind_fdmt_boxcar(py::module_& mod) {
     fdmt_fft_boxcar_cls
         .def(py::init([](plans::FDMTPlan plan, BoxcarConfig config, bool smear,
                          int nthreads, SizeType nbeams, bool frac,
-                         const py::object& kill, std::string_view backend,
-                         int device, SizeType max_memory_bytes) {
+                         std::string_view backend, int device,
+                         SizeType max_memory_bytes, const py::object& kill) {
                  const auto mask = extract_kill_mask(kill);
+                 // Pure C++ from here: other Python threads run meanwhile.
+                 const py::gil_scoped_release release;
                  return FDMTFFTBoxcar(std::move(plan), config, smear,
                                       make_exec(backend, nthreads, device),
-                                      nbeams, frac, mask, max_memory_bytes);
+                                      nbeams, frac, max_memory_bytes, mask);
              }),
              "plan"_a, "config"_a = BoxcarConfig{}, "use_box_smearing"_a = true,
              "nthreads"_a = 1, "nbeams"_a = 1, "fractional_delays"_a = true,
-             "kill_mask"_a = py::none(), py::kw_only(), "backend"_a = "cpu",
-             "device"_a           = 0,
-             "max_memory_bytes"_a = algorithms::kFDMTDefaultMaxMemory)
+             py::kw_only(), "backend"_a = "cpu", "device"_a = 0,
+             "max_memory_bytes"_a = algorithms::kFDMTDefaultMaxMemory,
+             "kill_mask"_a        = py::none())
         .def_static(
             "estimate_memory",
             [](const plans::FDMTPlan& plan, BoxcarConfig config, bool smear,
-               int nthreads, SizeType nbeams, bool frac, const py::object& kill,
-               std::string_view backend, int device,
-               SizeType max_memory_bytes) {
+               int nthreads, SizeType nbeams, bool frac,
+               std::string_view backend, int device, SizeType max_memory_bytes,
+               const py::object& kill) {
                 const auto mask = extract_kill_mask(kill);
+                // Pure C++ from here: other Python threads run meanwhile.
+                const py::gil_scoped_release release;
                 return FDMTFFTBoxcar::estimate_memory(
                     plan, config, smear, make_exec(backend, nthreads, device),
-                    nbeams, frac, mask, max_memory_bytes);
+                    nbeams, frac, max_memory_bytes, mask);
             },
             "plan"_a, "config"_a = BoxcarConfig{}, "use_box_smearing"_a = true,
             "nthreads"_a = 1, "nbeams"_a = 1, "fractional_delays"_a = true,
-            "kill_mask"_a = py::none(), py::kw_only(), "backend"_a = "cpu",
-            "device"_a           = 0,
+            py::kw_only(), "backend"_a = "cpu", "device"_a = 0,
             "max_memory_bytes"_a = algorithms::kFDMTDefaultMaxMemory,
+            "kill_mask"_a        = py::none(),
             R"doc(
             Memory an ``FDMTFFTBoxcar`` built with the same arguments would
             allocate, and its chunk (the overlap-save segment), without
@@ -610,7 +784,36 @@ void bind_fdmt_boxcar(py::module_& mod) {
                 }
                 return own_result(view);
             },
-            "waterfall"_a)
+            "waterfall"_a,
+            R"doc(
+            Search one block and return its candidates: C-contiguous float32
+            ``(nchans, nsamps)`` or ``(nbeams, nchans, nsamps)``, a NumPy
+            array or, on a GPU backend, a device array (as
+            :meth:`FDMTBoxcar.execute`; keyword-only ``stream``).
+            )doc")
+        .def(
+            "execute",
+            [](FDMTFFTBoxcar& search, const DeviceArray& waterfall,
+               const py::object& stream) {
+                if (search.get_config().input_nbits != 32) {
+                    throw std::invalid_argument(
+                        "FDMTFFTBoxcar.execute: float32 input only");
+                }
+                return boxcar_execute_device(
+                    search, "FDMTFFTBoxcar.execute", waterfall, stream,
+                    [&](auto in, Stream s) {
+                        // Float only (checked above): the packed branch of
+                        // the shared helper never runs.
+                        if constexpr (std::is_same_v<decltype(in),
+                                                     DeviceSpan<const float>>) {
+                            return search.execute(in, s);
+                        } else {
+                            return CandidateDeviceResultView{};
+                        }
+                    });
+            },
+            "waterfall"_a, py::kw_only(), "stream"_a = py::none(),
+            "Device-memory overload of :meth:`execute` (GPU backends).")
         .def_property_readonly("output_latency",
                                &FDMTFFTBoxcar::get_output_latency);
     bind_boxcar_common(fdmt_fft_boxcar_cls,

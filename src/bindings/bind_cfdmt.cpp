@@ -38,7 +38,7 @@ std::span<const uint8_t> byte_view(const py::array& arr) {
             "(the config's BasebandFormat decides the decoding)");
     }
     if ((arr.flags() & py::array::c_style) == 0) {
-        throw py::type_error(
+        throw py::value_error(
             "CohFDMT.execute: baseband blocks must be C-contiguous");
     }
     return {static_cast<const uint8_t*>(arr.data()),
@@ -213,30 +213,46 @@ void bind_cfdmt(py::module_& mod) {
             4-bit, real in the high nibble) or the low bits (VDIF 2-bit).
         levels_2bit : tuple of 4 float, optional
             Value of each 2-bit code (default VDIF: -3.3359, -1, 1, 3.3359).
+        descending : bool, optional, keyword-only
+            Subbands (the F axis and ``CohFDMTConfig.subband_groups``) run
+            from the highest frequency down (e.g. GUPPI ``CHAN_BW < 0``).
+            Default False.
+        lower_sideband : bool, optional, keyword-only
+            Each subband's spectrum is inverted (lower sideband: the
+            conjugates of upper-sideband voltages). Default False. A mirrored
+            band (negative channel width) usually needs both; check with a
+            known pulsar.
         )doc")
         .def(py::init([](std::string order, SizeType nbits, bool is_signed,
-                         bool msb_first, std::array<float, 4> levels_2bit) {
-                 return BasebandFormat{.order       = std::move(order),
-                                       .nbits       = nbits,
-                                       .is_signed   = is_signed,
-                                       .msb_first   = msb_first,
-                                       .levels_2bit = levels_2bit};
+                         bool msb_first, std::array<float, 4> levels_2bit,
+                         bool descending, bool lower_sideband) {
+                 return BasebandFormat{.order          = std::move(order),
+                                       .nbits          = nbits,
+                                       .is_signed      = is_signed,
+                                       .msb_first      = msb_first,
+                                       .levels_2bit    = levels_2bit,
+                                       .descending     = descending,
+                                       .lower_sideband = lower_sideband};
              }),
              "order"_a = "FTPRI", "nbits"_a = 8, "is_signed"_a = true,
              "msb_first"_a = true,
              "levels_2bit"_a =
-                 std::array<float, 4>{-3.3359F, -1.0F, 1.0F, 3.3359F})
+                 std::array<float, 4>{-3.3359F, -1.0F, 1.0F, 3.3359F},
+             py::kw_only(), "descending"_a = false, "lower_sideband"_a = false)
         .def_readwrite("order", &BasebandFormat::order)
         .def_readwrite("nbits", &BasebandFormat::nbits)
         .def_readwrite("is_signed", &BasebandFormat::is_signed)
         .def_readwrite("msb_first", &BasebandFormat::msb_first)
         .def_readwrite("levels_2bit", &BasebandFormat::levels_2bit)
+        .def_readwrite("descending", &BasebandFormat::descending)
+        .def_readwrite("lower_sideband", &BasebandFormat::lower_sideband)
         .def("__repr__", [](const BasebandFormat& f) {
             return fmt::format(
                 "BasebandFormat(order='{}', nbits={}, is_signed={}, "
-                "msb_first={})",
+                "msb_first={}, descending={}, lower_sideband={})",
                 f.order, f.nbits, f.is_signed ? "True" : "False",
-                f.msb_first ? "True" : "False");
+                f.msb_first ? "True" : "False", f.descending ? "True" : "False",
+                f.lower_sideband ? "True" : "False");
         });
 
     py::class_<CohFDMTConfig>(mod, "CohFDMTConfig",
@@ -351,6 +367,8 @@ void bind_cfdmt(py::module_& mod) {
         )doc")
         .def(py::init([](const CohFDMTConfig& config, int nthreads,
                          std::string_view backend, int device) {
+                 // Pure C++ from here: other Python threads run meanwhile.
+                 const py::gil_scoped_release release;
                  return CohFDMT(config, make_exec(backend, nthreads, device));
              }),
              "config"_a, "nthreads"_a = 1, py::kw_only(), "backend"_a = "cpu",
@@ -382,8 +400,13 @@ void bind_cfdmt(py::module_& mod) {
             "estimate_memory",
             [](const CohFDMTConfig& config, int nthreads,
                std::string_view backend, int device) {
-                return coh_memory_dict(CohFDMT::estimate_memory(
-                    config, make_exec(backend, nthreads, device)));
+                const auto exec = make_exec(backend, nthreads, device);
+                plans::CohFDMTMemoryUsage usage;
+                {
+                    const py::gil_scoped_release release;
+                    usage = CohFDMT::estimate_memory(config, exec);
+                }
+                return coh_memory_dict(usage);
             },
             "config"_a, "nthreads"_a = 1, py::kw_only(), "backend"_a = "cpu",
             "device"_a = 0,
@@ -494,10 +517,15 @@ void bind_cfdmt(py::module_& mod) {
             }
             const auto nsub   = static_cast<SizeType>(voltages.shape(1));
             const auto nsamps = static_cast<SizeType>(voltages.shape(2));
-            auto bytes        = utils::pack_baseband(
-                std::span<const ComplexType>(voltages.data(), voltages.size()),
-                nsub, nsamps, format, scale, sub_begin, sub_count, t_begin,
-                t_count);
+            std::vector<uint8_t> bytes;
+            {
+                const py::gil_scoped_release release;
+                bytes =
+                    utils::pack_baseband(std::span<const ComplexType>(
+                                             voltages.data(), voltages.size()),
+                                         nsub, nsamps, format, scale, sub_begin,
+                                         sub_count, t_begin, t_count);
+            }
             return as_pyarray(std::move(bytes));
         },
         "voltages"_a.noconvert(), "format"_a = BasebandFormat{},
@@ -509,6 +537,11 @@ void bind_cfdmt(py::module_& mod) {
         Each component becomes ``round(v * scale)`` clipped to the format's
         range (2-bit: the nearest level). ``sub_begin, sub_count`` and
         ``t_begin, t_count`` select subbands and samples (0 = to the end).
+        The voltages are upper sideband in ascending frequency (as
+        :func:`simulate_baseband` makes them); ``format.lower_sideband``
+        packs their conjugates, and with ``format.descending`` the subband
+        range counts from the highest subband down (one call per
+        ``CohFDMTConfig.subband_groups`` entry, in its order).
 
         Returns
         -------

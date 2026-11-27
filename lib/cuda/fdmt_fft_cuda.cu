@@ -463,7 +463,18 @@ public:
             initialize(cfg.kill_mask);
         }
         if (!cfg.defer_allocation) {
+            set_kernel_attributes();
             m_allocated = true;
+        }
+    }
+
+    // Kernel attributes are process state: set once the engine allocates,
+    // never by an estimate.
+    void set_kernel_attributes() const {
+        for (const auto kernel :
+             {kernel_tree_stage<true>, kernel_tree_stage<false>}) {
+            gpu_utils::raise_dynamic_smem(
+                kernel, m_stage_smem, "FDMTFFT (cuda): shared-memory opt-in");
         }
     }
 
@@ -487,6 +498,7 @@ public:
                                                 gpu_utils::kAdviceBlocks);
         }
         m_after_alloc.clear();
+        set_kernel_attributes();
         const auto got = memory_usage();
         if (got.plan != planned.plan || got.state != planned.state ||
             got.history != planned.history ||
@@ -515,6 +527,7 @@ public:
     void execute(std::span<const float> waterfall,
                  std::span<float> dmt) override {
         gpu_utils::set_device(m_device_id);
+        check_previous_block_finished();
         check_sizes(waterfall.size(), dmt.size(), "execute");
         const auto s = host_begin();
         m_in_d.reserve(waterfall.size());
@@ -530,6 +543,7 @@ public:
                  bool time_major,
                  std::span<float> dmt) override {
         gpu_utils::set_device(m_device_id);
+        check_previous_block_finished();
         check_nbits(nbits, time_major ? "execute_time_major" : "execute");
         const auto bytes = time_major ? tm_bytes(nbits) : cm_bytes(nbits);
         if (packed.size() != bytes) {
@@ -554,6 +568,7 @@ public:
                  DeviceSpan<float> d_dmt,
                  Stream stream) override {
         gpu_utils::set_device(m_device_id);
+        check_previous_block_finished();
         check_sizes(d_waterfall.size(), d_dmt.size(), "execute");
         const auto s = to_cuda(stream);
         m_device_work.order(s);
@@ -630,6 +645,7 @@ public:
                  DeviceSpan<float> d_dmt,
                  Stream stream) override {
         gpu_utils::set_device(m_device_id);
+        check_previous_block_finished();
         check_nbits(nbits, "execute");
         if (d_packed.size() != cm_bytes(nbits)) {
             throw std::invalid_argument(fmt::format(
@@ -648,6 +664,7 @@ public:
     void reset(std::span<const float> waterfall,
                std::span<float> dmt) override {
         gpu_utils::set_device(m_device_id);
+        check_previous_block_finished();
         check_sizes(waterfall.size(), dmt.size(), "reset");
         const auto s = host_begin();
         m_step_in_d.reserve(waterfall.size());
@@ -656,6 +673,9 @@ public:
         start_stepper(
             Input{.data = m_step_in_d.data(), .row_len = m_nsamps, .nbits = 32},
             out_stage(), s);
+        m_device_work.mark(s);
+        gpu_utils::check_gpu_call(cudaStreamSynchronize(s),
+                                  "FDMTFFT (cuda): reset");
         m_host_dmt = dmt;
     }
 
@@ -663,6 +683,7 @@ public:
                SizeType nbits,
                std::span<float> dmt) override {
         gpu_utils::set_device(m_device_id);
+        check_previous_block_finished();
         check_nbits(nbits, "reset");
         if (packed.size() != cm_bytes(nbits)) {
             throw std::invalid_argument(
@@ -674,6 +695,9 @@ public:
         m_step_in_d.reserve((packed.size() + 3) / 4);
         m_host.to_device(m_step_in_d.data(), packed.data(), packed.size());
         start_stepper(packed_input(m_step_in_d.data(), nbits), out_stage(), s);
+        m_device_work.mark(s);
+        gpu_utils::check_gpu_call(cudaStreamSynchronize(s),
+                                  "FDMTFFT (cuda): reset");
         m_host_dmt = dmt;
     }
 
@@ -681,6 +705,7 @@ public:
                DeviceSpan<float> d_dmt,
                Stream stream) override {
         gpu_utils::set_device(m_device_id);
+        check_previous_block_finished();
         check_sizes(d_waterfall.size(), d_dmt.size(), "reset");
         const auto s = to_cuda(stream);
         m_device_work.order(s);
@@ -696,6 +721,7 @@ public:
                DeviceSpan<float> d_dmt,
                Stream stream) override {
         gpu_utils::set_device(m_device_id);
+        check_previous_block_finished();
         check_nbits(nbits, "reset");
         if (d_packed.size() != cm_bytes(nbits)) {
             throw std::invalid_argument(
@@ -855,6 +881,11 @@ public:
 
     void reset_history() noexcept override {
         m_search_pos = 0;
+        // Abandons any unfinished stepper block along with its stream.
+        m_host_dmt     = {};
+        m_initialized  = false;
+        m_view_valid   = false;
+        m_view_h_valid = false;
         try {
             gpu_utils::set_device(m_device_id);
             m_device_work.wait();
@@ -871,6 +902,7 @@ public:
     }
 
     void save_history(std::span<float> out) const override {
+        check_previous_block_finished();
         check_history(out.size(), "save_history");
         gpu_utils::set_device(m_device_id);
         m_device_work.wait();
@@ -892,9 +924,14 @@ public:
                                                  cudaMemcpyHostToDevice),
                                       "FDMTFFT::load_history");
         }
+        m_host_dmt     = {};
+        m_initialized  = false;
+        m_view_valid   = false;
+        m_view_h_valid = false;
     }
 
     void save_history(DeviceSpan<float> out, Stream stream) const override {
+        check_previous_block_finished();
         check_history(out.size(), "save_history");
         gpu_utils::set_device(m_device_id);
         const auto s = to_cuda(stream);
@@ -922,6 +959,10 @@ public:
                 "FDMTFFT::load_history");
         }
         m_device_work.mark(s);
+        m_host_dmt     = {};
+        m_initialized  = false;
+        m_view_valid   = false;
+        m_view_h_valid = false;
     }
 
 protected:
@@ -955,7 +996,9 @@ private:
     SizeType m_nsamps_out{};
     SizeType m_max_coords{};
     SizeType m_mid_rows{}; // rows of the largest inner stage boundary
-    int m_smem_optin{};
+    /// Dynamic shared memory of the largest tree stage (opted in by
+    /// set_kernel_attributes()).
+    SizeType m_stage_smem{};
 
     DevBuf<uint32_t> m_l0_chan;
     DevBuf<uint32_t> m_l0_shift;
@@ -1059,26 +1102,28 @@ private:
             }
         }
 
-        const auto& props = gpu_utils::device_properties(m_device_id);
-        m_smem_optin      = static_cast<int>(props.sharedMemPerBlockOptin);
+        // Stage node budget from the dynamic shared memory both stage
+        // kernels can take (read-only queries; allocate() opts them in).
+        const auto smem_limit = std::min(
+            gpu_utils::dynamic_smem_limit(kernel_tree_stage<true>, m_device_id,
+                                          "FDMTFFT (cuda): shared memory"),
+            gpu_utils::dynamic_smem_limit(kernel_tree_stage<false>, m_device_id,
+                                          "FDMTFFT (cuda): shared memory"));
         const auto budget = std::min<SizeType>(
-            kNodeBudget, static_cast<SizeType>(m_smem_optin) /
-                             (2 * kTileBins * sizeof(float2)));
+            kNodeBudget, smem_limit / (2 * kTileBins * sizeof(float2)));
         const auto stages = fdmt_fft::plan_tree_stages(m_dag, budget, kMaxOut);
         m_mid_rows        = 0;
-        for (SizeType i = 0; i + 1 < stages.size(); ++i) {
-            m_mid_rows =
-                std::max(m_mid_rows, m_dag.ncoords[stages[i].level_out]);
+        m_stage_smem      = 0;
+        for (SizeType i = 0; i < stages.size(); ++i) {
+            if (i + 1 < stages.size()) {
+                m_mid_rows =
+                    std::max(m_mid_rows, m_dag.ncoords[stages[i].level_out]);
+            }
+            m_stage_smem =
+                std::max(m_stage_smem,
+                         2 * stages[i].max_nodes * kTileBins * sizeof(float2));
         }
         m_stages.build(stages);
-        for (const auto kernel :
-             {kernel_tree_stage<true>, kernel_tree_stage<false>}) {
-            gpu_utils::check_gpu_call(
-                cudaFuncSetAttribute(
-                    kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                    m_smem_optin),
-                "FDMTFFT (cuda): shared-memory opt-in");
-        }
 
         m_seg = fdmt_fft::choose_segments(m_geom, m_mode, m_nsamps_out,
                                           m_dag.ncoords[0] + m_dag.nops(),
@@ -1246,6 +1291,19 @@ private:
         if (!m_initialized) {
             throw std::logic_error(
                 "FDMTFFT: Stepper is not initialized. Call reset() first.");
+        }
+    }
+    // mode='valid' keeps one block's history across calls: a stepper run
+    // that was reset() but not finalize()d would lose it.
+    void check_previous_block_finished() const {
+        if (m_mode == FDMTMode::kValid && m_initialized) {
+            throw std::logic_error(fmt::format(
+                "FDMTFFT: the previous block's stepper run stopped at level "
+                "{} of {}. In mode='valid' every block must be finalized "
+                "before the next reset()/execute(), or its cross-block "
+                "history is lost. Call finalize(), or reset_history() to "
+                "abandon the stream.",
+                m_level, total_levels() - 1));
         }
     }
 

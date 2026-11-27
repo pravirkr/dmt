@@ -3,7 +3,7 @@
 // Fast random fills for test inputs.
 //
 // The tests feed millions of samples per block, and the C++ suite also runs
-// unoptimized (-O0 coverage, -O1 sanitizers), where a std::*_distribution
+// instrumented (gcov coverage, ASan/UBSan), where a std::*_distribution
 // call per element is several non-inlined calls deep. These fills keep the
 // generator (splitmix64) in the loop body: a handful of integer operations
 // per element whatever the optimization level, and the same values on every

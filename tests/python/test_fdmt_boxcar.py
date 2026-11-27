@@ -1012,3 +1012,135 @@ def test_minimum_memory() -> None:
 
 def test_minimum_memory_gpu(gpu_backend: str) -> None:
     _check_minimum_memory(gpu_backend)
+
+
+def test_drain_with_short_tail_matches_one_pass() -> None:
+    """Whole blocks then drain(tail, n_tail=...) find the single pass's
+    candidates, none from the tail's padding."""
+    nchans, nsamps, tail, nblocks = 16, 128, 45, 3
+    total = nblocks * nsamps + tail
+    rng = np.random.default_rng(6)
+    values = rng.integers(76, 180, (nchans, total)).astype(np.uint8)
+    cfg = BoxcarConfig(
+        16,
+        wtsp=1.5,
+        detect_thresh=2.5,
+        max_candidates=1 << 20,
+        max_cands_per_dm=0,
+        input_nbits=8,
+        input_mean=128.0,
+        noise_sigma=30.0,
+    )
+
+    def plan(n: int) -> FDMTPlan:
+        return FDMTPlan(1200.0, 1600.0, nchans, n, 0.001, 40)
+
+    whole = FDMTBoxcar(plan(total), cfg)
+    want = np.concatenate([whole.execute(values).candidates, whole.drain().candidates])
+    stream = FDMTBoxcar(plan(nsamps), cfg)
+    parts = []
+    for k in range(nblocks):
+        blk = np.ascontiguousarray(values[:, k * nsamps : (k + 1) * nsamps])
+        parts.append(stream.execute(blk).candidates)
+        if k == 0:
+            # Rejected drain(tail, ...) calls leave the open stream usable.
+            pos = stream.searched_nsamps
+            with pytest.raises(ValueError, match="shape"):
+                stream.drain(np.ascontiguousarray(blk[:, :-1]), n_tail=tail)
+            with pytest.raises(ValueError, match="n_tail"):
+                stream.drain(blk, n_tail=0)
+            with pytest.raises(ValueError, match="kill_mask"):
+                stream.drain(blk, n_tail=tail, kill_mask=np.ones(nchans - 1, np.uint8))
+            assert stream.searched_nsamps == pos
+    block = np.full((nchans, nsamps), 255, dtype=np.uint8)
+    block[:, :tail] = values[:, nblocks * nsamps :]
+    parts.append(stream.drain(block, n_tail=tail).candidates)
+    got = np.concatenate(parts)
+    assert stream.searched_nsamps == total
+    assert len(want) > 20
+    assert np.all(got["end_sample"] < total)
+    order = ("peak_sample", "dm_idx", "width", "begin_sample")
+    np.testing.assert_array_equal(np.sort(got, order=order), np.sort(want, order=order))
+
+
+def test_drain_short_tail_kill_mask_and_skewed_padding() -> None:
+    """Verify drain(tail, kill_mask=...) and CPU skewed short-tail padding."""
+    nchans, nsamps, tail, nblocks = 16, 128, 45, 3
+    total = nblocks * nsamps + tail
+    rng = np.random.default_rng(19)
+    clean = np.round(rng.standard_normal((nchans, total), dtype=np.float32) * 8) / 8
+    mask = np.ones(nchans, dtype=np.uint8)
+    mask[[2, 5, 11]] = 0
+    dirty = clean.copy()
+    dirty[mask == 0] = 40.0
+
+    def plan(n: int) -> FDMTPlan:
+        return FDMTPlan(1200.0, 1600.0, nchans, n, 0.001, 40)
+
+    ref_cfg = BoxcarConfig(
+        16, wtsp=1.5, detect_thresh=2.25, max_candidates=1 << 20, max_cands_per_dm=0
+    )
+    whole = FDMTBoxcar(plan(total), ref_cfg, kill_mask=mask)
+    want = sorted_candidates(
+        [whole.execute(dirty).candidates, whole.drain().candidates]
+    )
+    assert len(want) > 10
+
+    mcfg = BoxcarConfig(
+        16,
+        wtsp=1.5,
+        detect_thresh=2.25,
+        max_candidates=1 << 20,
+        max_cands_per_dm=0,
+        per_call_masks=True,
+    )
+    stream = FDMTBoxcar(plan(nsamps), mcfg)
+    parts = [
+        stream.execute(
+            np.ascontiguousarray(dirty[:, k * nsamps : (k + 1) * nsamps]),
+            kill_mask=mask,
+        ).candidates
+        for k in range(nblocks)
+    ]
+    tail_blk = np.full((nchans, nsamps), 1.0e4, dtype=np.float32)
+    tail_blk[:, :tail] = dirty[:, nblocks * nsamps :]
+    parts.append(stream.drain(tail_blk, n_tail=tail, kill_mask=mask).candidates)
+    assert stream.searched_nsamps == total
+    assert_same(sorted_candidates(parts), want)
+
+    # Skewed CPU path with integer-valued [0, n_tail) float samples and
+    # 0.5 / NaN / Inf in [n_tail, nsamps).
+    sk_chans, sk_samps, sk_tail = 64, 512, 173
+    sk_total = 2 * sk_samps + sk_tail
+    sk_plan = FDMTPlan(1100.0, 1500.0, sk_chans, sk_samps, 0.001, 600, subband_depth=1)
+    sk_cfg = BoxcarConfig(
+        16,
+        wtsp=1.5,
+        detect_thresh=2.5,
+        noise_sigma=30.0,
+        max_candidates=1 << 20,
+        max_cands_per_dm=0,
+    )
+    min_est = FDMTBoxcar.estimate_minimum_memory(sk_plan, sk_cfg)
+    assert "skewed" in min_est.search_path
+    assert min_est.search_latency > 0
+    fvals = rng.integers(-50, 51, (sk_chans, sk_total)).astype(np.float32)
+    fvals[32:, sk_total - 12 : sk_total - 6] += 40.0
+    baseline = None
+    for pad in (0.0, 0.5, np.nan, np.inf):
+        sk = FDMTBoxcar(sk_plan, sk_cfg, max_memory_bytes=min_est.max_memory_bytes)
+        cands = [
+            sk.execute(
+                np.ascontiguousarray(fvals[:, k * sk_samps : (k + 1) * sk_samps])
+            ).candidates
+            for k in range(2)
+        ]
+        t_blk = np.full((sk_chans, sk_samps), pad, dtype=np.float32)
+        t_blk[:, :sk_tail] = fvals[:, 2 * sk_samps :]
+        cands.append(sk.drain(t_blk, n_tail=sk_tail).candidates)
+        merged = sorted_candidates(cands)
+        if baseline is None:
+            baseline = merged
+            assert len(baseline) > 0
+        else:
+            assert_same(merged, baseline)

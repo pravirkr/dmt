@@ -289,6 +289,10 @@ void FDMTBoxcarCpuEngine::set_search_stop(uint64_t stop) noexcept {
     m_search_stop = stop;
 }
 
+void FDMTBoxcarCpuEngine::set_valid_nsamps(SizeType n_valid) noexcept {
+    m_driver->set_valid_nsamps(n_valid);
+}
+
 uint64_t FDMTBoxcarCpuEngine::stream_position() const noexcept {
     return m_position;
 }
@@ -452,6 +456,7 @@ void FDMTBoxcarCpuEngine::reset_history(Stream /*unused*/) {
         m_noise_ring.reset(m_kill_runs);
     }
     m_search_stop = UINT64_MAX;
+    m_driver->set_valid_nsamps(std::numeric_limits<SizeType>::max());
     m_driver->reset({});
     std::ranges::fill(m_carry, 0.0F);
     std::ranges::fill(m_integer_carry, uint64_t{0});

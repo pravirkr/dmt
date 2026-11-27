@@ -306,15 +306,23 @@ public:
                             SizeType nbits,
                             std::span<float> dmt);
 
-    /// @brief Initializes stepper engine with input waterfall and output
-    /// buffer (host memory; a GPU backend stages them on the device)
+    /**
+     * @brief Initializes stepper engine with input waterfall and output
+     * buffer (host memory; a GPU backend stages them on the device). The
+     * input is read during reset() only; @p dmt is written by finalize().
+     *
+     * In mode "valid" a block must be finalized before the next reset() or
+     * execute(), which otherwise throw std::logic_error (the block's
+     * cross-block history would be lost). reset_history() abandons the
+     * unfinished block and the stream.
+     */
     void reset(std::span<const float> waterfall, std::span<float> dmt);
-    /// @brief Initializes stepper from device memory (GPU backends)
+    /// @brief Initializes stepper from device memory (GPU backends). The
+    /// device waterfall must stay valid until finalize().
     void reset(DeviceSpan<const float> d_waterfall,
                DeviceSpan<float> d_dmt,
                Stream stream = {});
     /// @brief Packed analogue of reset() (layout as the packed execute()).
-    /// The packed block must stay valid until finalize().
     void reset(std::span<const uint8_t> waterfall_packed,
                SizeType nbits,
                std::span<float> dmt);

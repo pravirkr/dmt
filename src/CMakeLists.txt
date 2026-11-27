@@ -55,4 +55,8 @@ target_include_directories(
 )
 unset(_dmt_fmt_first)
 dmt_enable_coverage(${DMT_PYMODULE_NAME})
-install(TARGETS ${DMT_PYMODULE_NAME} DESTINATION ${DMT_PYTHON_LIBRARY_NAME})
+# Only wheels install the module (into the dmtlib package); a CMake install of
+# a development tree with bindings must not drop a stray <prefix>/dmtlib/.
+if(DEFINED SKBUILD)
+  install(TARGETS ${DMT_PYMODULE_NAME} DESTINATION ${DMT_PYTHON_LIBRARY_NAME})
+endif()

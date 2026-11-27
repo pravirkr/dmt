@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <map>
 #include <random>
 #include <span>
 #include <stdexcept>
@@ -232,6 +233,91 @@ TEST_CASE("FDMTBoxcar kKeepBrightest: validation and memory",
                     std::invalid_argument);
 }
 
+TEST_CASE("drain() keeps the call's quotas over its whole tail (CPU)",
+          "[boxcar][overflow][cpu]") {
+    // FDMTFFTBoxcar with fractional delays drains its 64-sample latency in
+    // four 16-sample padding steps and flush(): one call, whose quotas hold
+    // over the union of the steps.
+    const plans::FDMTPlan plan(700, 1200, 8, 16, 0.001F,
+                               std::vector<IndexType>{0, 3, 9, 20});
+    const auto input = waterfalls(plan, 1, 6);
+    BoxcarConfig base;
+    base.max_boxcar    = 8;
+    base.wtsp          = 1.0F;
+    base.detect_thresh = 1.0F;
+    base.peak_mode     = PeakFindingMode::kAllAboveThreshold;
+    const auto drain   = [&](const BoxcarConfig& c, CandidateCounts& counts) {
+        algorithms::FDMTFFTBoxcar s(plan, c, true, Exec::cpu(), 1, true);
+        REQUIRE(s.get_output_latency() > 3 * plan.get_nsamps());
+        for (const auto& block : input) {
+            static_cast<void>(s.execute(block));
+        }
+        const auto tail  = s.drain();
+        counts           = tail;
+        SizeType emitted = 0;
+        for (const auto& p : tail.plane_counts) {
+            CHECK(p.emitted_count + p.dropped_global + p.dropped_per_dm ==
+                  p.total_detected);
+            emitted += p.emitted_count;
+        }
+        CHECK(emitted == tail.emitted_count);
+        CHECK(tail.candidates.size() == tail.emitted_count);
+        CHECK(tail.emitted_count + tail.dropped_global + tail.dropped_per_dm ==
+              tail.total_detected);
+        return std::vector<RawCandidate>(tail.candidates.begin(),
+                                         tail.candidates.end());
+    };
+    auto open             = base;
+    open.max_candidates   = SizeType{1} << 20;
+    open.max_cands_per_dm = 0;
+    CandidateCounts all_counts;
+    const auto all = drain(open, all_counts);
+    REQUIRE(all.size() > 60);
+    REQUIRE_FALSE(all_counts.overflowed());
+
+    SECTION("kDropNew max_candidates") {
+        auto cfg           = open;
+        cfg.max_candidates = 25;
+        CandidateCounts counts;
+        const auto got = drain(cfg, counts);
+        CHECK(got.size() == 25);
+        CHECK(counts.total_detected == all.size());
+        CHECK(counts.dropped_global == all.size() - 25);
+    }
+    SECTION("kDropNew max_candidates_per_plane") {
+        auto cfg                     = open;
+        cfg.max_candidates           = 40;
+        cfg.max_candidates_per_plane = 15;
+        CandidateCounts counts;
+        CHECK(drain(cfg, counts).size() == 15);
+    }
+    SECTION("kKeepBrightest: the brightest of the whole tail") {
+        auto cfg             = base;
+        cfg.overflow_policy  = OverflowPolicy::kKeepBrightest;
+        cfg.max_cands_per_dm = 1024; // above any row's count here
+        cfg.max_candidates   = 20;
+        CandidateCounts counts;
+        const auto got = drain(cfg, counts);
+        CandidateCounts want;
+        require_same(got, keep_brightest(all, 1024, 20, want));
+        CHECK(counts.total_detected == want.total_detected);
+        CHECK(counts.emitted_count == want.emitted_count);
+        CHECK(counts.dropped_global == want.dropped_global);
+    }
+    SECTION("kKeepBrightest max_cands_per_dm") {
+        auto cfg             = base;
+        cfg.overflow_policy  = OverflowPolicy::kKeepBrightest;
+        cfg.max_cands_per_dm = 2;
+        cfg.max_candidates   = 1000;
+        CandidateCounts counts;
+        const auto got = drain(cfg, counts);
+        std::map<uint32_t, SizeType> per_row;
+        for (const auto& c : got) {
+            CHECK(++per_row[c.dm_idx] <= 2);
+        }
+    }
+}
+
 TEST_CASE("FDMTFFTBoxcar kKeepBrightest keeps the brightest of each call (CPU)",
           "[boxcar][overflow][cpu]") {
     check_fft_overflow(Exec::cpu());
@@ -312,6 +398,39 @@ TEST_CASE("GPU FDMTBoxcar kKeepBrightest: screen, masks, wide and 16-bit",
         const auto run    = [&](const BoxcarConfig& c,
                                 std::vector<CandidateCounts>* n) {
             FDMTBoxcar s(plan, c, true, gpu, 1, algorithms::kFDMTAutoFuse, 512);
+            return run_calls(s, blocks, n);
+        };
+        CHECK(check_keep(run, cfg, {{3, 60}, {1, 20}}) > 100);
+    }
+    SECTION("16-bit packed input beyond 2^32 (uint64 carry)") {
+        // The plan above fits uint32_t (32-bit carry); this one's 16-bit
+        // sums exceed 2^32 (smeared delays to 16384; dmt_internal_tests
+        // checks int_search_fits_u32 is false for it), so the search runs
+        // its uint64_t carry.
+        const plans::FDMTPlan plan(700, 1200, 8, 1024, 0.001F,
+                                   std::vector<IndexType>{0, 32, 16384});
+        std::mt19937 gen(5);
+        std::uniform_int_distribution<int> dist(0, 65535);
+        std::vector<std::vector<uint8_t>> blocks;
+        for (int k = 0; k < 3; ++k) {
+            std::vector<uint8_t> b(plan.get_nchans() * plan.get_nsamps() * 2);
+            for (SizeType i = 0; i < b.size(); i += 2) {
+                const auto v = static_cast<uint16_t>(dist(gen));
+                b[i]         = static_cast<uint8_t>(v & 0xFF);
+                b[i + 1]     = static_cast<uint8_t>(v >> 8);
+            }
+            blocks.push_back(std::move(b));
+        }
+        BoxcarConfig cfg;
+        cfg.max_boxcar    = 64;
+        cfg.wtsp          = 2.0F;
+        cfg.detect_thresh = 2.0F;
+        cfg.input_nbits   = 16;
+        cfg.input_mean    = 32767.5F;
+        cfg.noise_sigma   = 18918.0F;
+        const auto run    = [&](const BoxcarConfig& c,
+                                std::vector<CandidateCounts>* n) {
+            FDMTBoxcar s(plan, c, true, gpu);
             return run_calls(s, blocks, n);
         };
         CHECK(check_keep(run, cfg, {{3, 60}, {1, 20}}) > 100);

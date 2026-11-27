@@ -556,10 +556,36 @@ void bind_plans(py::module_& mod) {
         .def_property_readonly("ndm_coh", &CohFDMTPlan::get_ndm_coh)
         .def_property_readonly("ndm_fine", &CohFDMTPlan::get_ndm_fine)
         .def_property_readonly("fine_dt_max", &CohFDMTPlan::get_fine_dt_max)
-        .def_property_readonly("dm_grid_final",
-                               [](const CohFDMTPlan& p) {
-                                   return as_pyarray_ref(p.get_dm_grid_final());
-                               })
+        .def_property_readonly("fdmt_nsamps", &CohFDMTPlan::get_fdmt_nsamps,
+                               "Time samples of the fine FDMT's input window.")
+        .def_property_readonly(
+            "fdmt_window_start", &CohFDMTPlan::get_fdmt_window_start,
+            "Aligned-frame sample where the fine FDMT's input window starts "
+            "(negative: samples before the block are zero).")
+        .def_property_readonly(
+            "row_offsets",
+            [](const CohFDMTPlan& p) {
+                return as_pyarray_ref(p.get_row_offsets());
+            },
+            "Start of each fine row's output in its FDMT output row.")
+        .def_property_readonly(
+            "channel_taper",
+            [](const CohFDMTPlan& p) {
+                return as_pyarray_ref(p.get_channel_taper());
+            },
+            "Channel response ``|H(f)|`` on the ``mbin`` bins of a channel "
+            "(DC-centred).")
+        .def_property_readonly(
+            "dm_grid_final",
+            [](const CohFDMTPlan& p) {
+                return as_pyarray_ref(p.get_dm_grid_final());
+            },
+            "DM of every output row: ``ndm_coh`` blocks of ``ndm_fine`` rows, "
+            "coarse-major. Each block spans its coarse trial's fine window, "
+            "and neighbouring windows overlap, so the grid increases within a "
+            "block and steps back at the next one (piecewise monotonic): "
+            "sort, or search per block, where one increasing DM axis is "
+            "needed.")
         .def_property_readonly("ndm", &CohFDMTPlan::get_ndm)
         .def_property_readonly("max_delay", &CohFDMTPlan::get_max_delay)
         .def_property_readonly("intra_channel_smear",
@@ -690,33 +716,44 @@ void bind_plans(py::module_& mod) {
         f_ref : float, optional
             Keyword-only. Reference frequency of the output times in MHz
             (default ``None``: ``f_min``); see :class:`DDMT`.
+        kill_mask : array_like, optional
+            Keyword-only. One bool/integer per channel (0 = killed), as on
+            :class:`DDMT`.
         )doc")
         .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
                          float dm_max, float dm_step, float dm_min,
-                         SizeType nbits, std::optional<float> f_ref) {
+                         SizeType nbits, std::optional<float> f_ref,
+                         const py::object& kill_mask) {
+                 const auto mask = extract_kill_mask(kill_mask);
                  return DDMTPlan(f_min, f_max, nchans, tsamp, dm_max, dm_step,
-                                 dm_min, nbits, {}, f_ref);
+                                 dm_min, nbits, mask, f_ref);
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_max"_a,
              "dm_step"_a, "dm_min"_a = 0.0F, "nbits"_a = 32, py::kw_only(),
-             "f_ref"_a = py::none())
+             "f_ref"_a = py::none(), "kill_mask"_a = py::none())
         .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
                          const py::array_t<float>& dm_arr, SizeType nbits,
-                         std::optional<float> f_ref) {
-                 const auto dms = copy_native_1d<float>(dm_arr, "dm_arr");
-                 return DDMTPlan(f_min, f_max, nchans, tsamp, dms, nbits, {},
+                         std::optional<float> f_ref,
+                         const py::object& kill_mask) {
+                 const auto dms  = copy_native_1d<float>(dm_arr, "dm_arr");
+                 const auto mask = extract_kill_mask(kill_mask);
+                 return DDMTPlan(f_min, f_max, nchans, tsamp, dms, nbits, mask,
                                  f_ref);
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "dm_arr"_a,
-             "nbits"_a = 32, py::kw_only(), "f_ref"_a = py::none())
+             "nbits"_a = 32, py::kw_only(), "f_ref"_a = py::none(),
+             "kill_mask"_a = py::none())
         .def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
                          const LevinConfig& levin, SizeType nbits,
-                         std::optional<float> f_ref) {
-                 return DDMTPlan(f_min, f_max, nchans, tsamp, levin, nbits, {},
-                                 f_ref);
+                         std::optional<float> f_ref,
+                         const py::object& kill_mask) {
+                 const auto mask = extract_kill_mask(kill_mask);
+                 return DDMTPlan(f_min, f_max, nchans, tsamp, levin, nbits,
+                                 mask, f_ref);
              }),
              "f_min"_a, "f_max"_a, "nchans"_a, "tsamp"_a, "levin"_a,
-             "nbits"_a = 32, py::kw_only(), "f_ref"_a = py::none())
+             "nbits"_a = 32, py::kw_only(), "f_ref"_a = py::none(),
+             "kill_mask"_a = py::none())
         .def("summary", &DDMTPlan::summary,
              "Human-readable summary of the DDMT plan.")
         .def_static(

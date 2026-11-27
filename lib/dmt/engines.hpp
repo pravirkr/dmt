@@ -174,6 +174,9 @@ public:
     virtual void execute_search_zero(FDMTSearchSink& /*unused*/) {
         throw std::logic_error("FDMT search: no zero-block search here");
     }
+    /// Short final block (FDMT::execute_tail, FDMTBoxcar::drain(tail, n_tail)):
+    /// valid samples per channel row of the next block (SIZE_MAX: all nsamps).
+    virtual void set_valid_nsamps(SizeType /*n_valid*/) noexcept {}
 
     // Host memory: every backend.
     virtual void execute(std::span<const float> waterfall,

@@ -475,6 +475,27 @@ def test_fdmt_fft_finalize_preserves_nbeams() -> None:
     np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-5)
 
 
+def test_fdmt_fft_valid_mode_block_must_be_finalized() -> None:
+    nchans, nsamps = 16, 128
+    rng = np.random.default_rng(20)
+    wf = rng.standard_normal((nchans, nsamps), dtype=np.float32)
+    eng = FDMTFFT(1000.0, 1500.0, nchans, nsamps, 0.001, 16, mode="valid")
+    ref = FDMTFFT(1000.0, 1500.0, nchans, nsamps, 0.001, 16, mode="valid")
+    eng.reset(wf.copy())
+    with pytest.raises(RuntimeError):  # std::logic_error
+        eng.execute(wf)
+    with pytest.raises(RuntimeError):
+        eng.reset(wf)
+    got = eng.finalize()
+    np.testing.assert_allclose(got, ref.execute(wf), rtol=1e-5, atol=1e-5)
+    # The history committed by finalize() continues the stream.
+    wf2 = rng.standard_normal((nchans, nsamps), dtype=np.float32)
+    np.testing.assert_allclose(eng.execute(wf2), ref.execute(wf2), rtol=1e-5, atol=1e-5)
+    eng.reset(wf2)
+    eng.reset_history()
+    eng.execute(wf2)
+
+
 def test_fdmt_fft_execute_out_buffer() -> None:
     rng = np.random.default_rng(23)
     nchans, nsamps = 16, 128

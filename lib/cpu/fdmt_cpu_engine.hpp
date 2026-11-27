@@ -246,6 +246,11 @@ public:
         }
         m_skew->execute_search_zero(sink);
     }
+    void set_valid_nsamps(SizeType n_valid) noexcept override {
+        if (m_skew) {
+            m_skew->set_valid_nsamps(n_valid);
+        }
+    }
     [[nodiscard]] detail::FDMTPath path() const noexcept override {
         return m_skew ? detail::FDMTPath::kSkewed : detail::FDMTPath::kTree;
     }
