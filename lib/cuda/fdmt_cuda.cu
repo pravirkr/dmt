@@ -51,6 +51,7 @@ FDMTCudaEngine::FDMTCudaEngine(const plans::FDMTPlan& plan,
                                                      m_use_box_smearing);
     }
     if (!cfg.defer_allocation) {
+        run_kernel_setup();
         m_allocated = true;
     }
 }
@@ -74,6 +75,7 @@ void FDMTCudaEngine::allocate() {
     if (m_fused) {
         bind_fused_pointers();
     }
+    run_kernel_setup();
     const auto got = get_memory_usage();
     if (got.plan != planned.plan || got.state != planned.state ||
         got.history != planned.history || got.workspace != planned.workspace) {
@@ -400,28 +402,32 @@ void FDMTCudaEngine::check_tree_ring_extent(SizeType ring_elems) {
     }
 }
 
-SizeType FDMTCudaEngine::max_optin_smem_bytes() const {
-    int bytes = 0;
-    if (cudaDeviceGetAttribute(&bytes, cudaDevAttrMaxSharedMemoryPerBlockOptin,
-                               m_device_id) != cudaSuccess ||
-        bytes <= 0) {
-        return kDefaultSmemBytes;
+void FDMTCudaEngine::run_kernel_setup() {
+    if (m_direct) {
+        for (const auto& setup : m_direct->kernel_setup) {
+            setup();
+        }
+        m_direct->kernel_setup.clear();
     }
-    return static_cast<SizeType>(bytes);
+}
+
+SizeType FDMTCudaEngine::max_optin_smem_bytes() const {
+    return gpu_utils::max_shared_mem_per_block(
+        m_device_id, "FDMT (cuda): shared memory limit");
 }
 
 SizeType FDMTCudaEngine::auto_smem_bytes() const {
     constexpr SizeType kReserved = 1024;
-    int per_sm                   = 0;
+    const SizeType cap = std::min(kDefaultSmemBytes, fused_smem_limit());
+    int per_sm         = 0;
     if (cudaDeviceGetAttribute(&per_sm,
                                cudaDevAttrMaxSharedMemoryPerMultiprocessor,
                                m_device_id) != cudaSuccess ||
         per_sm <= 0) {
-        return kDefaultSmemBytes;
+        return cap;
     }
     const auto share = static_cast<SizeType>(per_sm) / kAutoBlocksPerSM;
-    return std::min(kDefaultSmemBytes,
-                    share > kReserved ? share - kReserved : share);
+    return std::min(cap, share > kReserved ? share - kReserved : share);
 }
 
 void FDMTCudaEngine::configure_fusion(const plans::FDMTPlanContainer& pc,
@@ -435,7 +441,7 @@ void FDMTCudaEngine::configure_fusion(const plans::FDMTPlanContainer& pc,
     }
     const bool automatic  = requested == kFDMTAutoFuse;
     const SizeType budget = auto_smem_bytes();
-    const SizeType optin  = automatic ? budget : max_optin_smem_bytes();
+    const SizeType optin  = automatic ? budget : fused_smem_limit();
     for (SizeType f = automatic ? deepest : std::min(requested, deepest);
          f >= 1; --f) {
         const auto plan = detail::build_fused_tile_plan(pc, niters, f);

@@ -80,25 +80,44 @@ inline void check_fdmt_fft_valid_stepper(const Exec& exec) {
         }
     }
 
-    SECTION("an unfinished block rejects execute() and reset()") {
+    SECTION(
+        "an unfinished block rejects execute(), reset() and save_history(), "
+        "and load_history() abandons it") {
         auto step    = make();
+        auto ref     = make();
         const auto n = step.get_plan().get_dmt_size();
         const auto wf =
             test_random::uniform_real<float>(kNchans * kNsamps, 7, -1.0F, 1.0F);
+        const auto wf2 =
+            test_random::uniform_real<float>(kNchans * kNsamps, 8, -1.0F, 1.0F);
         std::vector<float> out(n);
+        std::vector<float> expected(n);
+        std::vector<float> hist(step.history_state_size());
         step.reset(wf, out);
         CHECK_THROWS_AS(step.execute(wf, out), std::logic_error);
         CHECK_THROWS_AS(step.reset(wf, out), std::logic_error);
+        CHECK_THROWS_AS(step.save_history(hist), std::logic_error);
         // At the root but not finalized: the history is not committed yet.
         step.advance_until_remaining(0);
         CHECK_THROWS_AS(step.execute(wf, out), std::logic_error);
+        CHECK_THROWS_AS(step.save_history(hist), std::logic_error);
         step.finalize();
+        CHECK_NOTHROW(step.save_history(hist));
         CHECK_NOTHROW(step.execute(wf, out));
         // reset_history() abandons the block along with the stream.
         step.reset(wf, out);
         step.reset_history();
         CHECK_THROWS_AS(step.finalize(), std::logic_error);
         CHECK_NOTHROW(step.execute(wf, out));
+        // load_history() abandons an unfinished block and resumes that stream.
+        step.reset(wf, out);
+        step.advance(1);
+        CHECK_NOTHROW(step.load_history(hist));
+        CHECK_THROWS_AS(step.finalize(), std::logic_error);
+        ref.load_history(hist);
+        ref.execute(wf2, expected);
+        step.execute(wf2, out);
+        CHECK(stepper_rel_error(out, expected) < 1e-5);
     }
 }
 

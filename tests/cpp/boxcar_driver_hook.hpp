@@ -128,6 +128,9 @@ private:
         [[nodiscard]] bool search_zero_supported() const noexcept override {
             return m_inner->search_zero_supported();
         }
+        void set_valid_nsamps(SizeType n_valid) noexcept override {
+            m_inner->set_valid_nsamps(n_valid);
+        }
         [[nodiscard]] algorithms::FDMTMemoryUsage
         memory() const noexcept override {
             return m_inner->memory();

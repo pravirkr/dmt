@@ -46,6 +46,9 @@ public:
     void search_zero(FDMTSearchSink& sink) override {
         m_fdmt->execute_search_zero(sink);
     }
+    void set_valid_nsamps(SizeType n_valid) noexcept override {
+        m_fdmt->set_valid_nsamps(n_valid);
+    }
     [[nodiscard]] FDMTMemoryUsage memory() const noexcept override {
         return m_fdmt->get_memory_usage();
     }

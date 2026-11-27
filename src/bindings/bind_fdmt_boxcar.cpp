@@ -419,13 +419,14 @@ void bind_fdmt_boxcar(py::module_& mod) {
         (NumPy) input is copied one chunk at a time into a buffer reserved
         inside that budget, so :meth:`execute` allocates nothing.
 
-        ``kill_mask`` (keyword-only): ``None`` or one bool/integer per
+        ``kill_mask`` (keyword-only): ``None`` or one host bool/integer per
         channel, low frequency first. Channels with 0 read as zero (code 0
         for packed input) and are left out of every row's noise model, so
         S/N stays calibrated on the remaining channels. On the CPU each
         block is copied once to zero them; on a GPU the transform reads them
-        as zero, without a copy. :meth:`execute` also takes a mask per block
-        (float or packed input), ANDed with this one.
+        as zero, without a copy. :meth:`execute` and :meth:`drain` (with a
+        ``tail`` block) also take a host mask per block (float or packed
+        input), ANDed with this one.
 
         ``config.screen_mode`` (:class:`BoxcarScreenMode`, default ``AUTO``)
         chooses the Stage-1 tile screening mode on both CPU and GPU:
@@ -576,10 +577,13 @@ void bind_fdmt_boxcar(py::module_& mod) {
             library's current stream), and the call returns once the
             candidates are copied back to the host.
 
-            ``kill_mask``: ``None`` or one bool/integer per channel, low
-            frequency first (0 = killed), for this block only. It is ANDed
-            with the constructor's mask; ``None`` means the constructor's
-            mask alone. On packed input, channels it kills (and the
+            ``kill_mask``: ``None`` or a host 1-D bool/integer sequence or
+            NumPy array of ``nchans`` entries, low frequency first (0 =
+            killed; passing a device array raises ``TypeError``), for this
+            block only (both NumPy and device ``waterfall`` overloads). It is
+            ANDed with the constructor's mask; ``None`` means the
+            constructor's mask alone. On packed input, channels it kills (and
+            the
             constructor's mask keeps) read the code ``input_mean``, which
             must then be a whole number (else ``ValueError``): the expected
             sums stay the constructor's, and only the thresholds and S/N
@@ -593,7 +597,9 @@ void bind_fdmt_boxcar(py::module_& mod) {
             )doc")
         .def(
             "drain",
-            [](FDMTBoxcar& search, const py::array& tail, SizeType n_tail) {
+            [](FDMTBoxcar& search, const py::array& tail, SizeType n_tail,
+               const py::object& kill) {
+                const auto mask   = extract_kill_mask(kill);
                 const auto& plan  = search.get_plan();
                 const auto& cfg   = search.get_config();
                 const bool packed = cfg.input_nbits != 32;
@@ -619,37 +625,44 @@ void bind_fdmt_boxcar(py::module_& mod) {
                         view = search.drain(
                             std::span(static_cast<const uint8_t*>(tail.data()),
                                       static_cast<SizeType>(tail.size())),
-                            n_tail);
+                            n_tail, std::span<const uint8_t>(mask));
                     } else {
                         view = search.drain(
                             std::span(static_cast<const float*>(tail.data()),
                                       static_cast<SizeType>(tail.size())),
-                            n_tail);
+                            n_tail, std::span<const uint8_t>(mask));
                     }
                 }
                 return own_result(view);
             },
             "tail"_a.noconvert(), py::kw_only(), "n_tail"_a,
+            "kill_mask"_a = py::none(),
             R"doc(
             End of stream with a short last block: ``tail`` is a whole block
             (as :meth:`execute`, NumPy or device array) whose first
             ``n_tail`` samples per channel are data and the rest padding,
             never searched. Searches them, then drains as :meth:`drain`:
             :attr:`searched_nsamps` ends at the tail's ``n_tail``-th sample
-            and no candidate reaches past it. Device tails are read on
-            keyword-only ``stream``; the result is on the host.
+            and no candidate reaches past it. Keyword-only ``kill_mask`` (a
+            host 1-D bool/integer sequence or NumPy array, as in
+            :meth:`execute`) is ANDed with the constructor's mask for
+            ``tail``. Device tails are read on keyword-only ``stream``; the
+            result is on the host.
             )doc")
         .def(
             "drain",
             [](FDMTBoxcar& search, const DeviceArray& tail, SizeType n_tail,
-               const py::object& stream) {
-                return boxcar_execute_device(search, "FDMTBoxcar.drain", tail,
-                                             stream, [&](auto in, Stream s) {
-                                                 return search.drain(in, n_tail,
-                                                                     s);
-                                             });
+               const py::object& kill, const py::object& stream) {
+                const auto mask = extract_kill_mask(kill);
+                return boxcar_execute_device(
+                    search, "FDMTBoxcar.drain", tail, stream,
+                    [&](auto in, Stream s) {
+                        return search.drain(in, n_tail,
+                                            std::span<const uint8_t>(mask), s);
+                    });
             },
-            "tail"_a, py::kw_only(), "n_tail"_a, "stream"_a = py::none(),
+            "tail"_a, py::kw_only(), "n_tail"_a, "kill_mask"_a = py::none(),
+            "stream"_a = py::none(),
             "Device-memory overload of :meth:`drain` with a tail block.")
         .def(
             "execute",

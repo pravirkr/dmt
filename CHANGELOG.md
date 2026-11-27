@@ -28,11 +28,12 @@ All notable changes to `dmt` are listed here. The format follows
 - Keyword-only `out=` on host `FDMTFFT.execute` / `execute_time_major`
   (Python) and `dmt::dispersion_delay()` in `dmt/common/types.hpp`.
 - **Short final blocks:** `FDMT::execute_tail()` (valid mode) and
-  `FDMTBoxcar::drain(tail, n_tail)` take a whole block of which only the
-  first `n_tail` samples are data (host or device, float or packed; Python
-  `FDMT.execute_tail(block, n_tail)` and `FDMTBoxcar.drain(block,
-  n_tail=...)`). Nothing returned depends on the padding; the stream then
-  ends.
+  `FDMTBoxcar::drain(tail, n_tail, ...)` (with optional per-call `kill_mask`)
+  take a whole block of which only the first `n_tail` samples are data (host
+  or device, float or packed; Python `FDMT.execute_tail(block, n_tail)` and
+  `FDMTBoxcar.drain(block, n_tail=..., kill_mask=...)`). Neither the first
+  `n_tail` outputs nor any returned candidate depends on the padding; the
+  stream then ends.
 - **Mirrored baseband:** `BasebandFormat::descending` (subbands stored from
   the top down) and `BasebandFormat::lower_sideband` (inverted subband
   spectra), e.g. GUPPI `CHAN_BW < 0`, read directly by `CohFDMT` on the CPU

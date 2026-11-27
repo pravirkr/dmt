@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -368,6 +369,25 @@ void FDMT::execute(DeviceSpan<const uint8_t> d_waterfall_packed,
     m_impl->check_device(d_dmt, "FDMT::execute");
     m_impl->m_engine->execute(d_waterfall_packed, nbits, d_dmt, stream);
 }
+namespace {
+
+struct ValidSamplesGuard {
+    detail::FDMTEngine& eng;
+    ValidSamplesGuard(detail::FDMTEngine& e, SizeType n_valid) noexcept
+        : eng(e) {
+        eng.set_valid_nsamps(n_valid);
+    }
+    ~ValidSamplesGuard() noexcept {
+        eng.set_valid_nsamps(std::numeric_limits<SizeType>::max());
+    }
+    ValidSamplesGuard(const ValidSamplesGuard&)            = delete;
+    ValidSamplesGuard& operator=(const ValidSamplesGuard&) = delete;
+    ValidSamplesGuard(ValidSamplesGuard&&)                 = delete;
+    ValidSamplesGuard& operator=(ValidSamplesGuard&&)      = delete;
+};
+
+} // namespace
+
 // The tail is a whole block whose samples from n_tail on are padding: the
 // transform runs as usual (causal in f_min, the first n_tail outputs of
 // every row never read the padding), and the stream ends.
@@ -375,6 +395,7 @@ void FDMT::execute_tail(std::span<const float> waterfall,
                         SizeType n_tail,
                         std::span<float> dmt) {
     m_impl->check_tail(n_tail);
+    const ValidSamplesGuard valid_guard(*m_impl->m_engine, n_tail);
     m_impl->m_engine->execute(waterfall, dmt);
     m_impl->m_ended = true;
 }
@@ -383,6 +404,7 @@ void FDMT::execute_tail(std::span<const uint8_t> waterfall_packed,
                         SizeType n_tail,
                         std::span<float> dmt) {
     m_impl->check_tail(n_tail);
+    const ValidSamplesGuard valid_guard(*m_impl->m_engine, n_tail);
     m_impl->m_engine->execute(waterfall_packed, nbits, dmt);
     m_impl->m_ended = true;
 }
@@ -520,6 +542,7 @@ SizeType FDMT::history_state_size() const noexcept {
     return m_impl->m_engine->history_state_size();
 }
 void FDMT::save_history(std::span<float> out) const {
+    m_impl->check_open("save_history");
     m_impl->m_engine->save_history(out);
 }
 void FDMT::load_history(std::span<const float> in) {
@@ -527,6 +550,7 @@ void FDMT::load_history(std::span<const float> in) {
     m_impl->m_ended = false;
 }
 void FDMT::save_history(DeviceSpan<float> out, Stream stream) const {
+    m_impl->check_open("save_history");
     m_impl->check_device(out, "FDMT::save_history");
     m_impl->m_engine->save_history(out, stream);
 }

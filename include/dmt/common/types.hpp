@@ -54,12 +54,12 @@ template <typename T>
 concept IntegralDataType = std::is_integral_v<T>;
 
 /// One-byte integer types: char, signed char (int8_t) and unsigned char
-/// (uint8_t), the raw bytes CohFDMT::execute() reads. bool and char8_t are
-/// excluded.
+/// (uint8_t), the raw bytes CohFDMT::execute() reads. bool, char8_t and
+/// cv-qualified types are excluded.
 template <typename T>
 concept ByteDataType = std::is_integral_v<T> && sizeof(T) == 1 &&
-                       !std::is_same_v<std::remove_cv_t<T>, bool> &&
-                       !std::is_same_v<std::remove_cv_t<T>, char8_t>;
+                       std::is_same_v<T, std::remove_cv_t<T>> &&
+                       !std::is_same_v<T, bool> && !std::is_same_v<T, char8_t>;
 
 /**
  * @brief FDMT mode for the FDMT tree.

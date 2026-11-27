@@ -509,11 +509,23 @@ class TestBoxcar:
         want = host.execute_tail(block, 100)
         got = dev.execute_tail(xp.asarray(block), 100)
         np.testing.assert_array_equal(xp.get(got)[:, :100], want[:, :100])
-        cfg = dmtlib.BoxcarConfig(16, detect_thresh=3.0)
+        with pytest.raises(RuntimeError, match="execute_tail"):
+            host.save_history()
+        with pytest.raises(RuntimeError, match="execute_tail"):
+            dev.save_history(xp.empty(dev.history_state_size(), np.float32))
+        mask = np.ones(64, dtype=np.uint8)
+        mask[[3, 19]] = 0
+        masked_block = block.copy()
+        masked_block[mask == 0, :100] = 50.0
+        cfg = dmtlib.BoxcarConfig(16, detect_thresh=3.0, per_call_masks=True)
         host_s = dmtlib.FDMTBoxcar(_boxcar_plan(), cfg, backend=cuda)
         dev_s = dmtlib.FDMTBoxcar(_boxcar_plan(), cfg, backend=cuda)
-        want_c = host_s.drain(block, n_tail=100)
-        got_c = dev_s.drain(xp.asarray(block), n_tail=100)
+        with pytest.raises(TypeError):
+            dev_s.drain(
+                xp.asarray(masked_block), n_tail=100, kill_mask=xp.asarray(mask)
+            )
+        want_c = host_s.drain(masked_block, n_tail=100, kill_mask=mask)
+        got_c = dev_s.drain(xp.asarray(masked_block), n_tail=100, kill_mask=mask)
         _same_candidates(got_c.candidates, want_c.candidates)
         assert dev_s.searched_nsamps == 100
 

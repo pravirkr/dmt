@@ -673,6 +673,9 @@ public:
         start_stepper(
             Input{.data = m_step_in_d.data(), .row_len = m_nsamps, .nbits = 32},
             out_stage(), s);
+        m_device_work.mark(s);
+        gpu_utils::check_gpu_call(cudaStreamSynchronize(s),
+                                  "FDMTFFT (cuda): reset");
         m_host_dmt = dmt;
     }
 
@@ -692,6 +695,9 @@ public:
         m_step_in_d.reserve((packed.size() + 3) / 4);
         m_host.to_device(m_step_in_d.data(), packed.data(), packed.size());
         start_stepper(packed_input(m_step_in_d.data(), nbits), out_stage(), s);
+        m_device_work.mark(s);
+        gpu_utils::check_gpu_call(cudaStreamSynchronize(s),
+                                  "FDMTFFT (cuda): reset");
         m_host_dmt = dmt;
     }
 
@@ -876,8 +882,10 @@ public:
     void reset_history() noexcept override {
         m_search_pos = 0;
         // Abandons any unfinished stepper block along with its stream.
-        m_initialized = false;
-        m_view_valid  = false;
+        m_host_dmt     = {};
+        m_initialized  = false;
+        m_view_valid   = false;
+        m_view_h_valid = false;
         try {
             gpu_utils::set_device(m_device_id);
             m_device_work.wait();
@@ -894,6 +902,7 @@ public:
     }
 
     void save_history(std::span<float> out) const override {
+        check_previous_block_finished();
         check_history(out.size(), "save_history");
         gpu_utils::set_device(m_device_id);
         m_device_work.wait();
@@ -915,9 +924,14 @@ public:
                                                  cudaMemcpyHostToDevice),
                                       "FDMTFFT::load_history");
         }
+        m_host_dmt     = {};
+        m_initialized  = false;
+        m_view_valid   = false;
+        m_view_h_valid = false;
     }
 
     void save_history(DeviceSpan<float> out, Stream stream) const override {
+        check_previous_block_finished();
         check_history(out.size(), "save_history");
         gpu_utils::set_device(m_device_id);
         const auto s = to_cuda(stream);
@@ -945,6 +959,10 @@ public:
                 "FDMTFFT::load_history");
         }
         m_device_work.mark(s);
+        m_host_dmt     = {};
+        m_initialized  = false;
+        m_view_valid   = false;
+        m_view_h_valid = false;
     }
 
 protected:

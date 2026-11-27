@@ -13,6 +13,7 @@
 #include "dmt/common/types.hpp"
 
 #include "dmt/baseband_layout.hpp"
+#include "dmt/dm_utils.hpp"
 #include "dmt/fft.hpp"
 
 namespace dmt::utils {
@@ -23,6 +24,20 @@ std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
                                                            float dt,
                                                            float pulse_toa,
                                                            float amplitude) {
+    if (!is_finite_bits(f_min) || !is_finite_bits(f_max) ||
+        !is_finite_bits(dt) || !is_finite_bits(pulse_toa) ||
+        !is_finite_bits(amplitude)) {
+        throw std::invalid_argument(
+            "generate_pure_frb: f_min, f_max, dt, pulse_toa, and amplitude "
+            "must be finite");
+    }
+    if (!(f_min > 0.0F) || !(f_max > f_min)) {
+        throw std::invalid_argument(
+            "generate_pure_frb: require 0 < f_min < f_max");
+    }
+    if (dt < 0.0F) {
+        throw std::invalid_argument("generate_pure_frb: require dt >= 0");
+    }
     if (nchans == 0 || nsamps == 0) {
         return std::make_tuple(std::vector<float>{}, SizeType{0});
     }
@@ -42,7 +57,7 @@ std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
     const auto frac = [&](double a, double b) {
         return ((1.0 / (a * a)) - (1.0 / (b * b))) / norm;
     };
-    const auto n = static_cast<IndexType>(nsamps);
+    const auto fn = static_cast<double>(nsamps);
 
     for (SizeType ichan = 0; ichan < nchans; ++ichan) {
         const double f_lo = fmin + (static_cast<double>(ichan) * foff);
@@ -53,33 +68,38 @@ std::tuple<std::vector<float>, SizeType> generate_pure_frb(SizeType nchans,
         const double dt_sub = total * frac(f_lo, f_hi);
         const double tend   = tstart - dt_sub;
         // floor, not truncation toward zero: a sweep ending in (-1, 0) lies
-        // before sample 0 and must not spill into it.
-        const auto s = static_cast<IndexType>(std::floor(tstart));
-        const auto e = static_cast<IndexType>(std::floor(tend));
-        if (s < 0 || e >= n) {
+        // before sample 0 and must not spill into it. Bounds are checked in
+        // double before integer conversion so extreme finite pulse_toa / dt
+        // never overflow IndexType / SizeType.
+        const double s_d = std::floor(tstart);
+        const double e_d = std::floor(tend);
+        if (s_d < 0.0 || e_d >= fn) {
             continue;
         }
         float* row = arr.data() + (ichan * nsamps);
-        if (e == s) {
+        if (e_d == s_d) {
             // Within one sample: all of the channel's fluence lands there.
-            row[s] = amplitude;
+            row[static_cast<SizeType>(s_d)] = amplitude;
             nsamps_dispersed += 1;
             continue;
         }
         const double per_sample = amp / dt_sub;
-        const IndexType first   = std::max<IndexType>(e, 0);
-        const IndexType last    = std::min<IndexType>(s, n - 1);
-        for (IndexType i = first; i <= last; ++i) {
-            double v = per_sample;
-            if (i == e) {
-                v *= 1.0 - (tend - static_cast<double>(e));
+        const SizeType first =
+            e_d > 0.0 ? static_cast<SizeType>(e_d) : SizeType{0};
+        const SizeType last =
+            s_d < fn - 1.0 ? static_cast<SizeType>(s_d) : (nsamps - 1);
+        for (SizeType i = first; i <= last; ++i) {
+            double v        = per_sample;
+            const auto idbl = static_cast<double>(i);
+            if (idbl == e_d) {
+                v *= 1.0 - (tend - e_d);
             }
-            if (i == s) {
-                v *= tstart - static_cast<double>(s);
+            if (idbl == s_d) {
+                v *= tstart - s_d;
             }
             row[i] = static_cast<float>(v);
         }
-        nsamps_dispersed += static_cast<SizeType>(last - first + 1);
+        nsamps_dispersed += last - first + 1;
     }
     return {arr, nsamps_dispersed};
 }
