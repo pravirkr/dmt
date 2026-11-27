@@ -1,0 +1,47 @@
+name: Set up a dmt C++ build
+description: >
+  apt packages, the CPM source cache and (optionally) a ccache object store.
+  ccache entries are saved only by pushes to main; pull requests restore
+  main's entry and never save their own (GitHub scopes a PR's caches to that
+  PR, and per-PR entries would evict main's from the 10 GB store).
+
+inputs:
+  packages:
+    description: Extra apt packages (compilers, catch2, ...).
+    default: ""
+  cache-key:
+    description: Name for the CPM and ccache entries of this job.
+    required: true
+  ccache:
+    description: Restore (and on main, save) a ccache object store.
+    default: "true"
+  ccache-size:
+    description: ccache max-size.
+    default: 500M
+
+runs:
+  using: composite
+  steps:
+    - name: Install system packages
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          build-essential cmake ninja-build ccache git \
+          libfftw3-dev ${{ inputs.packages }}
+
+    - name: Cache ccache object store
+      if: inputs.ccache == 'true'
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: ${{ inputs.cache-key }}
+        max-size: ${{ inputs.ccache-size }}
+        save: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+    - name: Cache CPM sources
+      uses: actions/cache@v6
+      with:
+        path: ${{ env.CPM_SOURCE_CACHE }}
+        key: cpm-${{ inputs.cache-key }}-${{ hashFiles('cmake/**/*.cmake', 'CMakeLists.txt') }}
+        restore-keys: |
+          cpm-${{ inputs.cache-key }}-

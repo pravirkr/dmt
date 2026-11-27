@@ -155,11 +155,13 @@ if(DMT_HAS_WNO_MISSING_DESIGNATED_FIELD_INITIALIZERS)
     INTERFACE $<$<NOT:$<COMPILE_LANGUAGE:CUDA,HIP>>:-Wno-missing-designated-field-initializers>
   )
 endif()
-if(DMT_ENABLE_COVERAGE)
-  set(DMT_CXX_CONFIG_FLAGS_DEBUG -O0 -g)
-else()
-  set(DMT_CXX_CONFIG_FLAGS_DEBUG -O1 -g)
-endif()
+# Debug builds keep assertions at -O1 by default. The asan preset uses -O2:
+# the sanitizers work at any level, and the suite fits CI's time limit.
+set(DMT_DEBUG_OPT_LEVEL
+    "-O1"
+    CACHE STRING "Optimization flag for Debug builds (also coverage builds)"
+)
+set(DMT_CXX_CONFIG_FLAGS_DEBUG ${DMT_DEBUG_OPT_LEVEL} -g)
 set(DMT_CXX_CONFIG_FLAGS_RELEASE -O3 -DNDEBUG -ffast-math)
 if(DMT_MARCH_FLAG)
   list(APPEND DMT_CXX_CONFIG_FLAGS_RELEASE "${DMT_MARCH_FLAG}")
@@ -219,8 +221,7 @@ function(dmt_enable_coverage target)
   endif()
   target_compile_options(
     ${target}
-    PUBLIC $<BUILD_INTERFACE:$<$<COMPILE_LANGUAGE:CXX>:-O0>>
-           $<BUILD_INTERFACE:$<$<COMPILE_LANGUAGE:CXX>:-g>>
+    PUBLIC $<BUILD_INTERFACE:$<$<COMPILE_LANGUAGE:CXX>:-g>>
            $<BUILD_INTERFACE:$<$<COMPILE_LANGUAGE:CXX>:--coverage>>
   )
   target_link_options(${target} PUBLIC $<BUILD_INTERFACE:--coverage>)
