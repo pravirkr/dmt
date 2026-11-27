@@ -685,11 +685,11 @@ SizeType ddmt_waterfall_nsamps(const Engine& eng,
 /// Checks a packed DDMT-family input against the engine: channel-major
 /// (nchans, row_bytes) or time-major (nsamps, sample_bytes) at the plan's
 /// nbits, with a leading beam axis for nbeams > 1.
-template <typename Engine>
+template <typename Engine, typename Extent>
 void check_ddmt_packed_shape(const Engine& eng,
                              std::string_view what,
                              std::string_view name,
-                             std::span<const int64_t> shape,
+                             std::span<const Extent> shape,
                              SizeType nsamps,
                              bool time_major) {
     const auto& plan  = eng.get_plan();

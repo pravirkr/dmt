@@ -892,37 +892,50 @@ void check_tail(const plans::FDMTPlan& plan, SizeType n_tail) {
 } // namespace
 
 CandidateResultView FDMTBoxcar::drain(std::span<const float> tail,
-                                      SizeType n_tail) {
+                                      SizeType n_tail,
+                                      std::span<const uint8_t> kill_mask) {
+    m_impl->drain_state.check_open("FDMTBoxcar::drain");
     check_tail(m_impl->plan, n_tail);
     return detail::drain_stream(
         *m_impl->engine, m_impl->plan, m_impl->beams, m_impl->config,
         m_impl->planes, m_impl->engine->search_latency(), m_impl->drain_state,
         n_tail, [&] {
-            return m_impl->run_masked(
-                {}, tail.size(), [&] { return m_impl->engine->execute(tail); });
+            return m_impl->run_masked(kill_mask, tail.size(), [&] {
+                return m_impl->engine->execute(tail);
+            });
         });
 }
 CandidateResultView FDMTBoxcar::drain(std::span<const uint8_t> tail,
-                                      SizeType n_tail) {
+                                      SizeType n_tail,
+                                      std::span<const uint8_t> kill_mask) {
+    m_impl->drain_state.check_open("FDMTBoxcar::drain");
     check_tail(m_impl->plan, n_tail);
     return detail::drain_stream(
         *m_impl->engine, m_impl->plan, m_impl->beams, m_impl->config,
         m_impl->planes, m_impl->engine->search_latency(), m_impl->drain_state,
         n_tail, [&] {
-            return m_impl->run_masked(
-                {}, tail.size(), [&] { return m_impl->engine->execute(tail); });
+            return m_impl->run_masked(kill_mask, tail.size(), [&] {
+                return m_impl->engine->execute(tail);
+            });
         });
 }
 CandidateResultView FDMTBoxcar::drain(DeviceSpan<const float> tail,
                                       SizeType n_tail,
                                       Stream stream) {
+    return drain(tail, n_tail, std::span<const uint8_t>{}, stream);
+}
+CandidateResultView FDMTBoxcar::drain(DeviceSpan<const float> tail,
+                                      SizeType n_tail,
+                                      std::span<const uint8_t> kill_mask,
+                                      Stream stream) {
+    m_impl->drain_state.check_open("FDMTBoxcar::drain");
     check_tail(m_impl->plan, n_tail);
     detail::check_device(tail.device, backend(), device(), "FDMTBoxcar::drain");
     return detail::drain_stream(
         *m_impl->engine, m_impl->plan, m_impl->beams, m_impl->config,
         m_impl->planes, m_impl->engine->search_latency(), m_impl->drain_state,
         n_tail, [&] {
-            static_cast<void>(m_impl->run_masked({}, tail.size(), [&] {
+            static_cast<void>(m_impl->run_masked(kill_mask, tail.size(), [&] {
                 return m_impl->engine->execute(tail, stream);
             }));
             return m_impl->engine->copy_result(stream);
@@ -931,13 +944,20 @@ CandidateResultView FDMTBoxcar::drain(DeviceSpan<const float> tail,
 CandidateResultView FDMTBoxcar::drain(DeviceSpan<const uint8_t> tail,
                                       SizeType n_tail,
                                       Stream stream) {
+    return drain(tail, n_tail, std::span<const uint8_t>{}, stream);
+}
+CandidateResultView FDMTBoxcar::drain(DeviceSpan<const uint8_t> tail,
+                                      SizeType n_tail,
+                                      std::span<const uint8_t> kill_mask,
+                                      Stream stream) {
+    m_impl->drain_state.check_open("FDMTBoxcar::drain");
     check_tail(m_impl->plan, n_tail);
     detail::check_device(tail.device, backend(), device(), "FDMTBoxcar::drain");
     return detail::drain_stream(
         *m_impl->engine, m_impl->plan, m_impl->beams, m_impl->config,
         m_impl->planes, m_impl->engine->search_latency(), m_impl->drain_state,
         n_tail, [&] {
-            static_cast<void>(m_impl->run_masked({}, tail.size(), [&] {
+            static_cast<void>(m_impl->run_masked(kill_mask, tail.size(), [&] {
                 return m_impl->engine->execute(tail, stream);
             }));
             return m_impl->engine->copy_result(stream);

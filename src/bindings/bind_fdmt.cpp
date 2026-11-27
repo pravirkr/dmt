@@ -408,9 +408,11 @@ void bind_fdmt(py::module_& mod) {
                                 exec, nbeams, fuse, int_tree, chunk,
                                 max_memory_bytes);
                 }
-                return FDMT(f_min, f_max, nchans, nsamps, tsamp,
-                            extract_dm_grid(obj), use_box_smearing, mode, exec,
-                            nbeams, fuse, int_tree, chunk, max_memory_bytes);
+                const auto dm_grid_v = extract_dm_grid(obj);
+                const py::gil_scoped_release release;
+                return FDMT(f_min, f_max, nchans, nsamps, tsamp, dm_grid_v,
+                            use_box_smearing, mode, exec, nbeams, fuse,
+                            int_tree, chunk, max_memory_bytes);
             }),
             py::arg("f_min"), py::arg("f_max"), py::arg("nchans"),
             py::arg("nsamps"), py::arg("tsamp"), py::kw_only(),
@@ -504,8 +506,10 @@ void bind_fdmt(py::module_& mod) {
                         dt_grid_v, use_box_smearing, mode, exec,
                         nbeams, fuse, int_tree, chunk, max_memory_bytes);
                 }
+                const auto dm_grid_v = extract_dm_grid(obj);
+                const py::gil_scoped_release release;
                 return FDMT::estimate_memory(
-                    f_min, f_max, nchans, nsamps, tsamp, extract_dm_grid(obj),
+                    f_min, f_max, nchans, nsamps, tsamp, dm_grid_v,
                     use_box_smearing, mode, exec, nbeams, fuse, int_tree, chunk,
                     max_memory_bytes);
             },
@@ -860,10 +864,10 @@ void bind_fdmt(py::module_& mod) {
             (e.g. zeros). The first ``n_tail`` output samples of every row do
             not depend on the padding (the transform is causal in its
             ``f_min`` reference); later ones do. The stream then ends:
-            :meth:`execute`, :meth:`execute_tail` and :meth:`reset` raise
-            ``RuntimeError`` until :meth:`reset_history` or
-            :meth:`load_history`. NumPy or device arrays (GPU backends; then
-            asynchronous on keyword-only ``stream``).
+            :meth:`execute`, :meth:`execute_tail`, :meth:`reset` and
+            :meth:`save_history` raise ``RuntimeError`` until
+            :meth:`reset_history` or :meth:`load_history`. NumPy or device
+            arrays (GPU backends; then asynchronous on keyword-only ``stream``).
             )doc")
         .def(
             "execute_tail",
@@ -1241,8 +1245,10 @@ void bind_fdmt(py::module_& mod) {
                         use_box_smearing, mode, exec, nbeams, fractional_delays,
                         mask);
                 }
+                const auto dm_grid_v = extract_dm_grid(obj);
+                const py::gil_scoped_release release;
                 return std::make_unique<FDMTFFT>(
-                    f_min, f_max, nchans, nsamps, tsamp, extract_dm_grid(obj),
+                    f_min, f_max, nchans, nsamps, tsamp, dm_grid_v,
                     use_box_smearing, mode, exec, nbeams, fractional_delays,
                     mask);
             }),
@@ -1328,8 +1334,10 @@ void bind_fdmt(py::module_& mod) {
                         use_box_smearing, mode, exec, nbeams, fractional_delays,
                         mask);
                 }
+                const auto dm_grid_v = extract_dm_grid(obj);
+                const py::gil_scoped_release release;
                 return FDMTFFT::estimate_memory(
-                    f_min, f_max, nchans, nsamps, tsamp, extract_dm_grid(obj),
+                    f_min, f_max, nchans, nsamps, tsamp, dm_grid_v,
                     use_box_smearing, mode, exec, nbeams, fractional_delays,
                     mask);
             },

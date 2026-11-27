@@ -573,6 +573,9 @@ Candidate Search (``FDMTBoxcar``, ``FDMTFFTBoxcar``)
    :project: dmt
    :members:
 
+.. doxygenfunction:: dmt::plans::generate_box_width_trials
+   :project: dmt
+
 Backends (``dmt/common/backend.hpp``)
 -------------------------------------
 

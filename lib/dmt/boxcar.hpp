@@ -482,6 +482,8 @@ public:
     virtual void search_zero(FDMTSearchSink& /*unused*/) {
         throw std::logic_error("boxcar search: no zero-block search here");
     }
+    /// FDMTEngine::set_valid_nsamps(): valid samples per channel row.
+    virtual void set_valid_nsamps(SizeType /*n_valid*/) noexcept {}
     [[nodiscard]] virtual FDMTMemoryUsage memory() const noexcept = 0;
     [[nodiscard]] virtual SizeType chunk_nsamps() const noexcept  = 0;
     [[nodiscard]] virtual SizeType fuse_levels() const noexcept   = 0;
@@ -541,6 +543,9 @@ public:
     /// drain(): endpoints at or after `stop` are not searched (UINT64_MAX:
     /// none); reset_history() clears it.
     virtual void set_search_stop(uint64_t stop) noexcept = 0;
+    /// drain(tail, n_tail): valid samples per channel row of `tail`
+    /// (SIZE_MAX: all nsamps).
+    virtual void set_valid_nsamps(SizeType /*n_valid*/) noexcept {}
     /// Stream samples consumed so far (the next block's first sample).
     [[nodiscard]] virtual uint64_t stream_position() const noexcept = 0;
     /// Input samples a sample waits for before every row has searched it.

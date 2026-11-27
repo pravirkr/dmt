@@ -925,6 +925,8 @@ void FDMTCudaEngine::reset(DeviceSpan<const float> d_waterfall,
 
 void FDMTCudaEngine::reset(std::span<const float> waterfall_h,
                            std::span<float> dmt_h) {
+    check_root_output();
+    check_stepper_block();
     check_inputs(waterfall_h.size(), dmt_h.size());
     gpu_utils::set_device(m_device_id);
     m_device_work.wait();
@@ -933,12 +935,16 @@ void FDMTCudaEngine::reset(std::span<const float> waterfall_h,
                    thrust::raw_pointer_cast(m_stage_wf_f32_d.data()),
                    waterfall_h.size()),
                stage_dmt_span(), m_host.stream());
+    gpu_utils::check_gpu_call(cudaStreamSynchronize(m_host.stream()),
+                              "FDMT (cuda): reset");
     m_host_dmt = dmt_h;
 }
 
 void FDMTCudaEngine::reset(std::span<const uint8_t> waterfall_h,
                            SizeType nbits,
                            std::span<float> dmt_h) {
+    check_root_output();
+    check_stepper_block();
     check_packed_inputs(waterfall_h.size(), nbits, dmt_h.size());
     gpu_utils::set_device(m_device_id);
     m_device_work.wait();
@@ -947,6 +953,8 @@ void FDMTCudaEngine::reset(std::span<const uint8_t> waterfall_h,
                    thrust::raw_pointer_cast(m_stage_wf_packed_d.data()),
                    waterfall_h.size()),
                nbits, stage_dmt_span(), m_host.stream());
+    gpu_utils::check_gpu_call(cudaStreamSynchronize(m_host.stream()),
+                              "FDMT (cuda): reset");
     m_host_dmt = dmt_h;
 }
 
@@ -1076,6 +1084,54 @@ void FDMTCudaEngine::launch_fused_typed(const Input& input,
     launch_fused_kernel<Mode, Smear, Input, TOut, false>(input, out, stream);
 }
 
+SizeType FDMTCudaEngine::fused_smem_limit() const {
+    constexpr std::string_view kMsg = "FDMT (cuda): fused shared memory limit";
+    const auto lim_smear = [&](auto mode_tag, auto chandm_tag, auto smear_tag) {
+        constexpr FDMTMode Mode  = decltype(mode_tag)::value;
+        constexpr bool HasChanDM = decltype(chandm_tag)::value;
+        constexpr bool Smear     = decltype(smear_tag)::value;
+        SizeType lim             = std::min(
+            gpu_utils::dynamic_smem_limit(
+                kernel_fused_levels<Mode, Smear, detail::FDMTInputF32, float,
+                                    HasChanDM>,
+                m_device_id, kMsg),
+            gpu_utils::dynamic_smem_limit(
+                kernel_fused_levels<Mode, Smear, detail::FDMTInputPacked, float,
+                                    HasChanDM>,
+                m_device_id, kMsg));
+        if (m_int_tree) {
+            lim = std::min({
+                lim,
+                gpu_utils::dynamic_smem_limit(
+                    kernel_fused_levels<Mode, Smear, detail::FDMTInputPacked,
+                                        uint8_t, HasChanDM>,
+                    m_device_id, kMsg),
+                gpu_utils::dynamic_smem_limit(
+                    kernel_fused_levels<Mode, Smear, detail::FDMTInputPacked,
+                                        uint16_t, HasChanDM>,
+                    m_device_id, kMsg),
+            });
+        }
+        return lim;
+    };
+    const auto lim_mode = [&](auto mode_tag, auto chandm_tag) {
+        return m_use_box_smearing
+                   ? lim_smear(mode_tag, chandm_tag, std::true_type{})
+                   : lim_smear(mode_tag, chandm_tag, std::false_type{});
+    };
+    using Full  = std::integral_constant<FDMTMode, FDMTMode::kFull>;
+    using Roll  = std::integral_constant<FDMTMode, FDMTMode::kRoll>;
+    using Valid = std::integral_constant<FDMTMode, FDMTMode::kValid>;
+    if (m_mode == FDMTMode::kFull) {
+        return lim_mode(Full{}, std::false_type{});
+    }
+    if (m_mode == FDMTMode::kRoll) {
+        return lim_mode(Roll{}, std::false_type{});
+    }
+    return m_chan_dm ? lim_mode(Valid{}, std::true_type{})
+                     : lim_mode(Valid{}, std::false_type{});
+}
+
 template <FDMTMode Mode,
           bool Smear,
           typename Input,
@@ -1085,7 +1141,7 @@ void FDMTCudaEngine::launch_fused_kernel(const Input& input,
                                          TOut* out,
                                          cudaStream_t stream) {
     const auto& f = *m_fused;
-    if (f.smem_bytes > kDefaultSmemBytes) {
+    if (f.smem_bytes > kDefaultSmemBytes - 1024) {
         gpu_utils::raise_dynamic_smem(
             kernel_fused_levels<Mode, Smear, Input, TOut, HasChanDM>,
             f.smem_bytes, "FDMT (cuda): fused levels shared-memory opt-in");

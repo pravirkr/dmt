@@ -280,18 +280,32 @@ public:
      * @p n_tail on are padding, never searched, and (the FDMT being causal)
      * they change no row before the stream's end. get_searched_nsamps()
      * then ends at the tail's n_tail-th sample, and no candidate reaches
-     * past it. Uses the constructor's kill mask. Device input is read on
+     * past it. @p kill_mask (host memory, empty or nchans entries, 0 =
+     * killed) is ANDed with the constructor's kill mask for @p tail (and
+     * drain()'s padding), as in execute(). Device input is read on
      * @p stream; the call returns host results, as drain().
      * @throws std::invalid_argument unless 1 <= n_tail <= nsamps.
      */
-    [[nodiscard]] CandidateResultView drain(std::span<const float> tail,
-                                            SizeType n_tail);
-    [[nodiscard]] CandidateResultView drain(std::span<const uint8_t> tail,
-                                            SizeType n_tail);
+    [[nodiscard]] CandidateResultView
+    drain(std::span<const float> tail,
+          SizeType n_tail,
+          std::span<const uint8_t> kill_mask = {});
+    [[nodiscard]] CandidateResultView
+    drain(std::span<const uint8_t> tail,
+          SizeType n_tail,
+          std::span<const uint8_t> kill_mask = {});
     [[nodiscard]] CandidateResultView
     drain(DeviceSpan<const float> tail, SizeType n_tail, Stream stream = {});
+    [[nodiscard]] CandidateResultView drain(DeviceSpan<const float> tail,
+                                            SizeType n_tail,
+                                            std::span<const uint8_t> kill_mask,
+                                            Stream stream = {});
     [[nodiscard]] CandidateResultView
     drain(DeviceSpan<const uint8_t> tail, SizeType n_tail, Stream stream = {});
+    [[nodiscard]] CandidateResultView drain(DeviceSpan<const uint8_t> tail,
+                                            SizeType n_tail,
+                                            std::span<const uint8_t> kill_mask,
+                                            Stream stream = {});
     /// FDMT output samples [0, n) whose trailing endpoints every row has
     /// searched (after drain(), the whole stream; for a chan_dm plan this is
     /// the raw FDMT count without subtracting

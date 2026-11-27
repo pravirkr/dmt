@@ -203,7 +203,7 @@ void bind_ddmt_fft(py::module_& mod) {
                          double tolerance, SizeType guard,
                          std::string_view backend, int device,
                          std::optional<float> f_ref) {
-                 const auto dms = copy_native_1d<float>(dm_arr, "dm_arr");
+                 const auto dms      = copy_native_1d<float>(dm_arr, "dm_arr");
                  const auto kill_vec = extract_kill_mask(kill_mask);
                  // Pure C++ from here: other Python threads run meanwhile.
                  const py::gil_scoped_release release;
@@ -378,7 +378,7 @@ void bind_ddmt_fft(py::module_& mod) {
                         packed.shape(), static_cast<SizeType>(packed.ndim())),
                     nsamps, true);
                 auto out = output_array(e, nsamps, e.get_nbeams() > 1,
-                                        "DDMTFFT.execute", out_arr);
+                                        "DDMTFFT.execute_time_major", out_arr);
                 const std::span<const uint8_t> in_span(packed.data(),
                                                        packed.size());
                 const std::span<float> out_span(out.mutable_data(), out.size());

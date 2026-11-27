@@ -267,7 +267,11 @@ install(
 )
 
 # Install headers
-install(DIRECTORY ${PROJECT_SOURCE_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(
+  DIRECTORY ${PROJECT_SOURCE_DIR}/include/
+  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  PATTERN ".DS_Store" EXCLUDE
+)
 # dmtConfig.cmake's find_dependency(FFTW) (static builds) needs the finder.
 install(FILES ${PROJECT_SOURCE_DIR}/cmake/FindFFTW.cmake DESTINATION ${DMT_CMAKE_PACKAGE_DIR})
 

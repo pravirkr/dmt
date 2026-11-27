@@ -203,8 +203,18 @@ void FDMTCudaEngine::configure_direct(SizeType requested) {
     }
     const auto per_channel =
         static_cast<SizeType>(span + detail::kDirectTile + 1) * sizeof(float);
-    const SizeType optin = max_optin_smem_bytes();
-    const auto rows      = m_nbeams * m_plan.get_nchans();
+    constexpr std::string_view kLimMsg =
+        "FDMT (cuda): direct levels shared memory limit";
+    const SizeType optin =
+        !packed ? gpu_utils::dynamic_smem_limit(detail::kernel_direct_level<>,
+                                                m_device_id, kLimMsg)
+        : m_search_u32 ? gpu_utils::dynamic_smem_limit(
+                             detail::kernel_direct_level<uint32_t, uint32_t>,
+                             m_device_id, kLimMsg)
+                       : gpu_utils::dynamic_smem_limit(
+                             detail::kernel_direct_level<uint32_t, uint64_t>,
+                             m_device_id, kLimMsg);
+    const auto rows = m_nbeams * m_plan.get_nchans();
     if (per_channel > optin ||
         rows * static_cast<SizeType>(plan.window) * sizeof(float) >
             (SizeType{256} << 20)) {
@@ -244,9 +254,13 @@ void FDMTCudaEngine::configure_direct(SizeType requested) {
     }
     d->pitch = d->window + static_cast<int>(m_chunk) + 1;
     d->prefix.resize(rows * static_cast<SizeType>(d->pitch));
-    const auto opt_in = [&](auto kernel) {
-        gpu_utils::raise_dynamic_smem(
-            kernel, d->smem, "FDMT (cuda): direct levels shared-memory opt-in");
+    const SizeType smem = d->smem;
+    const auto opt_in   = [&](auto kernel) {
+        d->kernel_setup.emplace_back([kernel, smem] {
+            gpu_utils::raise_dynamic_smem(
+                kernel, smem,
+                "FDMT (cuda): direct levels shared-memory opt-in");
+        });
     };
     if (!packed) {
         opt_in(detail::kernel_direct_level<>);
@@ -262,6 +276,9 @@ void FDMTCudaEngine::configure_direct(SizeType requested) {
     m_direct_filled = static_cast<SizeType>(d->window);
     m_direct        = std::move(d);
     m_fused.reset();
+    if (m_allocated) {
+        run_kernel_setup();
+    }
 }
 
 template <typename T, typename PtrFn>
@@ -468,7 +485,39 @@ void FDMTCudaEngine::build_skewed_direct_from_windows(
     const auto per_channel =
         static_cast<SizeType>(dplan.max_span + detail::kDirectTile + 1) *
         sizeof(float);
-    const SizeType optin = max_optin_smem_bytes();
+    constexpr std::string_view kLimMsg =
+        "FDMT (cuda): skewed direct levels shared memory limit";
+    const SizeType optin = [&]() -> SizeType {
+        if (!packed) {
+            return std::min(
+                gpu_utils::dynamic_smem_limit(
+                    detail::kernel_direct_level_skewed<float, float, float>,
+                    m_device_id, kLimMsg),
+                gpu_utils::dynamic_smem_limit(
+                    detail::kernel_direct_level_skewed<float, uint32_t,
+                                                       uint32_t, true, float>,
+                    m_device_id, kLimMsg));
+        }
+        if (m_search_nbits <= 8 && m_search_u32) {
+            return gpu_utils::dynamic_smem_limit(
+                detail::kernel_direct_level_skewed<uint8_t, uint32_t, uint32_t>,
+                m_device_id, kLimMsg);
+        }
+        if (m_search_nbits <= 8) {
+            return gpu_utils::dynamic_smem_limit(
+                detail::kernel_direct_level_skewed<uint8_t, uint32_t, uint64_t>,
+                m_device_id, kLimMsg);
+        }
+        if (m_search_u32) {
+            return gpu_utils::dynamic_smem_limit(
+                detail::kernel_direct_level_skewed<uint16_t, uint32_t,
+                                                   uint32_t>,
+                m_device_id, kLimMsg);
+        }
+        return gpu_utils::dynamic_smem_limit(
+            detail::kernel_direct_level_skewed<uint16_t, uint32_t, uint64_t>,
+            m_device_id, kLimMsg);
+    }();
     if (per_channel > optin) {
         return;
     }
@@ -499,10 +548,13 @@ void FDMTCudaEngine::build_skewed_direct_from_windows(
     } else {
         d->win_ring_u16.resize(total_ring, 0);
     }
-    const auto opt_in = [&](auto kernel) {
-        gpu_utils::raise_dynamic_smem(
-            kernel, d->smem,
-            "FDMT (cuda): skewed direct levels shared-memory opt-in");
+    const SizeType smem = d->smem;
+    const auto opt_in   = [&](auto kernel) {
+        d->kernel_setup.emplace_back([kernel, smem] {
+            gpu_utils::raise_dynamic_smem(
+                kernel, smem,
+                "FDMT (cuda): skewed direct levels shared-memory opt-in");
+        });
     };
     if (!packed) {
         opt_in(detail::kernel_direct_level_skewed<float, float, float>);
@@ -529,6 +581,9 @@ void FDMTCudaEngine::build_skewed_direct_from_windows(
     m_direct_filled = static_cast<SizeType>(d->window);
     m_direct        = std::move(d);
     m_fused.reset();
+    if (m_allocated) {
+        run_kernel_setup();
+    }
 }
 
 void FDMTCudaEngine::run_top(float* out,

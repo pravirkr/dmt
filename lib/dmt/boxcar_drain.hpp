@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <span>
 #include <stdexcept>
@@ -194,8 +195,39 @@ drain_stream(FDMTBoxcarEngine& engine,
             add(state.plane_counts[p], v.plane_counts[p]);
         }
     };
+    struct SearchStopGuard {
+        FDMTBoxcarEngine& eng;
+        bool committed{false};
+        explicit SearchStopGuard(FDMTBoxcarEngine& e) noexcept : eng(e) {}
+        ~SearchStopGuard() noexcept {
+            if (!committed) {
+                eng.set_search_stop(std::numeric_limits<uint64_t>::max());
+            }
+        }
+        SearchStopGuard(const SearchStopGuard&)            = delete;
+        SearchStopGuard& operator=(const SearchStopGuard&) = delete;
+        SearchStopGuard(SearchStopGuard&&)                 = delete;
+        SearchStopGuard& operator=(SearchStopGuard&&)      = delete;
+    };
+    struct ValidSamplesGuard {
+        FDMTBoxcarEngine& eng;
+        ValidSamplesGuard(FDMTBoxcarEngine& e, SizeType n_valid) noexcept
+            : eng(e) {
+            eng.set_valid_nsamps(n_valid);
+        }
+        ~ValidSamplesGuard() noexcept {
+            eng.set_valid_nsamps(std::numeric_limits<SizeType>::max());
+        }
+        ValidSamplesGuard(const ValidSamplesGuard&)            = delete;
+        ValidSamplesGuard& operator=(const ValidSamplesGuard&) = delete;
+        ValidSamplesGuard(ValidSamplesGuard&&)                 = delete;
+        ValidSamplesGuard& operator=(ValidSamplesGuard&&)      = delete;
+    };
     engine.set_search_stop(end);
+    SearchStopGuard stop_guard{engine};
     if (tail) {
+        const ValidSamplesGuard valid_guard(engine,
+                                            static_cast<SizeType>(n_tail));
         append(tail());
     }
     if (end > 0 && latency > 0) {
@@ -229,8 +261,9 @@ drain_stream(FDMTBoxcarEngine& engine,
     append(engine.flush());
     reduce_drained(state.candidates, counts, state.plane_counts, config,
                    planes);
-    state.drained = true;
-    state.end     = end;
+    state.drained        = true;
+    state.end            = end;
+    stop_guard.committed = true;
     CandidateResultView view;
     static_cast<CandidateCounts&>(view) = counts;
     view.candidates                     = state.candidates;

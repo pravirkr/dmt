@@ -471,12 +471,15 @@ public:
         return m_overlap.size();
     }
     void save_history(std::span<float> out) const override {
+        check_previous_block_finished();
         check_history(out.size(), "save_history");
         std::ranges::copy(m_overlap, out.begin());
     }
     void load_history(std::span<const float> in) override {
         check_history(in.size(), "load_history");
         std::ranges::copy(in, m_overlap.begin());
+        m_is_initialized = false;
+        m_view_valid     = false;
     }
 
 protected:

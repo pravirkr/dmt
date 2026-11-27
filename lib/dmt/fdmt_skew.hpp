@@ -257,19 +257,28 @@ public:
         m_allocated = true;
     }
 
-    void execute(std::span<const float> waterfall, std::span<float> dmt) {
+    void set_valid_nsamps(SizeType n_valid) noexcept {
+        m_valid_nsamps = n_valid;
+    }
+
+    void execute(std::span<const float> waterfall,
+                 std::span<float> dmt,
+                 SizeType n_valid = std::numeric_limits<SizeType>::max()) {
         check_sizes(waterfall.size(), m_nchans * m_nsamps, dmt.size());
         if (m_nbits != 32) {
             throw std::invalid_argument(
                 "FDMT skew: this engine was built for packed input");
         }
-        run(Input{.f32 = waterfall.data(), .ring_elem = sizeof(float)},
+        run(Input{.f32       = waterfall.data(),
+                  .ring_elem = sizeof(float),
+                  .n_valid   = std::min({n_valid, m_valid_nsamps, m_nsamps})},
             dmt.data());
     }
 
     void execute(std::span<const uint8_t> packed,
                  SizeType nbits,
-                 std::span<float> dmt) {
+                 std::span<float> dmt,
+                 SizeType n_valid = std::numeric_limits<SizeType>::max()) {
         if (m_nbits != 32 && nbits != m_nbits) {
             throw std::invalid_argument(fmt::format(
                 "FDMT skew: built for {}-bit input, got {}", m_nbits, nbits));
@@ -285,12 +294,15 @@ public:
         run(Input{.packed    = packed.data(),
                   .row_bytes = row_bytes,
                   .nbits     = nbits,
-                  .ring_elem = nbits == 16 ? SizeType{2} : SizeType{1}},
+                  .ring_elem = nbits == 16 ? SizeType{2} : SizeType{1},
+                  .n_valid   = std::min({n_valid, m_valid_nsamps, m_nsamps})},
             dmt.data());
     }
 
-    void execute_search(std::span<const float> waterfall,
-                        FDMTSearchSink& sink) {
+    void
+    execute_search(std::span<const float> waterfall,
+                   FDMTSearchSink& sink,
+                   SizeType n_valid = std::numeric_limits<SizeType>::max()) {
         if (waterfall.size() != m_nchans * m_nsamps) {
             throw std::invalid_argument(
                 fmt::format("FDMT skew: input size {} != {}", waterfall.size(),
@@ -300,13 +312,18 @@ public:
             throw std::invalid_argument(
                 "FDMT skew: this engine was built for packed input");
         }
-        run_search(Input{.f32 = waterfall.data(), .ring_elem = sizeof(float)},
-                   sink);
+        run_search(
+            Input{.f32       = waterfall.data(),
+                  .ring_elem = sizeof(float),
+                  .n_valid   = std::min({n_valid, m_valid_nsamps, m_nsamps})},
+            sink);
     }
 
-    void execute_search(std::span<const uint8_t> packed,
-                        SizeType nbits,
-                        FDMTSearchSink& sink) {
+    void
+    execute_search(std::span<const uint8_t> packed,
+                   SizeType nbits,
+                   FDMTSearchSink& sink,
+                   SizeType n_valid = std::numeric_limits<SizeType>::max()) {
         if (nbits != m_nbits || nbits == 32) {
             throw std::invalid_argument(fmt::format(
                 "FDMT skew: built for {}-bit input, got {}", m_nbits, nbits));
@@ -318,11 +335,13 @@ public:
                 fmt::format("FDMT skew: input size {} != {}", packed.size(),
                             m_nchans * row_bytes));
         }
-        run_search(Input{.packed    = packed.data(),
-                         .row_bytes = row_bytes,
-                         .nbits     = nbits,
-                         .ring_elem = m_ring_elem},
-                   sink);
+        run_search(
+            Input{.packed    = packed.data(),
+                  .row_bytes = row_bytes,
+                  .nbits     = nbits,
+                  .ring_elem = m_ring_elem,
+                  .n_valid   = std::min({n_valid, m_valid_nsamps, m_nsamps})},
+            sink);
     }
 
     /// One block of zero input (FDMTBoxcar::drain() padding), searched as
@@ -352,6 +371,7 @@ public:
         std::fill(m_ring_f.begin(), m_ring_f.end(), 0.0F);
         m_stream_pos   = 0;
         m_nonint_until = 0;
+        m_valid_nsamps = std::numeric_limits<SizeType>::max();
     }
 
     // ---- streaming history save/load ------------------------------------
@@ -580,6 +600,8 @@ private:
         SizeType row_bytes{0};
         SizeType nbits{32};
         SizeType ring_elem{sizeof(float)};
+        /// Valid samples per channel row (< m_nsamps on a short final block).
+        SizeType n_valid{std::numeric_limits<SizeType>::max()};
         /// All-zero block: f32/packed only select the path, never read.
         bool zero{false};
     };
@@ -1418,7 +1440,8 @@ private:
         BlockKind k;
         if (in.f32 != nullptr) {
             // Zeros are exact integers, as integer_valued() finds them.
-            k.int_block = in.zero || integer_valued(in.f32);
+            k.int_block = in.zero || integer_valued(in.f32, std::min(in.n_valid,
+                                                                     m_nsamps));
             k.int_sums  = k.int_block && m_stream_pos >= m_nonint_until;
         }
         return k;
@@ -1554,12 +1577,15 @@ private:
         sink.consume(l, in);
     }
 
-    /// True when every sample of the block is an integer small enough for
-    /// every level-0 box sum to stay below 2^31 (the uint32 running-sum
-    /// difference is then the exact box sum): |x| < 2^31 / L_max, L_max
-    /// the widest level-0 box.
-    [[nodiscard]] bool integer_valued(const float* wf) const noexcept {
-        const SizeType n  = m_nchans * m_nsamps;
+    /// True when every valid sample [0, n_valid) of each channel row is a
+    /// finite integer small enough for every level-0 box sum to stay below
+    /// 2^31 (the uint32 running-sum difference is then the exact box sum):
+    /// |x| < 2^31 / L_max, L_max the widest level-0 box.
+    [[nodiscard]] bool integer_valued(const float* wf,
+                                      SizeType n_valid) const noexcept {
+        if (n_valid == 0) {
+            return true;
+        }
         const auto& pc    = m_plan.get_container();
         const auto l_max  = static_cast<float>((pc.level0_boxes.empty()
                                                     ? pc.state_shape[0].dt_max
@@ -1567,11 +1593,28 @@ private:
                                                1);
         const float bound = 2147483648.0F / l_max;
         bool ok           = true;
+        if (n_valid >= m_nsamps) {
+            const SizeType n = m_nchans * m_nsamps;
 #pragma omp parallel for num_threads(m_nthreads) schedule(static)              \
     reduction(&& : ok)
-        for (SizeType i = 0; i < n; ++i) {
-            const float v = wf[i];
-            ok = ok && std::fabs(v) < bound && v == std::nearbyint(v);
+            for (SizeType i = 0; i < n; ++i) {
+                const float v = wf[i];
+                ok = ok && utils::is_finite_bits(v) && std::fabs(v) < bound &&
+                     v == std::nearbyint(v);
+            }
+            return ok;
+        }
+#pragma omp parallel for num_threads(m_nthreads) schedule(static)              \
+    reduction(&& : ok)
+        for (SizeType c = 0; c < m_nchans; ++c) {
+            const float* row = wf + (c * m_nsamps);
+            bool row_ok      = true;
+            for (SizeType t = 0; t < n_valid; ++t) {
+                const float v = row[t];
+                row_ok        = row_ok && utils::is_finite_bits(v) &&
+                                std::fabs(v) < bound && v == std::nearbyint(v);
+            }
+            ok = ok && row_ok;
         }
         return ok;
     }
@@ -1583,7 +1626,9 @@ private:
     }
 
     /// Writes samples [t0, t0 + n) of every channel at stream times
-    /// [m_stream_pos, m_stream_pos + n) of its causal ring.
+    /// [m_stream_pos, m_stream_pos + n) of its causal ring; samples at or
+    /// after in.n_valid (short-tail padding) are zero-filled without reading
+    /// the caller's padding.
     /// The input is converted to the ring's sample type, which is never
     /// narrower than the input's (ensure_ring()).
     void write_ring(const Input& in, SizeType t0, SizeType n) {
@@ -1593,16 +1638,21 @@ private:
                 throw std::logic_error("FDMT skew: unpack scratch too small");
             }
             auto* ring = reinterpret_cast<T*>(m_ring.data());
-            if (in.zero) {
+            const SizeType valid =
+                t0 < in.n_valid ? std::min(n, in.n_valid - t0) : SizeType{0};
+            const auto zero_span = [](T* dst, SizeType W, SizeType pos,
+                                      SizeType cnt) {
+                const SizeType first = std::min(cnt, W - pos);
+                std::memset(dst + pos, 0, first * sizeof(T));
+                std::memset(dst, 0, (cnt - first) * sizeof(T));
+            };
+            if (in.zero || valid == 0) {
                 // The bytes of a copied zero block (float +0.0, code 0).
 #pragma omp parallel for num_threads(m_nthreads) schedule(static)
                 for (SizeType c = 0; c < m_nchans; ++c) {
-                    const SizeType W     = m_chan_ring_len[c];
-                    const SizeType pos   = m_stream_pos % W;
-                    T* dst               = ring + m_chan_ring_off[c];
-                    const SizeType first = std::min(n, W - pos);
-                    std::memset(dst + pos, 0, first * sizeof(T));
-                    std::memset(dst, 0, (n - first) * sizeof(T));
+                    const SizeType W = m_chan_ring_len[c];
+                    zero_span(ring + m_chan_ring_off[c], W, m_stream_pos % W,
+                              n);
                 }
                 return;
             }
@@ -1623,12 +1673,15 @@ private:
                          m_thread_scratch_bytes));
                     bit_pack_utils::unpack_row(in.packed + (c * in.row_bytes) +
                                                    ((t0 * in.nbits) / 8),
-                                               in.nbits, n, tid_scratch);
+                                               in.nbits, valid, tid_scratch);
                     src = tid_scratch;
                 }
-                const SizeType first = std::min(n, W - pos);
+                const SizeType first = std::min(valid, W - pos);
                 std::memcpy(dst + pos, src, first * sizeof(T));
-                std::memcpy(dst, src + first, (n - first) * sizeof(T));
+                std::memcpy(dst, src + first, (valid - first) * sizeof(T));
+                if (valid < n) {
+                    zero_span(dst, W, (pos + valid) % W, n - valid);
+                }
             }
         });
     }
@@ -2388,6 +2441,7 @@ private:
     SizeType m_group_b_bytes{0};
     SizeType m_thread_scratch_bytes{0};
     SizeType m_stream_pos{0};
+    SizeType m_valid_nsamps{std::numeric_limits<SizeType>::max()};
     Memory m_mem;
     bool m_allocated{false};
 };
