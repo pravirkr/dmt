@@ -6,10 +6,12 @@
 #include <numeric>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "dmt/algorithms/cfdmt.hpp"
 #include "dmt/common/plans.hpp"
@@ -184,13 +186,57 @@ TEST_CASE("CohFDMTPlan rejects invalid configurations", "[cfdmt][cpu]") {
     CohFDMTConfig huge_overlap;
     huge_overlap.f_center     = 150.0F;
     huge_overlap.bw_sub       = 20.0F;
-    huge_overlap.nsub         = 1;
+    huge_overlap.nsub         = 2;
     huge_overlap.t_p          = 5.0E-8F;
     huge_overlap.dm_min       = 2000.0F;
     huge_overlap.dm_max       = 2000.0F;
     huge_overlap.nbin         = 0;
     huge_overlap.block_nsamps = 0;
     CHECK_THROWS_AS(CohFDMTPlan(huge_overlap), std::invalid_argument);
+    // One subband of one channel (n_p = 1): a clear CohFDMT error, not the
+    // fine FDMT's.
+    bad      = small_config();
+    bad.nsub = 1;
+    bad.t_p  = 1.0E-6F;
+    CHECK_THROWS_WITH(CohFDMTPlan(bad),
+                      Catch::Matchers::StartsWith("CohFDMT: nsub * n_p = 1"));
+    // Products beyond the index type are rejected before any allocation.
+    bad          = small_config();
+    bad.nsub     = SizeType{1} << 62U;
+    bad.bw_sub   = 1.0E-6F; // tbin 1 s
+    bad.f_center = 1.0E13F;
+    bad.t_p      = 4.0F; // n_p = 4
+    CHECK_THROWS_WITH(CohFDMTPlan(bad),
+                      Catch::Matchers::ContainsSubstring("overflows"));
+    bad              = small_config();
+    bad.block_nsamps = SizeType{1} << 61U;
+    CHECK_THROWS_WITH(CohFDMTPlan(bad),
+                      Catch::Matchers::ContainsSubstring("too large"));
+}
+
+TEST_CASE("CohFDMTPlan summary names the block for 80% valid output",
+          "[cfdmt][cpu]") {
+    const CohFDMTPlan auto_plan(small_config());
+    CHECK(auto_plan.summary().find("Note:") == std::string::npos);
+    // The shortest legal block: one FFT block of valid output.
+    const auto n_p = auto_plan.get_n_p();
+    const auto l =
+        (auto_plan.get_mbin() - (2 * (auto_plan.get_noverlap() / n_p))) * n_p;
+    auto cfg         = small_config();
+    cfg.block_nsamps = auto_plan.get_overlap_nsamps() + l;
+    const CohFDMTPlan short_plan(cfg);
+    REQUIRE(2 * short_plan.get_stride_nsamps() < short_plan.get_block_nsamps());
+    const auto text = short_plan.summary();
+    CAPTURE(text);
+    const auto at = text.find("Note: only ");
+    REQUIRE(at != std::string::npos);
+    // The block it names gives 80% valid output.
+    const auto key = text.find("block_nsamps=", at);
+    REQUIRE(key != std::string::npos);
+    cfg.block_nsamps = std::stoull(text.substr(key + 13));
+    const CohFDMTPlan p80(cfg);
+    CHECK(5 * p80.get_stride_nsamps() >= 4 * p80.get_block_nsamps());
+    CHECK(p80.summary().find("Note:") == std::string::npos);
 }
 
 TEST_CASE("CohFDMT recovers an injected dispersed impulse", "[cfdmt][cpu]") {
@@ -231,6 +277,18 @@ TEST_CASE("CohFDMT execute validates buffers", "[cfdmt][cpu]") {
 TEST_CASE("CohFDMT trimmed filter margin matches a 1e-6 margin",
           "[cfdmt][cpu]") {
     check_filter_leakage(Exec::cpu());
+}
+TEST_CASE("CohFDMT n_p = 1 with a 1026-point channel FFT", "[cfdmt][cpu]") {
+    check_np1_odd_fft_length(Exec::cpu());
+}
+TEST_CASE("CohFDMT single DM (dm_min == dm_max)", "[cfdmt][cpu]") {
+    check_single_dm(Exec::cpu());
+}
+TEST_CASE("CohFDMT 2-bit input recovers the pulse", "[cfdmt][cpu]") {
+    check_2bit(Exec::cpu());
+}
+TEST_CASE("CohFDMT smear_tol sets the coarse grid", "[cfdmt][cpu]") {
+    check_smear_tol(Exec::cpu());
 }
 
 TEST_CASE("CohFDMT estimate_memory equals the constructed instance (cpu)",

@@ -193,6 +193,35 @@ TEST_CASE("CohFDMT (gpu) trimmed filter margin matches a 1e-6 margin",
     test::cfdmt::check_filter_leakage(test::gpu_exec());
 }
 
+TEST_CASE("CohFDMT (gpu) n_p = 1 with a 1026-point channel FFT",
+          "[cfdmt_gpu][gpu]") {
+    if (!test::gpu_device_available()) {
+        SKIP("no GPU device");
+    }
+    test::cfdmt::check_np1_odd_fft_length(test::gpu_exec());
+}
+
+TEST_CASE("CohFDMT (gpu) single DM (dm_min == dm_max)", "[cfdmt_gpu][gpu]") {
+    if (!test::gpu_device_available()) {
+        SKIP("no GPU device");
+    }
+    test::cfdmt::check_single_dm(test::gpu_exec());
+}
+
+TEST_CASE("CohFDMT (gpu) 2-bit input recovers the pulse", "[cfdmt_gpu][gpu]") {
+    if (!test::gpu_device_available()) {
+        SKIP("no GPU device");
+    }
+    test::cfdmt::check_2bit(test::gpu_exec());
+}
+
+TEST_CASE("CohFDMT (gpu) smear_tol sets the coarse grid", "[cfdmt_gpu][gpu]") {
+    if (!test::gpu_device_available()) {
+        SKIP("no GPU device");
+    }
+    test::cfdmt::check_smear_tol(test::gpu_exec());
+}
+
 // --- CPU parity ---
 
 TEST_CASE("CohFDMT (gpu) host execute matches the CPU engine",

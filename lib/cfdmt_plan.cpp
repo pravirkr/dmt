@@ -8,6 +8,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -20,6 +21,7 @@
 #include "dmt/baseband_layout.hpp"
 #include "dmt/dm_utils.hpp"
 #include "dmt/fdmt_box_weights.hpp"
+#include "dmt/logging.hpp"
 
 namespace dmt::plans {
 
@@ -94,6 +96,15 @@ double disp_delay(double dm, double f_lo, double f_hi) {
 }
 
 SizeType ceil_to(SizeType v, SizeType m) { return ((v + m - 1) / m) * m; }
+
+// a * b, rejecting a product SizeType cannot hold.
+SizeType checked_mul(SizeType a, SizeType b, std::string_view what) {
+    if (a != 0 && b > std::numeric_limits<SizeType>::max() / a) {
+        throw std::invalid_argument(fmt::format(
+            "CohFDMT: {} ({} x {}) overflows the index type", what, a, b));
+    }
+    return a * b;
+}
 
 // Autocorrelation sum A(tau) of the per-channel weights of an FDMT row: a
 // box of s samples (box smearing) convolved with the boxcar of w samples.
@@ -291,11 +302,12 @@ public:
     }
 
     CohFDMTMemoryUsage memory_estimate() const noexcept {
-        const SizeType spectrum =
-            SizeType{2} * m_nfft * m_cfg.nsub * m_nbin * sizeof(ComplexType);
+        const SizeType spectrum  = spectrum_bytes(m_nfft);
         const SizeType waterfall = m_nchans * fdmt_nsamps() * sizeof(float);
+        // One working level and the root output of the fine FDMT.
         const SizeType fdmt =
-            (2 * fdmt_plan().get_buffer_size() * sizeof(float)) +
+            ((fdmt_plan().get_buffer_size() + fdmt_plan().get_dmt_size()) *
+             sizeof(float)) +
             (m_nchans * m_fine_dt_max * sizeof(float));
         const SizeType workspace =
             (m_nchans * m_mbin * 2 * sizeof(unsigned long long)) +
@@ -345,6 +357,14 @@ public:
             100.0 * static_cast<double>(m_block_nsamps - stride_nsamps()) /
                 static_cast<double>(m_block_nsamps),
             m_nout, m_max_delay);
+        if (low_useful_fraction()) {
+            out +=
+                fmt::format("Note: only {:.1f}% of the block is valid output; "
+                            "block_nsamps={} gives 80% (spectrum {:.1f} MiB)\n",
+                            100.0 * static_cast<double>(stride_nsamps()) /
+                                static_cast<double>(m_block_nsamps),
+                            block_nsamps_80(), mib(spectrum_bytes(m_nfft_80)));
+        }
         out += fmt::format(
             "DM: [{}, {}] pc/cc, {} coarse trials (step {:.6g}, residual "
             "intra-channel smear {:.3f} tsamp), {} fine rows each "
@@ -382,6 +402,7 @@ private:
     SizeType m_max_delay{};
     SizeType m_fine_dt_max{};
     SizeType m_fdmt_margin{};
+    SizeType m_nfft_80{}; // FFT blocks for 80% valid output
     float m_dm_step_coh{};
     float m_intra_smear{};
     std::vector<float> m_dm_grid_coh;
@@ -458,9 +479,23 @@ private:
         m_f_max            = static_cast<float>(f_max);
 
         // Channelisation: n_p channels per subband, output sample n_p * tbin.
-        m_tbin   = 1.0 / (static_cast<double>(c.bw_sub) * kHzPerMHz);
-        m_n_p    = nearest_smooth7(static_cast<double>(c.t_p) / m_tbin);
-        m_nchans = c.nsub * m_n_p;
+        m_tbin = 1.0 / (static_cast<double>(c.bw_sub) * kHzPerMHz);
+        const double n_p_exact  = static_cast<double>(c.t_p) / m_tbin;
+        constexpr double kMaxNp = 0x1p52; // exact in double and SizeType
+        if (!(n_p_exact < kMaxNp)) {
+            throw std::invalid_argument(
+                fmt::format("CohFDMT: t_p={} s is {} subband samples, too long",
+                            c.t_p, n_p_exact));
+        }
+        m_n_p    = nearest_smooth7(n_p_exact);
+        m_nchans = checked_mul(c.nsub, m_n_p, "nsub * n_p channels");
+        if (m_nchans < 2) {
+            // The fine FDMT needs two channels or more.
+            throw std::invalid_argument(fmt::format(
+                "CohFDMT: nsub * n_p = {} channel; need at least 2 (more "
+                "subbands, or t_p of 2 or more subband samples, {} s)",
+                m_nchans, 2.0 * m_tbin));
+        }
         const double bw_chan =
             static_cast<double>(c.bw_sub) / static_cast<double>(m_n_p);
         const double tsamp = static_cast<double>(m_n_p) * m_tbin;
@@ -569,6 +604,8 @@ private:
                     m_dm_grid_coh[k] + fine_dms[r];
             }
         }
+        static_cast<void>(
+            checked_mul(m_dm_grid_final.size(), m_nout, "output size"));
         m_taper = make_channel_taper(m_mbin);
     }
 
@@ -624,6 +661,7 @@ private:
     void choose_block(SizeType novc, SizeType lc, SizeType l, SizeType lead) {
         const auto& c        = m_cfg;
         const SizeType guard = m_max_delay + lead; // msamp - nout >= guard
+        bool capped          = false; // auto block held to the spectrum cap
         if (c.block_nsamps != 0) {
             if (c.block_nsamps <= 2 * m_noverlap ||
                 (c.block_nsamps - (2 * m_noverlap)) / l == 0) {
@@ -646,8 +684,9 @@ private:
             const SizeType nfft_cap =
                 kAutoSpectrumBytes /
                 (c.nsub * m_nbin * 2 * sizeof(ComplexType));
-            m_nfft = std::max(
-                nfft_min, std::min((target + guard + lc - 1) / lc, nfft_cap));
+            const SizeType nfft_want = (target + guard + lc - 1) / lc;
+            capped                   = nfft_cap < nfft_want;
+            m_nfft = std::max(nfft_min, std::min(nfft_want, nfft_cap));
         }
         m_msamp = m_nfft * lc;
         if (m_msamp < guard + lc) {
@@ -661,7 +700,46 @@ private:
         }
         m_nout         = ((m_msamp - guard) / lc) * lc;
         m_block_nsamps = (m_nfft * l) + (2 * m_noverlap);
+        // Throws if one block's bytes overflow.
+        static_cast<void>(
+            utils::baseband_block_bytes(c.format, m_block_nsamps, c.nsub));
         static_cast<void>(novc);
+
+        // Shortest block whose valid output (stride (nfft - g) l, g =
+        // ceil(guard / lc)) is >= 80% of it (nfft l + 2 noverlap).
+        const SizeType g = (guard + lc - 1) / lc;
+        m_nfft_80        = (5 * g) + (((8 * m_noverlap) + l - 1) / l);
+        while (5 * (m_nfft_80 - g) * l <
+               4 * ((m_nfft_80 * l) + (2 * m_noverlap))) {
+            ++m_nfft_80;
+        }
+        if (capped && low_useful_fraction()) {
+            logging::debug(
+                "CohFDMT: the automatic block ({} raw samples) is held to the "
+                "1 GiB spectrum target and only {:.1f}% of it is valid "
+                "output; block_nsamps={} gives 80% ({:.1f} GiB of spectrum)",
+                m_block_nsamps,
+                100.0 * static_cast<double>(stride_nsamps()) /
+                    static_cast<double>(m_block_nsamps),
+                block_nsamps_80(),
+                static_cast<double>(spectrum_bytes(m_nfft_80)) /
+                    static_cast<double>(SizeType{1} << 30U));
+        }
+    }
+
+    // Under half of the block is valid output.
+    [[nodiscard]] bool low_useful_fraction() const noexcept {
+        return 2 * stride_nsamps() < m_block_nsamps;
+    }
+
+    // block_nsamps of m_nfft_80 FFT blocks.
+    [[nodiscard]] SizeType block_nsamps_80() const noexcept {
+        return (m_nfft_80 * (m_mbin - (2 * (m_noverlap / m_n_p))) * m_n_p) +
+               (2 * m_noverlap);
+    }
+
+    [[nodiscard]] SizeType spectrum_bytes(SizeType nfft) const noexcept {
+        return SizeType{2} * nfft * m_cfg.nsub * m_nbin * sizeof(ComplexType);
     }
 };
 

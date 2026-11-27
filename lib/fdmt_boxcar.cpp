@@ -614,7 +614,7 @@ public:
         }
         for (auto it = cache.begin(); it != cache.end(); ++it) {
             if (it->first == mask) {
-                auto hit = *it;
+                auto hit = std::move(*it); // it is erased next
                 cache.erase(it);
                 cache.push_back(hit);
                 return hit.second;

@@ -281,6 +281,13 @@ inline void check_skipback_tiling(const Exec& exec) {
     }
     INFO("max |whole - tiled| / max|whole| = " << max_rel);
     CHECK(max_rel < 1.0E-5);
+    // The boundary pulse: its DM row, at the first sample of block 1.
+    const auto pk = find_peak(tiled, nb * nout);
+    CAPTURE(pk.row, pk.t, pk.value);
+    CHECK(std::abs(static_cast<double>(pk.row) -
+                   static_cast<double>(nearest_row(ps, dm))) <= 1.0);
+    CHECK(std::abs(static_cast<double>(pk.t) - static_cast<double>(nout)) <=
+          1.0);
 
     // Stateless: a block gives bit-identical output on a fresh engine and
     // after other blocks (no state leaks between calls or coarse trials).
@@ -383,6 +390,26 @@ inline void check_layout_independence(const Exec& exec) {
             utils::pack_baseband(noisy, cfg.nsub, n, cfg.format, 1.0F, 6, 10);
         const std::array<std::span<const uint8_t>, 2> groups{
             std::span<const uint8_t>(g0), std::span<const uint8_t>(g1)};
+        std::vector<float> out(s.get_dmt_size());
+        s.execute<uint8_t>(std::span<const std::span<const uint8_t>>(groups),
+                           out);
+        CHECK(out == reference);
+    }
+    SECTION("three subband groups") {
+        auto c           = cfg;
+        c.subband_groups = {3, 8, 5};
+        const CohFDMT s(c, exec);
+        std::vector<std::vector<uint8_t>> bytes;
+        SizeType begin = 0;
+        for (const SizeType g : c.subband_groups) {
+            bytes.push_back(utils::pack_baseband(noisy, cfg.nsub, n, cfg.format,
+                                                 1.0F, begin, g));
+            begin += g;
+        }
+        const std::array<std::span<const uint8_t>, 3> groups{
+            std::span<const uint8_t>(bytes[0]),
+            std::span<const uint8_t>(bytes[1]),
+            std::span<const uint8_t>(bytes[2])};
         std::vector<float> out(s.get_dmt_size());
         s.execute<uint8_t>(std::span<const std::span<const uint8_t>>(groups),
                            out);
@@ -581,6 +608,118 @@ inline void check_filter_leakage(const Exec& exec) {
     INFO("noverlap " << pt.get_noverlap() << " -> " << pl.get_noverlap()
                      << ", max |diff| / max = " << worst / peak);
     CHECK(worst <= 2.0E-3 * peak);
+}
+
+// Recovers one pulse at (dm, j0): peak within ~1 fine row and 1 sample.
+inline void check_recovers(const CohFDMT& search,
+                           double dm,
+                           double j0,
+                           float noise,
+                           float peak_counts) {
+    const auto& plan = search.get_plan();
+    const auto n     = plan.get_block_nsamps();
+    auto v           = pulse_stream(plan, n, dm, j0);
+    const float sc   = scale_for(v) * peak_counts / 100.0F;
+    if (noise > 0.0F) {
+        // Noise in quantised counts, added before the scale.
+        const auto w =
+            utils::simulate_baseband(plan.get_f_center(), plan.get_bw_sub(),
+                                     plan.get_nsub(), n, {}, noise / sc, 5, 4);
+        for (SizeType i = 0; i < v.size(); ++i) {
+            v[i] += w[i];
+        }
+    }
+    const auto dmt  = run(search, v, n, 0, sc);
+    const auto pk   = find_peak(dmt, plan.get_output_nsamps());
+    const auto& dms = plan.get_dm_grid_final();
+    const double fine_step =
+        plan.get_ndm_fine() > 1 ? std::abs(dms[1] - dms[0]) : 0.0;
+    CAPTURE(dm, j0, pk.row, pk.t, dms[pk.row], fine_step);
+    CHECK(std::abs(dms[pk.row] - dm) <= (1.5 * fine_step) + 1.0E-6);
+    CHECK(std::abs(static_cast<double>(pk.t) - j0) <= 1.0);
+}
+
+// One channel per subband (n_p = 1) and a manual channel FFT length of 1026
+// (2 mod 4): odd (subband, FFT block) tasks would start their forward
+// transform off the FFT alignment without padded spectrum rows.
+inline void check_np1_odd_fft_length(const Exec& exec) {
+    const CohFDMTConfig cfg{.f_center  = 1400.0F,
+                            .bw_sub    = 1.0F,
+                            .nsub      = 16,
+                            .t_p       = 1.0E-6F,
+                            .dm_min    = 1.0F,
+                            .dm_max    = 2.0F,
+                            .nbin      = 1026,
+                            .normalize = false,
+                            .format    = BasebandFormat{.order = "FTPRI"}};
+    const CohFDMT search(cfg, exec);
+    const auto& plan = search.get_plan();
+    REQUIRE(plan.get_n_p() == 1);
+    REQUIRE(plan.get_nbin() == 1026);
+    REQUIRE(plan.get_nfft() > 1); // odd tasks exist
+    const double dm =
+        plan.get_dm_grid_coh()[0] + (0.2 * plan.get_dm_step_coh());
+    check_recovers(search, dm, 100.0, 0.0F, 100.0F);
+}
+
+// dm_min == dm_max > 0: one coarse trial at that DM and the residual rows
+// dt = -1, 0, +1 around it (the fine window has a minimum of one step).
+inline void check_single_dm(const Exec& exec) {
+    auto cfg      = small_config();
+    cfg.dm_min    = 10.5F;
+    cfg.dm_max    = 10.5F;
+    cfg.normalize = false;
+    const CohFDMT search(cfg, exec);
+    const auto& plan = search.get_plan();
+    REQUIRE(plan.get_ndm_coh() == 1);
+    CHECK(plan.get_dm_grid_coh()[0] == 10.5F);
+    CHECK(plan.get_ndm_fine() == 3);
+    REQUIRE(plan.get_ndm() == 3);
+    const auto& dms = plan.get_dm_grid_final();
+    CHECK(dms[0] < 10.5F);
+    CHECK(dms[1] == 10.5F);
+    CHECK(dms[2] > 10.5F);
+    const auto nout = plan.get_output_nsamps();
+    const auto n    = plan.get_block_nsamps();
+    const auto v    = pulse_stream(plan, n, 10.5, 50.0);
+    const auto dmt  = run(search, v, n, 0, scale_for(v));
+    const auto pk   = find_peak(dmt, nout);
+    CHECK(pk.row == 1);
+    CHECK(std::abs(static_cast<double>(pk.t) - 50.0) <= 1.0);
+}
+
+// 2-bit input (four levels) with noise recovers the pulse.
+inline void check_2bit(const Exec& exec) {
+    auto cfg         = small_config();
+    cfg.format.nbits = 2;
+    const CohFDMT search(cfg, exec);
+    const auto& plan = search.get_plan();
+    const double dm =
+        plan.get_dm_grid_coh()[1] + (0.25 * plan.get_dm_step_coh());
+    check_recovers(search, dm, 150.0, 1.0F, 3.0F);
+}
+
+// A tighter and a looser smear_tol change the coarse grid as asked and
+// still recover the pulse.
+inline void check_smear_tol(const Exec& exec) {
+    const CohFDMTPlan base(small_config());
+    for (const float tol : {0.5F, 2.0F}) {
+        CAPTURE(tol);
+        auto cfg      = small_config();
+        cfg.smear_tol = tol;
+        cfg.normalize = false;
+        const CohFDMT search(cfg, exec);
+        const auto& plan = search.get_plan();
+        CHECK(plan.get_intra_channel_smear() <= tol);
+        if (tol < 1.0F) {
+            CHECK(plan.get_ndm_coh() > base.get_ndm_coh());
+        } else {
+            CHECK(plan.get_ndm_coh() < base.get_ndm_coh());
+        }
+        const auto& coh = plan.get_dm_grid_coh();
+        const double dm = coh[coh.size() / 2] + (0.4 * plan.get_dm_step_coh());
+        check_recovers(search, dm, 120.0, 0.0F, 100.0F);
+    }
 }
 
 } // namespace dmt::test::cfdmt

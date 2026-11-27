@@ -43,33 +43,28 @@ public:
                      plan.get_nfft(),
                      plan.get_noverlap(),
                      m_nthreads),
+          m_fstride(utils::fft_row_stride<ComplexType>(plan.get_nbin())),
           m_fwd(utils::FFTKind::kC2CForward,
                 plan.get_nbin(),
                 2,
-                plan.get_nbin(),
-                plan.get_nbin()),
-          m_mstride(utils::fft_row_stride<ComplexType>(plan.get_mbin())),
-          m_fdmt_plan(plan.get_f_min(),
-                      plan.get_f_max(),
-                      plan.get_nchans(),
-                      plan.get_fdmt_nsamps(),
-                      plan.get_tsamp(),
-                      static_cast<IndexType>(plan.get_fine_dt_max()),
-                      -static_cast<IndexType>(plan.get_fine_dt_max()),
-                      plan.get_config().dt_step,
-                      "valid") {
+                m_fstride,
+                m_fstride),
+          m_mstride(utils::fft_row_stride<ComplexType>(plan.get_mbin())) {
         // Deferred: the working buffers and the fine FDMT wait for
         // allocate(); the tables (chirp phases, taper) are built.
         m_deferred.defer(cfg.defer_allocation);
         if (cfg.defer_allocation) {
             m_fdmt_planned =
-                FDMT::estimate_memory(m_fdmt_plan, true, fdmt_exec()).usage;
+                FDMT::estimate_memory(fdmt_plan(), true, fdmt_exec()).usage;
         } else {
-            m_fdmt.emplace(m_fdmt_plan, true, fdmt_exec());
+            m_fdmt.emplace(fdmt_plan(), true, fdmt_exec());
         }
         const auto nchans = plan.get_nchans();
         const auto mbin   = plan.get_mbin();
-        m_deferred.resize(m_spec, m_unpacker.output_size());
+        // (sub, ifft, pol) rows of m_fstride: every row stays aligned for
+        // the FFT wrapper, whatever nbin.
+        m_deferred.resize(m_spec,
+                          plan.get_nsub() * plan.get_nfft() * 2 * m_fstride);
         m_phases          = cfdmt::make_chirp_phases(plan);
         const auto& taper = plan.get_channel_taper();
         const float scale = 1.0F / static_cast<float>(plan.get_nbin());
@@ -79,11 +74,14 @@ public:
         }
         m_mean.assign(nchans, 0.0F);
         m_inv_sigma.assign(nchans, 1.0F);
-        m_deferred.assign(
-            m_power, plan.get_nsub() * plan.get_nfft() * plan.get_n_p() * 2,
-            0.0F);
+        if (plan.get_config().normalize) {
+            m_deferred.assign(
+                m_power, plan.get_nsub() * plan.get_nfft() * plan.get_n_p() * 2,
+                0.0F);
+        }
         m_deferred.resize(m_waterfall, nchans * plan.get_fdmt_nsamps());
-        m_deferred.resize(m_fdmt_out, m_fdmt_plan.get_buffer_size());
+        // The fine FDMT keeps its own levels: only its root output here.
+        m_deferred.resize(m_fdmt_out, fdmt_plan().get_dmt_size());
         // Inverse transforms of up to kChunk FFT blocks (both pols) per call.
         const auto lc   = mbin - (2 * (plan.get_noverlap() / plan.get_n_p()));
         const auto nwin = ((plan.get_fdmt_nsamps() + lc - 1) / lc) + 1;
@@ -103,7 +101,7 @@ public:
         }
         const auto planned = memory_usage();
         m_deferred.materialize();
-        m_fdmt.emplace(m_fdmt_plan, true, fdmt_exec());
+        m_fdmt.emplace(fdmt_plan(), true, fdmt_exec());
         const auto got = memory_usage();
         if (got.spectrum != planned.spectrum ||
             got.waterfall != planned.waterfall || got.fdmt != planned.fdmt ||
@@ -127,6 +125,8 @@ public:
             // No reset_history(): the FDMT window's lead-in keeps its
             // history out of every cropped output (see CohFDMTPlan).
             coherent_trial(k);
+            // The facade allocates every engine it executes.
+            // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
             m_fdmt->execute(m_waterfall, m_fdmt_out);
             crop_rows(k, dmt);
         }
@@ -160,15 +160,15 @@ private:
     static constexpr SizeType kChunk = 8;
 
     utils::BasebandUnpackerCPU m_unpacker;
+    SizeType m_fstride;       // spectrum row pitch (>= nbin, aligned)
     utils::FFTWRowPlan m_fwd; // both pols of one FFT block
     SizeType m_mstride;
-    plans::FDMTPlan m_fdmt_plan;            // the fine FDMT's
     std::optional<algorithms::FDMT> m_fdmt; // built by allocate() if deferred
     FDMTMemoryUsage m_fdmt_planned{};       // its estimate until then
     SizeType m_chunk{1};
     std::vector<utils::FFTWRowPlan> m_inv; // [n - 1]: 2 * n inverse rows
 
-    utils::FFTVector<ComplexType> m_spec; // (sub, ifft, pol, nbin)
+    utils::FFTVector<ComplexType> m_spec; // (sub, ifft, pol, m_fstride)
     std::vector<float> m_power;           // (sub, ifft, chan, pol) partials
     cfdmt::ChirpPhases m_phases;
     std::vector<float> m_taper; // channel response / nbin
@@ -179,6 +179,11 @@ private:
     utils::FFTVector<ComplexType> m_scratch;
     /// Working buffers a deferred construction sized for allocate().
     planned::HostPlan m_deferred;
+
+    // The fine FDMT's plan, shared by all coarse trials.
+    [[nodiscard]] const plans::FDMTPlan& fdmt_plan() const noexcept {
+        return m_plan.get_fdmt_plan();
+    }
 
     [[nodiscard]] Exec fdmt_exec() const noexcept {
         return Exec::cpu(m_nthreads);
@@ -211,14 +216,15 @@ private:
         const auto nfft    = m_plan.get_nfft();
         const auto nbin    = m_plan.get_nbin();
         const auto mbin    = m_plan.get_mbin();
+        const auto fstride = m_fstride;
         const bool norm    = m_plan.get_config().normalize;
         ComplexType* spec  = m_spec.data();
         const float* taper = m_taper.data();
         float* power       = m_power.data();
 #pragma omp parallel for num_threads(m_nthreads) schedule(static)
         for (SizeType task = 0; task < nsub * nfft; ++task) {
-            ComplexType* row0 = spec + (task * 2 * nbin);
-            ComplexType* row1 = row0 + nbin;
+            ComplexType* row0 = spec + (task * 2 * fstride);
+            ComplexType* row1 = row0 + fstride;
             m_unpacker.unpack_block(groups, task / nfft, task % nfft, row0,
                                     row1);
             m_fwd.c2c(row0);
@@ -281,6 +287,7 @@ private:
         const auto nfft   = m_plan.get_nfft();
         const auto nbin   = m_plan.get_nbin();
         const auto mbin   = m_plan.get_mbin();
+        const auto fs     = m_fstride;
         const auto novc   = m_plan.get_noverlap() / n_p;
         const auto lc     = mbin - (2 * novc);
         const auto msamp  = static_cast<IndexType>(m_plan.get_msamp());
@@ -333,14 +340,13 @@ private:
             const float inv_sig = m_inv_sigma[c];
             const auto j_first  = static_cast<SizeType>(m_lo) / lc;
             const auto j_last   = static_cast<SizeType>(m_hi - 1) / lc;
-            float* dst          = row + (s - a);
             for (SizeType j0 = j_first; j0 <= j_last; j0 += m_chunk) {
                 const SizeType nj = std::min(m_chunk, j_last + 1 - j0);
                 for (SizeType q = 0; q < nj; ++q) {
                     const ComplexType* x =
-                        spec + ((((isub * nfft) + j0 + q) * 2) * nbin);
+                        spec + ((((isub * nfft) + j0 + q) * 2) * fs);
                     gather(x + off, x, chirp, rows + (2 * q * ms), head, mbin);
-                    gather(x + nbin + off, x + nbin, chirp,
+                    gather(x + fs + off, x + fs, chirp,
                            rows + (((2 * q) + 1) * ms), head, mbin);
                 }
                 m_inv[nj - 1].c2c(rows);
@@ -355,12 +361,15 @@ private:
                         continue;
                     }
                     const auto first = novc + static_cast<SizeType>(beg - m0);
+                    // Window index beg + s - a >= 0 (beg >= m_lo); form it
+                    // before the pointer (row + (s - a) can lie before row).
                     detect(reinterpret_cast<const float*>(rows + (2 * q * ms) +
                                                           first),
                            reinterpret_cast<const float*>(
                                rows + (((2 * q) + 1) * ms) + first),
-                           dst + beg, static_cast<SizeType>(end - beg), norm,
-                           mean, inv_sig);
+                           row + (beg + s - a),
+                           static_cast<SizeType>(end - beg), norm, mean,
+                           inv_sig);
                 }
             }
         }

@@ -57,8 +57,6 @@ py::object ddmt_packed_device(DDMT& ddmt,
         });
 }
 
-} // namespace
-
 /// Binds the constructor set shared by DDMT and SDMT.
 template <typename T, typename Cls> void def_ddmt_inits(Cls& cls) {
     cls.def(py::init([](float f_min, float f_max, SizeType nchans, float tsamp,
@@ -141,6 +139,8 @@ template <typename T, typename Cls> void def_ddmt_inits(Cls& cls) {
         on ``nsamps``; a GPU backend allocates nothing.
         )doc");
 }
+
+} // namespace
 
 void bind_ddmt(py::module_& mod) {
     py::class_<DDMTMemoryUsage>(mod, "DDMTMemoryUsage", R"doc(

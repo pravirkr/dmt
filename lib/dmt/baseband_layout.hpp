@@ -6,6 +6,7 @@
 #include <array>
 #include <bit>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -82,10 +83,19 @@ inline void validate_baseband_format(const BasebandFormat& format) {
 }
 
 /// Bytes of one block of @p nsamps samples and @p nsub subbands.
+/// @throws std::invalid_argument if the bit count overflows SizeType.
 [[nodiscard]] inline SizeType baseband_block_bytes(const BasebandFormat& format,
                                                    SizeType nsamps,
                                                    SizeType nsub) {
-    return (SizeType{4} * nsamps * nsub * format.nbits) / 8;
+    // 2 pols x (re, im) of nbits per sample and subband.
+    const auto bits = SizeType{4} * static_cast<SizeType>(format.nbits);
+    if (bits != 0 && nsub != 0 &&
+        nsamps > std::numeric_limits<SizeType>::max() / bits / nsub) {
+        throw std::invalid_argument(fmt::format(
+            "Baseband block of {} samples x {} subbands is too large", nsamps,
+            nsub));
+    }
+    return (bits * nsamps * nsub) / 8;
 }
 
 /// Element strides (in elements, not bytes) of each axis for a block of

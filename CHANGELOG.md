@@ -109,6 +109,12 @@ All notable changes to `dmt` are listed here. The format follows
   install no longer copies the Python module; FFTW is linked privately.
 - **Wheels:** Intel macOS wheels target `x86-64-v3` (AVX2/FMA) like the Linux
   x86-64 ones; `matplotlib` joins the `tests` extra.
+- **`CohFDMT` memory:** the fine FDMT's output buffer holds only its root
+  output (it held the largest tree level), and the channel-power partials are
+  allocated only with `normalize=True`, on the CPU and GPU.
+  `CohFDMTPlan.summary()` names the `block_nsamps` that gives 80% valid output
+  when under half of a block is valid, and debug logging says when the
+  automatic block is held to the 1 GiB spectrum target.
 - **CPU SIMD:** AVX2 and ARM64 NEON prefix scans and AVX2 streaming stores on
   the skewed-window path (previously AVX-512 only; ~18% faster packed
   `FDMTBoxcar` on an x86-64-v3 build of `cryopaf_low`); integer `|` SIMD
@@ -138,6 +144,11 @@ All notable changes to `dmt` are listed here. The format follows
   (`ValueError`) instead of failing with a CUDA error; `CohFDMTPlan`
   rejects automatic `nbin` > 2^20; NaN/inf saved history headers are rejected
   under `-ffast-math`.
+- `CohFDMT` (CPU) no longer forms an output pointer before the start of a
+  waterfall row, and keeps the forward-FFT rows aligned for a manual `nbin`
+  that is not a multiple of 8 (e.g. `n_p=1, nbin=1026`). `CohFDMTPlan` rejects
+  a single channel (`nsub * n_p < 2`) with a clear message instead of a fine
+  FDMT error, and rejects sizes that overflow the index type.
 - `generate_pure_frb` computes in double and no longer writes negative or
   spurious values into sample 0 when the sweep starts before the block.
 - CPU `FDMTFFT` stepper: `reset()` no longer keeps a pointer to the caller's

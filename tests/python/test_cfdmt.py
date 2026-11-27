@@ -109,6 +109,28 @@ class TestPlan:
         with pytest.raises(ValueError):
             CohFDMTPlan(cfg)
 
+    def test_single_channel_is_rejected_clearly(self) -> None:
+        # One subband of one channel (n_p = 1): a CohFDMT error, not the
+        # fine FDMT's.
+        cfg = CohFDMTConfig(400.0, 1.0, 1, 1.0e-6, 10.0, 11.0)
+        with pytest.raises(ValueError, match=r"^CohFDMT: nsub \* n_p = 1"):
+            CohFDMTPlan(cfg)
+
+    def test_single_dm_gives_three_rows(self) -> None:
+        plan = CohFDMTPlan(CohFDMTConfig(400.0, 1.0, 16, 4.0e-6, 10.5, 10.5))
+        assert plan.ndm_coh == 1
+        assert plan.ndm == 3
+        dms = plan.dm_grid_final
+        assert dms[0] < 10.5 == dms[1] < dms[2]
+
+    def test_smear_tol_sets_the_coarse_grid(self) -> None:
+        base = CohFDMTPlan(small_config())
+        tight = CohFDMTPlan(small_config(smear_tol=0.5))
+        loose = CohFDMTPlan(small_config(smear_tol=2.0))
+        assert tight.intra_channel_smear <= 0.5
+        assert loose.intra_channel_smear <= 2.0
+        assert tight.ndm_coh > base.ndm_coh > loose.ndm_coh
+
 
 class TestExecute:
     @pytest.mark.parametrize("where", ["centre", "edge"])
@@ -184,6 +206,79 @@ class TestExecute:
             dmtlib.pack_baseband(v, base.format, scale, sub_begin=6, sub_count=10),
         ]
         np.testing.assert_array_equal(grouped.execute(groups), ref)
+
+    @pytest.mark.parametrize(
+        "kw",
+        [
+            {"dm_min": 10.5, "dm_max": 10.5},
+            {"format": BasebandFormat(nbits=2)},
+            {"smear_tol": 0.5},
+            {"smear_tol": 2.0},
+        ],
+        ids=["single_dm", "2bit", "smear_tol_0.5", "smear_tol_2"],
+    )
+    def test_edge_configs_recover_the_pulse(self, kw: dict) -> None:
+        cfg = small_config()
+        for k, v in kw.items():
+            setattr(cfg, k, v)
+        coh = CohFDMT(cfg, 1)
+        plan = coh.plan
+        dm = float(plan.dm_grid_coh[plan.ndm_coh // 2])
+        j0 = 120.0
+        if cfg.format.nbits == 2:
+            # Four levels: a pulse of ~3 counts in unit noise.
+            v = pulse_voltages(plan, dm, j0)
+            scale = 3.0 / max(np.abs(v.real).max(), np.abs(v.imag).max())
+            noise = dmtlib.simulate_baseband(
+                plan.f_center,
+                plan.bw_sub,
+                plan.nsub,
+                plan.block_nsamps,
+                [],
+                1.0 / scale,
+                5,
+                1,
+            )
+            data = dmtlib.pack_baseband(v + noise, plan.format, scale)
+        else:
+            data = quantise(pulse_voltages(plan, dm, j0), plan.format)
+        out = coh.execute(data)
+        row, t = np.unravel_index(np.argmax(out), out.shape)
+        dms = plan.dm_grid_final
+        fine = abs(dms[1] - dms[0])
+        assert abs(dms[row] - dm) <= 1.5 * fine + 1e-6
+        assert abs(t - j0) <= 1
+
+    def test_np1_with_1026_point_channel_fft(self) -> None:
+        # n_p = 1 and nbin = 1026 (2 mod 4): odd FFT tasks need padded rows.
+        cfg = CohFDMTConfig(
+            1400.0, 1.0, 16, 1.0e-6, 1.0, 2.0, nbin=1026, normalize=False
+        )
+        coh = CohFDMT(cfg, 1)
+        plan = coh.plan
+        assert plan.n_p == 1
+        assert plan.nbin == 1026
+        dm = float(plan.dm_grid_coh[0] + 0.2 * plan.dm_step_coh)
+        out = coh.execute(quantise(pulse_voltages(plan, dm, 100.0), plan.format))
+        row, t = np.unravel_index(np.argmax(out), out.shape)
+        fine = plan.dm_grid_final[1] - plan.dm_grid_final[0]
+        assert abs(plan.dm_grid_final[row] - dm) <= 1.5 * fine
+        assert abs(t - 100.0) <= 1
+
+    def test_three_subband_groups(self) -> None:
+        base = small_config()
+        plan = CohFDMTPlan(base)
+        v = pulse_voltages(plan, plan.dm_grid_coh[1], 150.0, noise=0.5)
+        scale = 50.0 / np.abs(v).max()
+        ref = CohFDMT(base, 1).execute(dmtlib.pack_baseband(v, base.format, scale))
+        sizes = [3, 8, 5]
+        starts = np.cumsum([0, *sizes[:-1]])
+        groups = [
+            dmtlib.pack_baseband(v, base.format, scale, sub_begin=int(b), sub_count=n)
+            for b, n in zip(starts, sizes, strict=True)
+        ]
+        got = CohFDMT(small_config(subband_groups=sizes), 1).execute(groups)
+        np.testing.assert_array_equal(got, ref)
 
     def test_out_buffer_reuse_and_int8_input(self) -> None:
         coh = CohFDMT(small_config(), 1)

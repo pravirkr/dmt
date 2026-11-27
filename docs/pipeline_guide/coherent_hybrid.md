@@ -90,6 +90,10 @@ node1, ...])`. All subbands then go through one full-band FDMT.
 Splitting the FDMT per node would lose a factor `√8` in S/N.
 ```
 
+This `√8` assumes emission across all eight nodes. A burst confined to a
+fraction of the band gains S/N from a matching narrower window instead, so a
+full-band search alone can miss spectrally narrow bursts.
+
 ## Processing a file: stateless blocks
 
 The engine keeps no state between calls. Each `execute()` searches one
@@ -199,6 +203,11 @@ value is exact, not an estimate:
 
 So **`S/N = boxcar_sum / sqrt(variance_grid[i])`**, with no need for a
 calibration run on noise or on an array of ones.
+
+This holds for stationary, uncorrelated dual-polarisation Gaussian noise with
+every channel active. Dead or zero-filled channels, correlated polarisations
+and non-stationary or impulsive noise make the true variance differ from the
+grid.
 
 ```{note}
 The statistics are per-block, so a very bright pulse slightly raises its own

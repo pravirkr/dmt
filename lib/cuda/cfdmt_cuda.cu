@@ -308,15 +308,6 @@ public:
         : m_plan(plan),
           m_device_id(cfg.exec.device),
           m_nthreads(std::max(1, cfg.exec.nthreads)),
-          m_fdmt_plan(plan.get_f_min(),
-                      plan.get_f_max(),
-                      plan.get_nchans(),
-                      plan.get_fdmt_nsamps(),
-                      plan.get_tsamp(),
-                      static_cast<IndexType>(plan.get_fine_dt_max()),
-                      -static_cast<IndexType>(plan.get_fine_dt_max()),
-                      plan.get_config().dt_step,
-                      "valid"),
           m_host(cfg.exec.device, cfg.exec.nthreads) {
         gpu_utils::set_device(m_device_id);
         {
@@ -329,9 +320,9 @@ public:
                                plan.get_noverlap(), m_device_id);
             if (cfg.defer_allocation) {
                 m_fdmt_planned =
-                    FDMT::estimate_memory(m_fdmt_plan, true, fdmt_exec()).usage;
+                    FDMT::estimate_memory(fdmt_plan(), true, fdmt_exec()).usage;
             } else {
-                m_fdmt.emplace(m_fdmt_plan, true, fdmt_exec());
+                m_fdmt.emplace(fdmt_plan(), true, fdmt_exec());
             }
             initialise(cfg);
         }
@@ -348,7 +339,7 @@ public:
                                      gpu_utils::kAdviceBlocks);
         try {
             m_deferred.materialize();
-            m_fdmt.emplace(m_fdmt_plan, true, fdmt_exec());
+            m_fdmt.emplace(fdmt_plan(), true, fdmt_exec());
         } catch (const std::logic_error&) {
             throw; // a plan check, not an allocation
         } catch (const std::exception& e) {
@@ -484,9 +475,13 @@ private:
     // them: a pending buffer leaves the list when it is destroyed).
     gpu_utils::PendingList m_deferred;
     std::optional<utils::BasebandUnpackerCUDA> m_unpacker;
-    plans::FDMTPlan m_fdmt_plan;            // the fine FDMT's
     std::optional<algorithms::FDMT> m_fdmt; // built by allocate() if deferred
     FDMTMemoryUsage m_fdmt_planned{};       // its estimate until then
+
+    // The fine FDMT's plan, shared by all coarse trials.
+    [[nodiscard]] const plans::FDMTPlan& fdmt_plan() const noexcept {
+        return m_plan.get_fdmt_plan();
+    }
 
     [[nodiscard]] Exec fdmt_exec() const noexcept {
         return Exec{.backend  = detail::kGPUBackend,
@@ -573,9 +568,12 @@ private:
                     utils::BasebandAxis::kFreq;
 
         m_spec.reserve(m_unpacker->output_size());
-        m_power.reserve(nsub * nfft * n_p * 2);
+        if (m_plan.get_config().normalize) {
+            m_power.reserve(nsub * nfft * n_p * 2);
+        }
         m_waterfall.reserve(nchans * m_plan.get_fdmt_nsamps());
-        m_fdmt_out.reserve(m_fdmt_plan.get_buffer_size());
+        // The fine FDMT keeps its own levels: only its root output here.
+        m_fdmt_out.reserve(fdmt_plan().get_dmt_size());
         m_chirp.reserve(nchans * mbin);
 
         const auto ph = cfdmt::make_chirp_phases(m_plan);
@@ -961,7 +959,7 @@ private:
             m_fdmt->execute(
                 DeviceSpan<const float>(m_waterfall.data(), nchans * nf),
                 DeviceSpan<float>(m_fdmt_out.data(),
-                                  m_fdmt_plan.get_buffer_size()),
+                                  fdmt_plan().get_dmt_size()),
                 Stream{stream});
             crop_kernel<<<grid_for(nfine * nout), kBlock, 0, stream>>>(
                 m_fdmt_out.data(), m_offsets.data(), nfine, nf, nout,
