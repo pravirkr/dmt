@@ -2,10 +2,11 @@ name: GitHub CI
 
 # Pull requests are the gate; main only reports and warms caches.
 #   • pull_request: pre-commit, C++ tests (oldest GCC and Clang, newest GCC,
-#     which also runs clang-tidy), Python tests with coverage, ASan+UBSan.
+#     which also runs clang-tidy), Python tests with coverage.
 #   • push to main: C++ tests and Python again (they save the ccache entries
 #     every PR restores, and upload main's Python coverage), plus C++ coverage.
-#   • workflow_dispatch: everything.
+#   • workflow_dispatch: everything above.
+# ASan+UBSan is sanitizers.yml, run by hand on a PR branch before merging.
 # Every job should finish within 10 minutes; the 12-minute timeouts are
 # headroom, not budget. Linux only: macOS is checked by local development.
 on:
@@ -157,37 +158,6 @@ jobs:
           fail_ci_if_error: ${{ github.event_name == 'push' }}
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
-
-  # ASan + UBSan on the C++ tests (no Python bindings), Debug assertions at
-  # -O2 (CMakePresets.json). Pull requests only. No ccache: main never runs
-  # this job, so there is no entry for a PR to restore.
-  sanitizers:
-    name: Sanitizers (ASan+UBSan, gcc-15, -O2)
-    if: github.event_name != 'push'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 12
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-cpp
-        with:
-          packages: gcc-15 g++-15 libomp-dev catch2
-          cache-key: sanitizers-gcc-15
-          ccache: "false"
-
-      - name: Configure
-        env:
-          CC: gcc-15
-          CXX: g++-15
-        run: cmake --preset asan
-
-      - name: Build
-        run: cmake --build --preset asan --parallel "$(nproc --all)"
-
-      - name: Run tests under ASan/UBSan
-        env:
-          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
-          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-        run: ctest --preset asan --parallel "$(nproc --all)"
 
   # gcov (Debug, -O1) uploaded to Codecov. A report, not a gate: main only.
   cpp-coverage:

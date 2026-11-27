@@ -155,8 +155,8 @@ if(DMT_HAS_WNO_MISSING_DESIGNATED_FIELD_INITIALIZERS)
     INTERFACE $<$<NOT:$<COMPILE_LANGUAGE:CUDA,HIP>>:-Wno-missing-designated-field-initializers>
   )
 endif()
-# Debug builds keep assertions at -O1 by default. The asan preset uses -O2:
-# the sanitizers work at any level, and the suite fits CI's time limit.
+# Debug builds (also the asan and coverage presets) keep assertions at -O1,
+# the level the sanitizers are designed for.
 set(DMT_DEBUG_OPT_LEVEL
     "-O1"
     CACHE STRING "Optimization flag for Debug builds (also coverage builds)"

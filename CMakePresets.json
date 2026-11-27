@@ -62,11 +62,10 @@
     {
       "name": "asan",
       "displayName": "ASan",
-      "description": "ASan/UBSan, Debug asserts at -O2, CPU only, no Python; build-asan/",
+      "description": "ASan/UBSan, Debug (-O1), CPU only, no Python; build-asan/",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "DMT_DEBUG_OPT_LEVEL": "-O2",
         "DMT_GPU": "OFF",
         "DMT_BUILD_PYTHON": "OFF",
         "DMT_ENABLE_NATIVE_ARCH": "OFF",
