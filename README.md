@@ -147,7 +147,7 @@ Requirements, CMake options and development installs are in the
 
 ## 📊 Benchmarks
 
-Measured with dmt 0.8.0 on one node: an AMD EPYC 9654 (up to 8 threads, one per
+Measured with dmt 0.9.0 on one node: an AMD EPYC 9654 (up to 8 threads, one per
 CCD) and an NVIDIA L40S (device-resident data). The `meerkat_lband`
 preset is a typical L-band survey setup: 4096 channels at 856–1712 MHz and
 612.48 µs, processed as a stream of 20.1 s blocks, with up to 4057 DM trials

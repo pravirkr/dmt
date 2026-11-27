@@ -6,6 +6,8 @@ All notable changes to `dmt` are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-27
+
 ### Added
 
 - **Memory estimation:** static `estimate_memory(...)` across all engines (C++
@@ -296,7 +298,8 @@ their changes are included here.
 
 - FDMT on the CPU (`FDMTCPU`) and GPU (`FDMTGPU`) with Python bindings.
 
-[Unreleased]: https://github.com/pravirkr/dmt/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/pravirkr/dmt/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/pravirkr/dmt/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/pravirkr/dmt/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/pravirkr/dmt/compare/v0.2.0...v0.7.0
 [0.2.0]: https://github.com/pravirkr/dmt/releases/tag/v0.2.0
